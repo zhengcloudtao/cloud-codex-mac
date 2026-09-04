@@ -145,4 +145,56 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertFalse(model.messages.contains { $0.id == "turn-progress" })
         XCTAssertEqual(model.messages.last?.id, "answer-external")
     }
+
+    func testActiveWriterFailureRollsBackOptimisticMessagesAndPreservesDraft() {
+        let model = AppModel()
+        model.selectedThreadID = "thread-external"
+        model.isSending = true
+        model.messages = [
+            ChatMessage(id: "existing", role: .assistant, text: "此前回复"),
+            ChatMessage(id: "local-message", role: .user, text: "继续处理"),
+            ChatMessage(
+                id: "turn-progress",
+                role: .activity,
+                text: "正在分析任务并准备执行…",
+                isStreaming: true,
+                activityKind: .status,
+                activityTitle: "Codex 正在处理",
+                activityStatus: "进行中"
+            )
+        ]
+
+        let error = NSError(
+            domain: "CloudCodexTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Thread is held by an ACTIVE WRITER"]
+        )
+        model.handleSendFailure(
+            error,
+            threadID: "thread-external",
+            localMessageID: "local-message",
+            text: "继续处理",
+            outgoingAttachments: []
+        )
+
+        XCTAssertFalse(model.isSending)
+        XCTAssertNil(model.activeTurnID)
+        XCTAssertEqual(model.composerText, "继续处理")
+        XCTAssertEqual(model.messages.map(\.id), ["existing"])
+        XCTAssertFalse(model.messages.contains { $0.activityStatus == "发送失败" })
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(
+            model.threadOwnershipNotice,
+            "此会话已在 Codex 主应用中打开。关闭原窗口后，再点击发送即可继续。"
+        )
+    }
+
+    func testActiveWriterErrorRecognitionIsCaseInsensitive() {
+        let error = NSError(
+            domain: "CloudCodexTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Thread is held by an ACTIVE WRITER"]
+        )
+        XCTAssertTrue(AppModel.isActiveWriterError(error))
+    }
 }

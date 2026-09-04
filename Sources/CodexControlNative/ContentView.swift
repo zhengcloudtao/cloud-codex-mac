@@ -866,6 +866,29 @@ private struct Composer: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
+                if let notice = model.threadOwnershipNotice {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "macwindow.badge.plus")
+                            .foregroundStyle(.orange)
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button {
+                            model.threadOwnershipNotice = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .help("关闭提示")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+                }
+
                 if !model.attachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {

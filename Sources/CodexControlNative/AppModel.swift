@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     @Published var isLoading = false
     @Published var isSending = false
     @Published var isExternalThreadProcessing = false
+    @Published var threadOwnershipNotice: String?
     @Published var hasMoreThreads = false
     @Published var errorMessage: String?
     @Published var showingNewThread = false
@@ -231,6 +232,7 @@ final class AppModel: ObservableObject {
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
         isExternalThreadProcessing = false
+        threadOwnershipNotice = nil
         selectedFolder = path
         selectedThreadID = nil
         threads = []
@@ -247,6 +249,7 @@ final class AppModel: ObservableObject {
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
         isExternalThreadProcessing = false
+        threadOwnershipNotice = nil
         selectedThreadID = id
         guard let id else {
             messages = []
@@ -293,11 +296,24 @@ final class AppModel: ObservableObject {
         let outgoingAttachments = attachments
         guard (!text.isEmpty || !outgoingAttachments.isEmpty),
               let id = selectedThreadID, !isSending, !isExternalThreadProcessing else { return }
+
+        // Refresh once immediately before sending. The background monitor may be
+        // a few seconds behind when the same task was just started in Codex.
+        if let snapshot = try? await client.readLatestThreadActivity(id),
+           selectedThreadID == id, !isSending {
+            applyExternalActivitySnapshot(snapshot, threadID: id)
+            if isExternalThreadProcessing {
+                threadOwnershipNotice = "此任务正在 Codex 主应用中处理，完成后会自动同步到这里。"
+                return
+            }
+        }
+
         speech.stop()
         composerText = ""
         attachments = []
         isSending = true
         isExternalThreadProcessing = false
+        threadOwnershipNotice = nil
         let localAttachments = outgoingAttachments.map {
             ChatMessageAttachment(
                 path: $0.url.path,
@@ -305,8 +321,9 @@ final class AppModel: ObservableObject {
                 kind: $0.isImage ? .image : .file
             )
         }
+        let localMessageID = "local-\(UUID().uuidString)"
         messages.append(.init(
-            id: "local-\(UUID().uuidString)",
+            id: localMessageID,
             role: .user,
             text: text,
             attachments: localAttachments
@@ -323,17 +340,53 @@ final class AppModel: ObservableObject {
                 permissions: selectedPermissionID
             )
         } catch {
-            isSending = false
-            activeTurnID = nil
-            finishTurnProgress(status: "发送失败")
-            composerText = text
-            attachments = outgoingAttachments
-            if error.localizedDescription.contains("active writer") {
-                errorMessage = "这个会话目前正在 Codex 主应用中运行。请先让原窗口中的任务结束或关闭，再从这里继续发送。"
-            } else {
-                errorMessage = error.localizedDescription
-            }
+            handleSendFailure(
+                error,
+                threadID: id,
+                localMessageID: localMessageID,
+                text: text,
+                outgoingAttachments: outgoingAttachments
+            )
         }
+    }
+
+    func handleSendFailure(
+        _ error: Error,
+        threadID: String,
+        localMessageID: String,
+        text: String,
+        outgoingAttachments: [ComposerAttachment]
+    ) {
+        rollbackOptimisticSend(
+            threadID: threadID,
+            localMessageID: localMessageID,
+            text: text,
+            outgoingAttachments: outgoingAttachments
+        )
+        if Self.isActiveWriterError(error) {
+            errorMessage = nil
+            threadOwnershipNotice = "此会话已在 Codex 主应用中打开。关闭原窗口后，再点击发送即可继续。"
+        } else {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func rollbackOptimisticSend(
+        threadID: String,
+        localMessageID: String,
+        text: String,
+        outgoingAttachments: [ComposerAttachment]
+    ) {
+        isSending = false
+        activeTurnID = nil
+        messages.removeAll { $0.id == localMessageID || $0.id == "turn-progress" }
+        guard selectedThreadID == threadID else { return }
+        composerText = text
+        attachments = outgoingAttachments
+    }
+
+    static func isActiveWriterError(_ error: Error) -> Bool {
+        error.localizedDescription.localizedCaseInsensitiveContains("active writer")
     }
 
     func cancelTurn() async {
