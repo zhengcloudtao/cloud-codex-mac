@@ -35,6 +35,8 @@ struct ContentView: View {
         )) {
             Section {
                 Label("最近会话", systemImage: "tray.full")
+                    .padding(.vertical, 6)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
                     .tag("__all__")
             } header: {
                 HStack {
@@ -48,10 +50,14 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .help("管理分类")
                 }
+                .padding(.bottom, 4)
             }
+
+            sidebarSectionSpacer
 
             ForEach(model.workspaceCategories) { category in
                 workspaceCategorySection(category)
+                sidebarSectionSpacer
             }
 
             Section {
@@ -80,6 +86,15 @@ struct ContentView: View {
             .padding(12)
             .background(.bar)
         }
+    }
+
+    private var sidebarSectionSpacer: some View {
+        Color.clear
+            .frame(height: 8)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .accessibilityHidden(true)
     }
 
     private func workspaceCategorySection(_ category: WorkspaceCategory) -> some View {
@@ -120,6 +135,9 @@ struct ContentView: View {
             Image(systemName: "folder")
                 .foregroundStyle(.blue)
         }
+        .padding(.leading, 14)
+        .padding(.vertical, 6)
+        .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
         .tag(folder.path)
         .help(folder.path)
         .draggable(folder.path) {
@@ -152,6 +170,8 @@ struct ContentView: View {
     private func categoryDropHeader(_ title: String, systemImage: String, categoryID: String?) -> some View {
         Label(title, systemImage: systemImage)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 7)
+            .padding(.bottom, 5)
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { paths, _ in
                 model.assignFolders(paths, to: categoryID)
@@ -165,6 +185,8 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+            .padding(.leading, 14)
+            .padding(.vertical, 5)
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { paths, _ in
                 model.assignFolders(paths, to: categoryID)
