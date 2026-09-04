@@ -60,11 +60,15 @@ final class AppModel: ObservableObject {
     }
 
     var uncategorizedFolders: [WorkspaceFolder] {
-        folderCatalog.filter { workspaceOrganization.categoryID(forFolder: $0.path) == nil }
+        workspaceOrganization.orderedFolders(
+            folderCatalog.filter { workspaceOrganization.categoryID(forFolder: $0.path) == nil }
+        )
     }
 
     func folders(inCategory categoryID: String) -> [WorkspaceFolder] {
-        folderCatalog.filter { workspaceOrganization.categoryID(forFolder: $0.path) == categoryID }
+        workspaceOrganization.orderedFolders(
+            folderCatalog.filter { workspaceOrganization.categoryID(forFolder: $0.path) == categoryID }
+        )
     }
 
     func categoryID(forFolder path: String) -> String? {
@@ -73,6 +77,16 @@ final class AppModel: ObservableObject {
 
     func assignFolders(_ paths: [String], to categoryID: String?) {
         workspaceOrganization.assignFolders(paths, to: categoryID)
+        saveWorkspaceOrganization()
+    }
+
+    func moveFolders(_ paths: [String], to categoryID: String?, before targetPath: String? = nil) {
+        workspaceOrganization.moveFolders(
+            paths,
+            to: categoryID,
+            before: targetPath,
+            knownFolderPaths: folderCatalog.map(\.path)
+        )
         saveWorkspaceOrganization()
     }
 
@@ -117,6 +131,16 @@ final class AppModel: ObservableObject {
 
     func moveCategory(_ id: String, offset: Int) {
         workspaceOrganization.moveCategory(id: id, offset: offset)
+        saveWorkspaceOrganization()
+    }
+
+    func moveCategory(_ id: String, relativeTo targetID: String, placeAfter: Bool) {
+        workspaceOrganization.moveCategory(id: id, relativeTo: targetID, placeAfter: placeAfter)
+        saveWorkspaceOrganization()
+    }
+
+    func moveCategoryToEnd(_ id: String) {
+        workspaceOrganization.moveCategoryToEnd(id: id)
         saveWorkspaceOrganization()
     }
 

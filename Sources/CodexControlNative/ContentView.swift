@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    private let categoryDragPrefix = "cloudcodex-category://"
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -50,6 +51,7 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .help("管理分类")
                 }
+                .padding(.trailing, 12)
                 .padding(.bottom, 4)
             }
 
@@ -145,17 +147,27 @@ struct ContentView: View {
                 .padding(8)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         }
+        .dropDestination(for: String.self) { values, _ in
+            let paths = folderPaths(from: values)
+            guard !paths.isEmpty, !paths.contains(folder.path) else { return false }
+            model.moveFolders(
+                paths,
+                to: model.categoryID(forFolder: folder.path),
+                before: folder.path
+            )
+            return true
+        }
         .contextMenu {
             Menu("移动到分类") {
                 Button {
-                    model.assignFolders([folder.path], to: nil)
+                    model.moveFolders([folder.path], to: nil)
                 } label: {
                     Label("未分类", systemImage: model.categoryID(forFolder: folder.path) == nil ? "checkmark" : "tray")
                 }
                 Divider()
                 ForEach(model.workspaceCategories) { category in
                     Button {
-                        model.assignFolders([folder.path], to: category.id)
+                        model.moveFolders([folder.path], to: category.id)
                     } label: {
                         Label(
                             category.name,
@@ -167,17 +179,27 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
     private func categoryDropHeader(_ title: String, systemImage: String, categoryID: String?) -> some View {
-        Label(title, systemImage: systemImage)
+        let header = Label(title, systemImage: systemImage)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 7)
             .padding(.bottom, 5)
             .contentShape(Rectangle())
-            .dropDestination(for: String.self) { paths, _ in
-                model.assignFolders(paths, to: categoryID)
-                return !paths.isEmpty
+            .dropDestination(for: String.self) { paths, location in
+                handleCategoryDrop(paths, targetCategoryID: categoryID, location: location)
             }
             .help("可将工作区拖到此分类")
+
+        if let categoryID {
+            header.draggable(categoryDragPrefix + categoryID) {
+                Label(title, systemImage: "folder.fill")
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            }
+        } else {
+            header
+        }
     }
 
     private func categoryDropPlaceholder(_ title: String, categoryID: String?) -> some View {
@@ -189,9 +211,47 @@ struct ContentView: View {
             .padding(.vertical, 5)
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { paths, _ in
-                model.assignFolders(paths, to: categoryID)
-                return !paths.isEmpty
+                let folderPaths = folderPaths(from: paths)
+                guard !folderPaths.isEmpty else { return false }
+                model.moveFolders(folderPaths, to: categoryID)
+                return true
             }
+    }
+
+    private func handleCategoryDrop(
+        _ values: [String],
+        targetCategoryID: String?,
+        location: CGPoint
+    ) -> Bool {
+        if let draggedCategoryID = values.compactMap(categoryID(from:)).first {
+            if let targetCategoryID, draggedCategoryID != targetCategoryID {
+                model.moveCategory(
+                    draggedCategoryID,
+                    relativeTo: targetCategoryID,
+                    placeAfter: location.y > 15
+                )
+                return true
+            } else if targetCategoryID == nil {
+                model.moveCategoryToEnd(draggedCategoryID)
+                return true
+            }
+        }
+        if values.contains(where: { $0.hasPrefix(categoryDragPrefix) }) {
+            return false
+        }
+        let paths = folderPaths(from: values)
+        guard !paths.isEmpty else { return false }
+        model.moveFolders(paths, to: targetCategoryID)
+        return true
+    }
+
+    private func folderPaths(from values: [String]) -> [String] {
+        values.filter { !$0.hasPrefix(categoryDragPrefix) }
+    }
+
+    private func categoryID(from value: String) -> String? {
+        guard value.hasPrefix(categoryDragPrefix) else { return nil }
+        return String(value.dropFirst(categoryDragPrefix.count))
     }
 
     private var categoryManagerSheet: some View {

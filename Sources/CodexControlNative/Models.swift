@@ -64,6 +64,29 @@ struct WorkspaceCategory: Identifiable, Codable, Hashable {
 struct WorkspaceOrganization: Codable, Equatable {
     var categories: [WorkspaceCategory] = []
     var folderAssignments: [String: String] = [:]
+    var folderOrder: [String] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case categories
+        case folderAssignments
+        case folderOrder
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        categories = try container.decodeIfPresent([WorkspaceCategory].self, forKey: .categories) ?? []
+        folderAssignments = try container.decodeIfPresent([String: String].self, forKey: .folderAssignments) ?? [:]
+        folderOrder = try container.decodeIfPresent([String].self, forKey: .folderOrder) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(categories, forKey: .categories)
+        try container.encode(folderAssignments, forKey: .folderAssignments)
+        try container.encode(folderOrder, forKey: .folderOrder)
+    }
 
     @discardableResult
     mutating func addCategory(named rawName: String) -> WorkspaceCategory? {
@@ -95,6 +118,26 @@ struct WorkspaceOrganization: Codable, Equatable {
         categories.swapAt(source, destination)
     }
 
+    mutating func moveCategory(id: String, before targetID: String) {
+        moveCategory(id: id, relativeTo: targetID, placeAfter: false)
+    }
+
+    mutating func moveCategory(id: String, relativeTo targetID: String, placeAfter: Bool) {
+        guard id != targetID,
+              let source = categories.firstIndex(where: { $0.id == id }) else { return }
+        let category = categories.remove(at: source)
+        guard let target = categories.firstIndex(where: { $0.id == targetID }) else {
+            categories.insert(category, at: source)
+            return
+        }
+        categories.insert(category, at: target + (placeAfter ? 1 : 0))
+    }
+
+    mutating func moveCategoryToEnd(id: String) {
+        guard let source = categories.firstIndex(where: { $0.id == id }) else { return }
+        categories.append(categories.remove(at: source))
+    }
+
     mutating func assignFolders(_ paths: [String], to categoryID: String?) {
         let validCategoryID = categoryID.flatMap { candidate in
             categories.contains(where: { $0.id == candidate }) ? candidate : nil
@@ -108,6 +151,48 @@ struct WorkspaceOrganization: Codable, Equatable {
         }
     }
 
+    mutating func moveFolders(
+        _ paths: [String],
+        to categoryID: String?,
+        before targetPath: String?,
+        knownFolderPaths: [String]
+    ) {
+        let moving = unique(paths.filter { !$0.isEmpty })
+        guard !moving.isEmpty else { return }
+        assignFolders(moving, to: categoryID)
+
+        var order = unique(folderOrder + knownFolderPaths)
+        order.removeAll { moving.contains($0) }
+        if let targetPath,
+           !moving.contains(targetPath),
+           let destination = order.firstIndex(of: targetPath) {
+            order.insert(contentsOf: moving, at: destination)
+        } else if let categoryID {
+            let lastDestinationIndex = order.lastIndex {
+                self.categoryID(forFolder: $0) == categoryID
+            }
+            order.insert(contentsOf: moving, at: lastDestinationIndex.map { $0 + 1 } ?? order.endIndex)
+        } else {
+            let lastUncategorizedIndex = order.lastIndex {
+                self.categoryID(forFolder: $0) == nil
+            }
+            order.insert(contentsOf: moving, at: lastUncategorizedIndex.map { $0 + 1 } ?? order.endIndex)
+        }
+        folderOrder = order
+    }
+
+    func orderedFolders(_ folders: [WorkspaceFolder]) -> [WorkspaceFolder] {
+        let positions = Dictionary(
+            folderOrder.enumerated().map { ($0.element, $0.offset) },
+            uniquingKeysWith: min
+        )
+        return folders.enumerated().sorted { lhs, rhs in
+            let left = positions[lhs.element.path] ?? (folderOrder.count + lhs.offset)
+            let right = positions[rhs.element.path] ?? (folderOrder.count + rhs.offset)
+            return left < right
+        }.map(\.element)
+    }
+
     func categoryID(forFolder path: String) -> String? {
         guard let id = folderAssignments[path], categories.contains(where: { $0.id == id }) else { return nil }
         return id
@@ -115,6 +200,11 @@ struct WorkspaceOrganization: Codable, Equatable {
 
     private func containsCategory(named name: String) -> Bool {
         categories.contains { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    private func unique(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.filter { seen.insert($0).inserted }
     }
 }
 
