@@ -523,7 +523,17 @@ private struct MessageList: View {
                     withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(lastID, anchor: .bottom) }
                 }
             }
+            .onChange(of: streamingScrollToken) { _, _ in
+                if let lastID = messages.last?.id {
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(lastID, anchor: .bottom) }
+                }
+            }
         }
+    }
+
+    private var streamingScrollToken: String {
+        guard let last = messages.last else { return "empty" }
+        return "\(messages.count):\(last.id):\(last.text.count):\(last.isStreaming)"
     }
 }
 
@@ -532,7 +542,9 @@ private struct MessageBubble: View {
 
     @ViewBuilder
     var body: some View {
-        if message.role == .activity {
+        if message.id == "turn-progress" {
+            ProcessingBubble(message: message)
+        } else if message.role == .activity {
             ActivityBubble(message: message)
         } else {
             HStack(alignment: .top) {
@@ -558,6 +570,85 @@ private struct MessageBubble: View {
     private var background: some ShapeStyle {
         if message.role == .user { return AnyShapeStyle(Color.accentColor.opacity(0.14)) }
         return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct ProcessingBubble: View {
+    let message: ChatMessage
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    if message.isStreaming {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: completionIcon)
+                            .foregroundStyle(completionColor)
+                    }
+
+                    Text(durationLabel(at: context.date))
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Text(message.activityStatus ?? "进行中")
+                        .font(.caption)
+                        .foregroundStyle(statusColor)
+                }
+
+                Divider()
+
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(.blue)
+                        .padding(.top, 1)
+                    Text(message.text.isEmpty ? "Codex 正在处理你的任务…" : message.text)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func durationLabel(at currentDate: Date) -> String {
+        let start = message.startedAt ?? currentDate
+        let end = message.completedAt ?? currentDate
+        let elapsed = max(0, Int(end.timeIntervalSince(start)))
+        let minutes = elapsed / 60
+        let seconds = elapsed % 60
+        let duration = minutes > 0 ? "\(minutes)分钟 \(seconds)秒" : "\(seconds)秒"
+        return message.isStreaming ? "已处理 \(duration)" : "处理完成，用时 \(duration)"
+    }
+
+    private var completionIcon: String {
+        switch message.activityStatus {
+        case "失败", "发送失败": return "exclamationmark.triangle.fill"
+        case "已停止": return "stop.circle.fill"
+        default: return "checkmark.circle.fill"
+        }
+    }
+
+    private var completionColor: Color {
+        switch message.activityStatus {
+        case "失败", "发送失败": return .red
+        case "已停止": return .orange
+        default: return .green
+        }
+    }
+
+    private var statusColor: Color {
+        switch message.activityStatus {
+        case "失败", "发送失败": return .red
+        case "已停止": return .orange
+        case "进行中": return .blue
+        default: return .secondary
+        }
     }
 }
 

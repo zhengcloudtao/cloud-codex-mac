@@ -253,6 +253,7 @@ final class AppModel: ObservableObject {
         let attachmentNames = outgoingAttachments.map { "📎 \($0.url.lastPathComponent)" }
         let localText = ([text].filter { !$0.isEmpty } + attachmentNames).joined(separator: "\n")
         messages.append(.init(id: "local-\(UUID().uuidString)", role: .user, text: localText))
+        beginTurnProgress()
         do {
             try await client.resumeThread(id)
             activeTurnID = try await client.startTurn(
@@ -266,6 +267,7 @@ final class AppModel: ObservableObject {
         } catch {
             isSending = false
             activeTurnID = nil
+            finishTurnProgress(status: "发送失败")
             composerText = text
             attachments = outgoingAttachments
             if error.localizedDescription.contains("active writer") {
@@ -418,6 +420,9 @@ final class AppModel: ObservableObject {
     func handleEvent(_ method: String, _ params: [String: Any]) {
         guard let eventThreadID = params["threadId"] as? String else {
             if method == "error", let error = params["error"] as? [String: Any] {
+                isSending = false
+                activeTurnID = nil
+                finishTurnProgress(status: "失败")
                 errorMessage = error["message"] as? String ?? "Codex 发生错误"
             }
             return
@@ -440,6 +445,10 @@ final class AppModel: ObservableObject {
                 status: "进行中",
                 isStreaming: true
             )
+            if let index = messages.firstIndex(where: { $0.id == "turn-progress" }),
+               messages[index].startedAt == nil {
+                messages[index].startedAt = Date()
+            }
         case "item/started":
             guard let item = params["item"] as? [String: Any] else { return }
             updateActivityItem(item, completed: false)
@@ -536,11 +545,16 @@ final class AppModel: ObservableObject {
             isSending = false
             activeTurnID = nil
             completeStreamingActivities()
+            let turn = params["turn"] as? [String: Any]
+            let status = turn?["status"] as? String ?? "completed"
+            finishTurnProgress(status: localizedTurnStatus(status))
             Task {
                 await refreshThreads()
             }
         case "error":
             isSending = false
+            activeTurnID = nil
+            finishTurnProgress(status: "失败")
             if let error = params["error"] as? [String: Any] {
                 errorMessage = error["message"] as? String ?? "Codex 发生错误"
             }
@@ -671,9 +685,42 @@ final class AppModel: ObservableObject {
     }
 
     private func completeStreamingActivities() {
-        for index in messages.indices where messages[index].role == .activity && messages[index].isStreaming {
+        for index in messages.indices
+        where messages[index].role == .activity
+            && messages[index].id != "turn-progress"
+            && messages[index].isStreaming {
             messages[index].isStreaming = false
             messages[index].activityStatus = "已完成"
+        }
+    }
+
+    private func beginTurnProgress() {
+        messages.removeAll { $0.id == "turn-progress" }
+        messages.append(.init(
+            id: "turn-progress",
+            role: .activity,
+            text: "正在分析任务并准备执行…",
+            isStreaming: true,
+            activityKind: .status,
+            activityTitle: "Codex 正在处理",
+            activityStatus: "进行中",
+            startedAt: Date()
+        ))
+    }
+
+    private func finishTurnProgress(status: String) {
+        guard let index = messages.firstIndex(where: { $0.id == "turn-progress" }) else { return }
+        messages[index].isStreaming = false
+        messages[index].activityStatus = status
+        messages[index].completedAt = Date()
+    }
+
+    private func localizedTurnStatus(_ status: String) -> String {
+        switch status {
+        case "completed": return "已完成"
+        case "interrupted": return "已停止"
+        case "failed": return "失败"
+        default: return localizedStatus(status)
         }
     }
 

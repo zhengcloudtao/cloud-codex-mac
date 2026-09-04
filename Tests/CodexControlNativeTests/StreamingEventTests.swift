@@ -13,6 +13,8 @@ final class StreamingEventTests: XCTestCase {
         ])
         XCTAssertEqual(model.activeTurnID, "turn-1")
         XCTAssertEqual(model.messages.first?.activityTitle, "Codex 正在处理")
+        XCTAssertNotNil(model.messages.first?.startedAt)
+        XCTAssertNil(model.messages.first?.completedAt)
 
         model.handleEvent("item/reasoning/summaryTextDelta", [
             "threadId": "thread-1", "turnId": "turn-1",
@@ -70,6 +72,8 @@ final class StreamingEventTests: XCTestCase {
         ])
         XCTAssertEqual(model.messages.count, visibleCount)
         XCTAssertFalse(model.messages.contains { $0.isStreaming })
+        XCTAssertEqual(model.messages.first { $0.id == "turn-progress" }?.activityStatus, "已完成")
+        XCTAssertNotNil(model.messages.first { $0.id == "turn-progress" }?.completedAt)
     }
 
     func testLargeCommandOutputIsBounded() {

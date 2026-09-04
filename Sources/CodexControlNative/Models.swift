@@ -230,6 +230,8 @@ struct ChatMessage: Identifiable, Hashable {
     var activityKind: ActivityKind? = nil
     var activityTitle: String? = nil
     var activityStatus: String? = nil
+    var startedAt: Date? = nil
+    var completedAt: Date? = nil
 }
 
 enum CodexClientError: LocalizedError {
