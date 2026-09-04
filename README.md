@@ -1,0 +1,49 @@
+# CloudCodex
+
+应用已包含原生 macOS `.icns` 图标：蓝色玻璃质感的层叠会话终端，源文件与完整尺寸图标集位于 `Resources/`。
+
+一个 macOS 14+ 原生 SwiftUI 客户端，通过本机 Codex app-server 读取和控制当前 Codex：
+
+- 按工作文件夹查看所有现有会话
+- 文件夹按需加载最近 60 个会话，不再一次读取全部历史会话
+- 搜索、打开并读取会话历史
+- 打开会话时只读取最近 20 个回合，避免超长会话阻塞界面
+- 对话执行中实时显示思考摘要、计划、命令、文件变更、工具调用、网页搜索和协作任务
+- 处理过程使用可折叠状态卡片；命令输出保留最近 12,000 个字符，避免持续输出拖慢界面
+- 在指定文件夹新建持久会话
+- 继续现有会话并实时查看 Codex 回复
+- 支持图片和文件附件，带缩略图预览与移除
+- 动态读取 Codex 模型，并选择模型及对应推理强度
+- 支持只读、工作区、完全访问三种权限模式
+- 支持 macOS 原生中文语音输入
+- 任务执行中可以从发送按钮直接停止
+- 复用 Codex Desktop / CLI 的本机登录、模型和配置，无需另外填写 API Key
+
+## 构建与运行
+
+```bash
+cd /Users/zhengyuntao/coding/codex-util/codex-control-native
+make run
+```
+
+应用包会生成在：
+
+```text
+dist/CloudCodex.app
+```
+
+也可以直接使用 Swift Package：
+
+```bash
+swift run CloudCodex
+```
+
+## 运行要求
+
+- macOS 14 或更高版本
+- 已安装 ChatGPT/Codex 桌面版，或 `codex` 命令行工具
+- Codex 已完成登录
+
+应用优先使用 `/Applications/ChatGPT.app/Contents/Resources/codex`，也会检查 Codex.app、Homebrew 和当前 `PATH`。
+
+同一个持久会话同一时间只能有一个写入端。如果某个会话正在 Codex 主应用中执行，控制台仍可读取它，但需要等原任务结束或关闭后才能接管并继续发送。
