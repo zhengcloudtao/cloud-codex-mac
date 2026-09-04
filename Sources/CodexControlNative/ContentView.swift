@@ -1623,9 +1623,19 @@ private struct ComposerTextEditor: NSViewRepresentable {
     }
 }
 
-private final class ComposerNSTextView: NSTextView {
+final class ComposerNSTextView: NSTextView {
     var pasteImages: (() -> Bool)?
     var submit: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v",
+           pasteImages?() == true {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func paste(_ sender: Any?) {
         if pasteImages?() == true { return }

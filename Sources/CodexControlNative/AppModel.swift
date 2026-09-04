@@ -613,6 +613,21 @@ final class AppModel: ObservableObject {
             return true
         }
 
+        // Some apps expose copied images only as raw PNG/TIFF pasteboard data.
+        // Read those concrete formats before asking AppKit to synthesize an
+        // NSImage, because lazy pasteboard providers are not always available
+        // by the time NSTextView dispatches its standard paste action.
+        if let pngData = pasteboard.data(forType: .png), NSImage(data: pngData) != nil {
+            return persistPastedImageData(pngData, fileExtension: "png")
+        }
+        if let tiffData = pasteboard.data(forType: .tiff), let image = NSImage(data: tiffData) {
+            guard let pngData = Self.pngData(for: image) else {
+                errorMessage = "无法读取剪贴板中的图片。"
+                return true
+            }
+            return persistPastedImageData(pngData, fileExtension: "png")
+        }
+
         let pastedImages = pasteboard.readObjects(
             forClasses: [NSImage.self],
             options: nil
@@ -639,6 +654,19 @@ final class AppModel: ObservableObject {
             errorMessage = "无法粘贴图片：\(error.localizedDescription)"
             return true
         }
+    }
+
+    private func persistPastedImageData(_ data: Data, fileExtension: String) -> Bool {
+        do {
+            let url = try pastedImageDirectory()
+                .appendingPathComponent("cloudcodex-paste-\(UUID().uuidString)")
+                .appendingPathExtension(fileExtension)
+            try data.write(to: url, options: .atomic)
+            attachments.append(ComposerAttachment(url: url))
+        } catch {
+            errorMessage = "无法粘贴图片：\(error.localizedDescription)"
+        }
+        return true
     }
 
     private func pastedImageDirectory() throws -> URL {
