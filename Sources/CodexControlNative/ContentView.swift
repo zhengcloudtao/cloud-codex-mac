@@ -421,7 +421,11 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 ConversationHeader(thread: thread)
                 Divider()
-                MessageList(messages: model.messages, isLoading: model.isLoading)
+                MessageList(
+                    messages: model.messages,
+                    isLoading: model.isLoading,
+                    isThinking: model.isSelectedThreadProcessing
+                )
                     .id(thread.id)
                 Divider()
                 Composer()
@@ -607,6 +611,7 @@ private struct ConversationHeader: View {
 private struct MessageList: View {
     let messages: [ChatMessage]
     let isLoading: Bool
+    let isThinking: Bool
     @State private var isAtLatest = true
     @State private var hasUnseenUpdates = false
     @State private var hasNewContentBelow = false
@@ -651,6 +656,11 @@ private struct MessageList: View {
                             .equatable()
                             .id(message.id)
                     }
+
+                    if isThinking {
+                        ThinkingIndicator()
+                            .id("persistent-thinking-indicator")
+                    }
                 }
                 .padding(22)
             }
@@ -685,6 +695,15 @@ private struct MessageList: View {
         }
         .onChange(of: streamingScrollToken) { _, _ in
             markNewContent()
+        }
+        .onChange(of: isThinking) { _, active in
+            guard active else { return }
+            if isAtLatest {
+                jumpToBottom()
+            } else {
+                hasUnseenUpdates = true
+                hasNewContentBelow = true
+            }
         }
         .onChange(of: isAtLatest) { _, latest in
             if latest {
@@ -737,6 +756,43 @@ private struct MessageList: View {
     private var streamingScrollToken: String {
         guard let last = messages.last else { return "empty" }
         return "\(messages.count):\(last.id):\(last.text.count):\(last.isStreaming)"
+    }
+}
+
+private struct ThinkingIndicator: View {
+    var body: some View {
+        HStack(spacing: 11) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.blue)
+
+            Image(systemName: "sparkles")
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("思考中…")
+                    .font(.callout.weight(.semibold))
+                Text("Codex 正在继续处理当前任务")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            Text("进行中")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.blue)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.blue.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(.blue.opacity(0.22))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("思考中，Codex 正在继续处理当前任务")
     }
 }
 

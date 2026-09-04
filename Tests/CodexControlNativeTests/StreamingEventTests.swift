@@ -343,6 +343,7 @@ final class StreamingEventTests: XCTestCase {
         )
 
         XCTAssertTrue(model.isExternalThreadProcessing)
+        XCTAssertTrue(model.isSelectedThreadProcessing)
         XCTAssertFalse(model.canSend)
         let progressIndex = try XCTUnwrap(model.messages.firstIndex { $0.id == "turn-progress" })
         XCTAssertEqual(progressIndex, 1)
@@ -366,8 +367,27 @@ final class StreamingEventTests: XCTestCase {
         )
 
         XCTAssertFalse(model.isExternalThreadProcessing)
+        XCTAssertFalse(model.isSelectedThreadProcessing)
         XCTAssertFalse(model.messages.contains { $0.id == "turn-progress" })
         XCTAssertEqual(model.messages.last?.id, "answer-external")
+    }
+
+    func testSelectedActiveThreadShowsThinkingBeforeExternalSnapshotArrives() throws {
+        let model = AppModel()
+        let activeThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-active",
+            "cwd": "/tmp/project",
+            "preview": "正在思考",
+            "status": ["type": "active"]
+        ]))
+        model.threads = [activeThread]
+        model.selectedThreadID = activeThread.id
+
+        XCTAssertFalse(model.isSending)
+        XCTAssertFalse(model.isExternalThreadProcessing)
+        XCTAssertTrue(model.isSelectedThreadProcessing)
+        model.composerText = "不应重复发送"
+        XCTAssertFalse(model.canSend)
     }
 
     func testActiveWriterFailureRollsBackOptimisticMessagesAndPreservesDraft() {

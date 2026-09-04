@@ -211,10 +211,17 @@ final class AppModel: ObservableObject {
         return "default"
     }
 
+    /// A selected task may be running because it was sent from CloudCodex or
+    /// because Codex started it elsewhere. Keep the conversation UI driven by
+    /// both live paths, with the thread status covering the short interval
+    /// before the external activity snapshot arrives.
+    var isSelectedThreadProcessing: Bool {
+        isSending || isExternalThreadProcessing || selectedThread?.status == "active"
+    }
+
     var canSend: Bool {
         (!composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
-            && !isSending
-            && !isExternalThreadProcessing
+            && !isSelectedThreadProcessing
     }
 
     func start() async {
