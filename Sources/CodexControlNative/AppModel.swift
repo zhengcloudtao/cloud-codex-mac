@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     private var hasStarted = false
     private var threadRequestGeneration = 0
     private var selectedThreadMonitorTask: Task<Void, Never>?
+    private var turnProgressHintTask: Task<Void, Never>?
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
 
     init() {
@@ -368,6 +369,8 @@ final class AppModel: ObservableObject {
     ) {
         isSending = false
         activeTurnID = nil
+        turnProgressHintTask?.cancel()
+        turnProgressHintTask = nil
         messages.removeAll { $0.id == localMessageID || $0.id == "turn-progress" }
         guard selectedThreadID == threadID else { return }
         composerText = text
@@ -605,7 +608,7 @@ final class AppModel: ObservableObject {
                 id: "turn-progress",
                 kind: .status,
                 title: "Codex 正在处理",
-                text: "正在分析任务并准备执行…",
+                text: "请求已发送，正在等待 Codex 返回第一条实时进度…",
                 status: "进行中",
                 isStreaming: true
             )
@@ -622,6 +625,24 @@ final class AppModel: ObservableObject {
                 id: params["itemId"] as? String ?? "reasoning",
                 kind: .reasoning,
                 title: "思考摘要",
+                delta: delta
+            )
+        case "item/reasoning/summaryPartAdded":
+            upsertActivity(
+                id: params["itemId"] as? String ?? "reasoning",
+                kind: .reasoning,
+                title: "思考摘要",
+                text: "正在整理当前推理结果…",
+                status: "进行中",
+                isStreaming: true
+            )
+        case "item/reasoning/textDelta":
+            guard let delta = params["delta"] as? String else { return }
+            let itemID = params["itemId"] as? String ?? "reasoning"
+            appendActivity(
+                id: "\(itemID)-live",
+                kind: .reasoning,
+                title: "实时推理",
                 delta: delta
             )
         case "item/plan/delta":
@@ -859,24 +880,43 @@ final class AppModel: ObservableObject {
     }
 
     private func beginTurnProgress() {
+        turnProgressHintTask?.cancel()
         messages.removeAll { $0.id == "turn-progress" }
         messages.append(.init(
             id: "turn-progress",
             role: .activity,
-            text: "正在分析任务并准备执行…",
+            text: "请求已发送，正在等待 Codex 返回第一条实时进度…",
             isStreaming: true,
             activityKind: .status,
             activityTitle: "Codex 正在处理",
             activityStatus: "进行中",
             startedAt: Date()
         ))
+        turnProgressHintTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.updateQuietTurnHint("Codex 正在推理，第一条可展示内容生成后会立即显示…")
+
+            try? await Task.sleep(nanoseconds: 24_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.updateQuietTurnHint("任务仍在运行，Codex 正在继续深入分析，可随时点击停止按钮。")
+        }
     }
 
     private func finishTurnProgress(status: String) {
+        turnProgressHintTask?.cancel()
+        turnProgressHintTask = nil
         guard let index = messages.firstIndex(where: { $0.id == "turn-progress" }) else { return }
         messages[index].isStreaming = false
         messages[index].activityStatus = status
         messages[index].completedAt = Date()
+    }
+
+    private func updateQuietTurnHint(_ text: String) {
+        guard isSending,
+              !messages.contains(where: { $0.id != "turn-progress" && $0.isStreaming }),
+              let index = messages.firstIndex(where: { $0.id == "turn-progress" }) else { return }
+        messages[index].text = text
     }
 
     private func localizedTurnStatus(_ status: String) -> String {

@@ -29,6 +29,25 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertEqual(reasoning?.text, "先检查项目结构。再定位需要修改的文件。")
         XCTAssertTrue(reasoning?.isStreaming == true)
 
+        model.handleEvent("item/reasoning/textDelta", [
+            "threadId": "thread-1", "turnId": "turn-1",
+            "itemId": "reasoning-live-1", "contentIndex": 0,
+            "delta": "正在检查工程中的相关实现。"
+        ])
+        let liveReasoning = model.messages.first { $0.id == "reasoning-live-1-live" }
+        XCTAssertEqual(liveReasoning?.activityTitle, "实时推理")
+        XCTAssertEqual(liveReasoning?.text, "正在检查工程中的相关实现。")
+        XCTAssertTrue(liveReasoning?.isStreaming == true)
+
+        model.handleEvent("item/reasoning/summaryPartAdded", [
+            "threadId": "thread-1", "turnId": "turn-1",
+            "itemId": "reasoning-placeholder", "summaryIndex": 0
+        ])
+        let summaryPlaceholder = model.messages.first { $0.id == "reasoning-placeholder" }
+        XCTAssertEqual(summaryPlaceholder?.activityTitle, "思考摘要")
+        XCTAssertEqual(summaryPlaceholder?.text, "正在整理当前推理结果…")
+        XCTAssertTrue(summaryPlaceholder?.isStreaming == true)
+
         model.handleEvent("item/started", [
             "threadId": "thread-1", "turnId": "turn-1",
             "item": [
