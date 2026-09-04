@@ -948,18 +948,21 @@ private struct Composer: View {
                 }
             }
         } label: {
-            HStack(spacing: 5) {
-                Text(model.selectedModel?.compactName ?? "选择模型")
-                if let effort = model.selectedEffort {
-                    Text(effortCompactName(effort)).foregroundStyle(.secondary)
-                }
-            }
-            .font(.callout)
+            Text(modelAndEffortCompactLabel)
+                .font(.callout)
+                .lineLimit(1)
+                .layoutPriority(1)
         }
         .menuStyle(.borderlessButton)
-        .fixedSize()
+        .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel(modelAndEffortAccessibilityLabel)
         .help("选择模型和推理强度")
+    }
+
+    private var modelAndEffortCompactLabel: String {
+        let modelName = model.selectedModel?.compactName ?? "选择模型"
+        guard let effort = model.selectedEffort else { return modelName }
+        return "\(modelName) · \(effortCompactName(effort))"
     }
 
     private var modelAndEffortAccessibilityLabel: String {
