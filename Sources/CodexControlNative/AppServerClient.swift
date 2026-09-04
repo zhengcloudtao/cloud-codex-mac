@@ -9,7 +9,7 @@ final class AppServerClient {
     private var input: FileHandle?
     private var output: FileHandle?
     private var errorOutput: FileHandle?
-    private var buffer = Data()
+    private let decodingWorker = JSONLineDecodingWorker()
     private var nextID = 1
     private struct PendingRequest {
         let continuation: CheckedContinuation<JSON, Error>
@@ -48,10 +48,16 @@ final class AppServerClient {
         output = stdout.fileHandleForReading
         input = stdin.fileHandleForWriting
         errorOutput = stderr.fileHandleForReading
+        let decodingWorker = self.decodingWorker
         output?.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            Task { @MainActor in self?.consume(data) }
+            decodingWorker.append(data) { objects in
+                guard !objects.isEmpty else { return }
+                Task { @MainActor [weak self] in
+                    self?.handle(objects)
+                }
+            }
         }
         errorOutput?.readabilityHandler = { handle in
             // Drain diagnostics so a full stderr pipe can never stall app-server.
@@ -280,20 +286,9 @@ final class AppServerClient {
         try input.write(contentsOf: data)
     }
 
-    private func consume(_ data: Data) {
-        buffer.append(data)
-        var lineStart = buffer.startIndex
-        while lineStart < buffer.endIndex,
-              let newline = buffer[lineStart...].firstIndex(of: 0x0A) {
-            let line = Data(buffer[lineStart..<newline])
-            lineStart = buffer.index(after: newline)
-            if !line.isEmpty,
-               let object = try? JSONSerialization.jsonObject(with: line) as? JSON {
-                handle(object)
-            }
-        }
-        if lineStart > buffer.startIndex {
-            buffer.removeSubrange(buffer.startIndex..<lineStart)
+    private func handle(_ objects: [JSON]) {
+        for object in objects {
+            handle(object)
         }
     }
 
@@ -535,6 +530,64 @@ final class AppServerClient {
         case "declined": return "已拒绝"
         case "interrupted": return "已停止"
         default: return "已完成"
+        }
+    }
+}
+
+/// Incrementally splits and decodes app-server's newline-delimited JSON away
+/// from the main actor. `scannedByteCount` prevents every incoming chunk from
+/// rescanning a partially received multi-megabyte JSON line from its beginning.
+struct JSONLineDecoder {
+    typealias JSON = [String: Any]
+
+    private var buffer = Data()
+    private var scannedByteCount = 0
+
+    mutating func consume(_ data: Data) -> [JSON] {
+        guard !data.isEmpty else { return [] }
+        buffer.append(data)
+
+        var objects: [JSON] = []
+        var lineStart = buffer.startIndex
+        var searchStart = buffer.index(
+            buffer.startIndex,
+            offsetBy: min(scannedByteCount, buffer.count)
+        )
+
+        while searchStart < buffer.endIndex,
+              let newline = buffer[searchStart...].firstIndex(of: 0x0A) {
+            if lineStart < newline {
+                let line = Data(buffer[lineStart..<newline])
+                if let object = try? JSONSerialization.jsonObject(with: line) as? JSON {
+                    objects.append(object)
+                }
+            }
+            lineStart = buffer.index(after: newline)
+            searchStart = lineStart
+        }
+
+        if lineStart > buffer.startIndex {
+            buffer = Data(buffer[lineStart...])
+        }
+        // The remaining suffix was already searched and contains no newline.
+        // The next call only needs to inspect bytes appended after this point.
+        scannedByteCount = buffer.count
+        return objects
+    }
+}
+
+private final class JSONLineDecodingWorker: @unchecked Sendable {
+    typealias JSON = [String: Any]
+
+    private let queue = DispatchQueue(
+        label: "com.zhengyuntao.cloudcodex.app-server-decoder",
+        qos: .userInitiated
+    )
+    private var decoder = JSONLineDecoder()
+
+    func append(_ data: Data, completion: @escaping ([JSON]) -> Void) {
+        queue.async { [self] in
+            completion(decoder.consume(data))
         }
     }
 }
