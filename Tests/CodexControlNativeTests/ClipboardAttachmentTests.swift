@@ -65,6 +65,20 @@ final class ClipboardAttachmentTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    func testNewThreadPasteKeepsAttachmentsSeparateFromExistingConversation() {
+        let model = AppModel()
+        model.newThreadFolder = "/tmp/cloudcodex-new-thread"
+        let pasteboard = NSPasteboard(name: .init("CloudCodexTests.\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let imageURL = URL(fileURLWithPath: "/tmp/cloudcodex-new-thread-image.png")
+        XCTAssertTrue(pasteboard.writeObjects([imageURL as NSURL]))
+
+        XCTAssertTrue(model.pasteNewThreadImages(from: pasteboard))
+        XCTAssertEqual(model.newThreadAttachments.map(\.url), [imageURL])
+        XCTAssertTrue(model.attachments.isEmpty)
+        XCTAssertTrue(model.canCreateThread)
+    }
+
     func testCommandVPastesImageThroughNativeTextView() throws {
         let textView = ComposerNSTextView()
         var pasteInvocationCount = 0

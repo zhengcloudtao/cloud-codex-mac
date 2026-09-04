@@ -14,7 +14,7 @@ struct CloudCodexApp: App {
         .defaultSize(width: 1220, height: 780)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("新建会话") { model.showingNewThread = true }
+                Button("新建会话", action: model.prepareNewThread)
                     .keyboardShortcut("n")
             }
             CommandMenu("会话") {

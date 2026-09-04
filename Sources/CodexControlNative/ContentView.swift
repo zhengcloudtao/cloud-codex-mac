@@ -17,7 +17,6 @@ struct ContentView: View {
             conversation
         }
         .toolbar { toolbar }
-        .sheet(isPresented: $model.showingNewThread) { newThreadSheet }
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -417,7 +416,9 @@ struct ContentView: View {
 
     @ViewBuilder
     private var conversation: some View {
-        if let thread = model.selectedThread {
+        if model.showingNewThread {
+            NewThreadWorkspace()
+        } else if let thread = model.selectedThread {
             VStack(spacing: 0) {
                 ConversationHeader(thread: thread)
                 Divider()
@@ -428,7 +429,7 @@ struct ContentView: View {
                 )
                     .id(thread.id)
                 Divider()
-                Composer()
+                Composer(mode: .conversation)
             }
         } else {
             ContentUnavailableView {
@@ -458,45 +459,61 @@ struct ContentView: View {
         }
     }
 
-    private var newThreadSheet: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("新建 Codex 会话")
-                .font(.title2.bold())
+}
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text("工作文件夹").font(.headline)
-                HStack {
-                    TextField("选择一个文件夹", text: $model.newThreadFolder)
-                        .textFieldStyle(.roundedBorder)
-                    Button("选择…", action: model.chooseNewThreadFolder)
+private struct NewThreadWorkspace: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(.black, in: RoundedRectangle(cornerRadius: 11))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("新建会话")
+                        .font(.headline)
+                    Text(model.newThreadFolder)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-            }
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text("第一条消息（可选）").font(.headline)
-                TextEditor(text: $model.newThreadPrompt)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
-                    .frame(height: 130)
-            }
-
-            HStack {
-                Text("会话将使用你当前的 Codex 登录和默认模型设置。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("取消") { model.showingNewThread = false }
-                    .keyboardShortcut(.cancelAction)
-                Button("创建") { Task { await model.createThread() } }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(model.newThreadFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isLoading)
+
+                Button(action: model.cancelNewThread) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("取消新建会话")
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            Divider()
+
+            Spacer(minLength: 24)
+
+            VStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.blue)
+                Text("开始一个新任务")
+                    .font(.title2.bold())
+                Text("描述你希望 Codex 在这个工作文件夹中完成的内容")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 28)
+
+            Composer(mode: .newThread)
         }
-        .padding(24)
-        .frame(width: 560)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
@@ -1299,13 +1316,19 @@ private struct ActivityBubble: View {
     }
 }
 
+private enum ComposerMode {
+    case conversation
+    case newThread
+}
+
 private struct Composer: View {
     @EnvironmentObject private var model: AppModel
+    let mode: ComposerMode
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                if let notice = model.threadOwnershipNotice {
+                if mode == .conversation, let notice = model.threadOwnershipNotice {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "macwindow.badge.plus")
                             .foregroundStyle(.orange)
@@ -1328,12 +1351,12 @@ private struct Composer: View {
                     .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
                 }
 
-                if !model.attachments.isEmpty {
+                if !currentAttachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {
-                            ForEach(model.attachments) { attachment in
+                            ForEach(currentAttachments) { attachment in
                                 AttachmentPreview(attachment: attachment) {
-                                    model.removeAttachment(attachment.id)
+                                    removeAttachment(attachment.id)
                                 }
                             }
                         }
@@ -1342,27 +1365,36 @@ private struct Composer: View {
                 }
 
                 ComposerTextEditor(
-                    text: $model.composerText,
-                    pasteImages: { model.pasteImages() },
-                    submit: {
-                        if model.canSend {
-                            Task { await model.sendMessage() }
-                        }
-                    }
+                    text: composerText,
+                    pasteImages: pasteImages,
+                    submit: submit
                 )
-                    .frame(minHeight: 54, maxHeight: 120)
+                    .frame(
+                        minHeight: mode == .newThread ? 110 : 54,
+                        maxHeight: mode == .newThread ? 200 : 120
+                    )
 
                 HStack(spacing: 12) {
-                    Button(action: model.chooseAttachments) {
+                    Button(action: chooseAttachments) {
                         Image(systemName: "plus")
                             .font(.system(size: 17, weight: .medium))
                     }
                     .buttonStyle(.plain)
                     .help("添加图片或文件；也可按 ⌘V 直接粘贴图片")
 
+                    if mode == .newThread {
+                        Button(action: model.chooseNewThreadFolder) {
+                            Label(newThreadFolderName, systemImage: "folder")
+                                .font(.callout.weight(.medium))
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
+                        .help("工作文件夹：\(model.newThreadFolder)")
+                    }
+
                     permissionMenu
 
-                    if model.isExternalThreadProcessing {
+                    if mode == .conversation, model.isExternalThreadProcessing {
                         Label("Codex 中处理中", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1372,7 +1404,7 @@ private struct Composer: View {
 
                     modelMenu
 
-                    Button(action: model.toggleDictation) {
+                    Button(action: toggleDictation) {
                         Image(systemName: model.isRecording ? "waveform.circle.fill" : "mic")
                             .font(.system(size: 17, weight: .medium))
                             .foregroundStyle(model.isRecording ? .red : .primary)
@@ -1382,17 +1414,16 @@ private struct Composer: View {
                     .help(model.isRecording ? "停止语音输入" : "语音输入")
 
                     Button {
-                        Task {
-                            if model.isSending { await model.cancelTurn() }
-                            else { await model.sendMessage() }
-                        }
+                        submitOrCancel()
                     } label: {
                         Group {
-                            if model.isExternalThreadProcessing {
+                            if mode == .newThread, model.isCreatingThread {
                                 ProgressView().controlSize(.small)
-                            } else if model.isSending && model.activeTurnID == nil {
+                            } else if mode == .conversation, model.isExternalThreadProcessing {
                                 ProgressView().controlSize(.small)
-                            } else if model.isSending {
+                            } else if mode == .conversation, model.isSending && model.activeTurnID == nil {
+                                ProgressView().controlSize(.small)
+                            } else if mode == .conversation, model.isSending {
                                 Image(systemName: "stop.fill")
                                     .font(.system(size: 13, weight: .semibold))
                             } else {
@@ -1404,12 +1435,8 @@ private struct Composer: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .clipShape(Circle())
-                    .disabled(!model.canSend && !model.isSending)
-                    .help(
-                        model.isExternalThreadProcessing
-                            ? "此任务正在 Codex 主应用中处理"
-                            : (model.isSending ? "停止当前任务" : "发送（Return）")
-                    )
+                    .disabled(!canSubmit && !canCancel)
+                    .help(sendButtonHelp)
                 }
             }
             .padding(.horizontal, 16)
@@ -1422,6 +1449,91 @@ private struct Composer: View {
         .padding(.top, 10)
         .padding(.bottom, 14)
         .background(.bar)
+    }
+
+    private var composerText: Binding<String> {
+        Binding(
+            get: { mode == .newThread ? model.newThreadPrompt : model.composerText },
+            set: { value in
+                if mode == .newThread {
+                    model.newThreadPrompt = value
+                } else {
+                    model.composerText = value
+                }
+            }
+        )
+    }
+
+    private var currentAttachments: [ComposerAttachment] {
+        mode == .newThread ? model.newThreadAttachments : model.attachments
+    }
+
+    private var newThreadFolderName: String {
+        let name = URL(fileURLWithPath: model.newThreadFolder).lastPathComponent
+        return name.isEmpty ? "选择文件夹" : name
+    }
+
+    private var canSubmit: Bool {
+        mode == .newThread ? model.canCreateThread : model.canSend
+    }
+
+    private var canCancel: Bool {
+        mode == .conversation && model.isSending
+    }
+
+    private var sendButtonHelp: String {
+        if mode == .newThread {
+            return model.isCreatingThread ? "正在创建会话" : "创建会话并发送（Return）"
+        }
+        if model.isExternalThreadProcessing { return "此任务正在 Codex 主应用中处理" }
+        return model.isSending ? "停止当前任务" : "发送（Return）"
+    }
+
+    private func chooseAttachments() {
+        if mode == .newThread {
+            model.chooseNewThreadAttachments()
+        } else {
+            model.chooseAttachments()
+        }
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        if mode == .newThread {
+            model.removeNewThreadAttachment(id)
+        } else {
+            model.removeAttachment(id)
+        }
+    }
+
+    private func pasteImages() -> Bool {
+        mode == .newThread ? model.pasteNewThreadImages() : model.pasteImages()
+    }
+
+    private func toggleDictation() {
+        if mode == .newThread {
+            model.toggleNewThreadDictation()
+        } else {
+            model.toggleDictation()
+        }
+    }
+
+    private func submit() {
+        guard canSubmit else { return }
+        Task {
+            if mode == .newThread {
+                await model.createThread()
+            } else {
+                await model.sendMessage()
+            }
+        }
+    }
+
+    private func submitOrCancel() {
+        if mode == .conversation, model.isSending {
+            Task { await model.cancelTurn() }
+        } else {
+            submit()
+        }
     }
 
     private var permissionMenu: some View {

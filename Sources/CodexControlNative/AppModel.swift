@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     @Published var showingNewThread = false
     @Published var newThreadFolder = ""
     @Published var newThreadPrompt = ""
+    @Published var newThreadAttachments: [ComposerAttachment] = []
+    @Published var isCreatingThread = false
     @Published var modelOptions: [CodexModelOption] = []
     @Published var permissionProfiles: [PermissionProfileOption] = []
     @Published var selectedModelID: String?
@@ -47,6 +49,7 @@ final class AppModel: ObservableObject {
     private var pendingActivityDeltas: [String: PendingActivityDelta] = [:]
     private var pendingAssistantDeltas: [String: [String]] = [:]
     private var pendingDeltaOrder: [PendingDeltaTarget] = []
+    private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
     private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
 
@@ -67,7 +70,14 @@ final class AppModel: ObservableObject {
            let saved = try? JSONDecoder().decode(WorkspaceOrganization.self, from: data) {
             workspaceOrganization = saved
         }
-        speech.onTranscript = { [weak self] transcript in self?.composerText = transcript }
+        speech.onTranscript = { [weak self] transcript in
+            guard let self else { return }
+            if self.speechTargetsNewThread {
+                self.newThreadPrompt = transcript
+            } else {
+                self.composerText = transcript
+            }
+        }
         speech.onRecordingChanged = { [weak self] recording in self?.isRecording = recording }
         speech.onError = { [weak self] message in self?.errorMessage = message }
     }
@@ -224,6 +234,13 @@ final class AppModel: ObservableObject {
             && !isSelectedThreadProcessing
     }
 
+    var canCreateThread: Bool {
+        !newThreadFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (!newThreadPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !newThreadAttachments.isEmpty)
+            && !isCreatingThread
+    }
+
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
@@ -324,6 +341,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectFolder(_ path: String?) {
+        if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
         discardPendingDeltas()
@@ -342,6 +360,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectThread(_ id: String?) {
+        if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
         discardPendingDeltas()
@@ -576,6 +595,7 @@ final class AppModel: ObservableObject {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             newThreadFolder = url.path
+            Task { await loadPermissionProfiles(cwd: url.path) }
         }
     }
 
@@ -594,12 +614,49 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func chooseNewThreadAttachments() {
+        let panel = NSOpenPanel()
+        panel.title = "添加到新会话"
+        panel.prompt = "添加"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK {
+            let newItems = panel.urls
+                .filter { url in !newThreadAttachments.contains(where: { $0.url == url }) }
+                .map { ComposerAttachment(url: $0) }
+            newThreadAttachments.append(contentsOf: newItems)
+        }
+    }
+
     /// Imports image files or bitmap data from a pasteboard into the existing
     /// attachment flow. Bitmap-only clipboard content (for example a macOS
     /// screenshot) is converted to PNG so the app-server receives a stable
     /// localImage path rather than transient pasteboard data.
     @discardableResult
     func pasteImages(from pasteboard: NSPasteboard = .general) -> Bool {
+        let result = pastedImageAttachments(
+            from: pasteboard,
+            excluding: Set(attachments.map(\.url))
+        )
+        attachments.append(contentsOf: result.items)
+        return result.handled
+    }
+
+    @discardableResult
+    func pasteNewThreadImages(from pasteboard: NSPasteboard = .general) -> Bool {
+        let result = pastedImageAttachments(
+            from: pasteboard,
+            excluding: Set(newThreadAttachments.map(\.url))
+        )
+        newThreadAttachments.append(contentsOf: result.items)
+        return result.handled
+    }
+
+    private func pastedImageAttachments(
+        from pasteboard: NSPasteboard,
+        excluding existingURLs: Set<URL>
+    ) -> (handled: Bool, items: [ComposerAttachment]) {
         let pastedFileURLs = (pasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
@@ -607,10 +664,9 @@ final class AppModel: ObservableObject {
 
         if !pastedFileURLs.isEmpty {
             let newItems = pastedFileURLs
-                .filter { url in !attachments.contains(where: { $0.url == url }) }
+                .filter { !existingURLs.contains($0) }
                 .map { ComposerAttachment(url: $0) }
-            attachments.append(contentsOf: newItems)
-            return true
+            return (true, newItems)
         }
 
         // Some apps expose copied images only as raw PNG/TIFF pasteboard data.
@@ -618,21 +674,23 @@ final class AppModel: ObservableObject {
         // NSImage, because lazy pasteboard providers are not always available
         // by the time NSTextView dispatches its standard paste action.
         if let pngData = pasteboard.data(forType: .png), NSImage(data: pngData) != nil {
-            return persistPastedImageData(pngData, fileExtension: "png")
+            let item = persistPastedImageData(pngData, fileExtension: "png")
+            return (true, item.map { [$0] } ?? [])
         }
         if let tiffData = pasteboard.data(forType: .tiff), let image = NSImage(data: tiffData) {
             guard let pngData = Self.pngData(for: image) else {
                 errorMessage = "无法读取剪贴板中的图片。"
-                return true
+                return (true, [])
             }
-            return persistPastedImageData(pngData, fileExtension: "png")
+            let item = persistPastedImageData(pngData, fileExtension: "png")
+            return (true, item.map { [$0] } ?? [])
         }
 
         let pastedImages = pasteboard.readObjects(
             forClasses: [NSImage.self],
             options: nil
         ) as? [NSImage] ?? []
-        guard !pastedImages.isEmpty else { return false }
+        guard !pastedImages.isEmpty else { return (false, []) }
 
         do {
             let directory = try pastedImageDirectory()
@@ -645,28 +703,27 @@ final class AppModel: ObservableObject {
                 try data.write(to: url, options: .atomic)
                 newItems.append(ComposerAttachment(url: url))
             }
-            attachments.append(contentsOf: newItems)
             if newItems.isEmpty {
                 errorMessage = "无法读取剪贴板中的图片。"
             }
-            return true
+            return (true, newItems)
         } catch {
             errorMessage = "无法粘贴图片：\(error.localizedDescription)"
-            return true
+            return (true, [])
         }
     }
 
-    private func persistPastedImageData(_ data: Data, fileExtension: String) -> Bool {
+    private func persistPastedImageData(_ data: Data, fileExtension: String) -> ComposerAttachment? {
         do {
             let url = try pastedImageDirectory()
                 .appendingPathComponent("cloudcodex-paste-\(UUID().uuidString)")
                 .appendingPathExtension(fileExtension)
             try data.write(to: url, options: .atomic)
-            attachments.append(ComposerAttachment(url: url))
+            return ComposerAttachment(url: url)
         } catch {
             errorMessage = "无法粘贴图片：\(error.localizedDescription)"
+            return nil
         }
-        return true
     }
 
     private func pastedImageDirectory() throws -> URL {
@@ -690,8 +747,18 @@ final class AppModel: ObservableObject {
         attachments.removeAll { $0.id == id }
     }
 
+    func removeNewThreadAttachment(_ id: UUID) {
+        newThreadAttachments.removeAll { $0.id == id }
+    }
+
     func toggleDictation() {
+        speechTargetsNewThread = false
         speech.toggle(currentText: composerText)
+    }
+
+    func toggleNewThreadDictation() {
+        speechTargetsNewThread = true
+        speech.toggle(currentText: newThreadPrompt)
     }
 
     func selectModel(_ id: String, preferredEffort: String? = nil) {
@@ -713,15 +780,41 @@ final class AppModel: ObservableObject {
     }
 
     func prepareNewThread() {
-        newThreadFolder = selectedFolder ?? FileManager.default.homeDirectoryForCurrentUser.path
+        if showingNewThread { return }
+        newThreadFolder = selectedFolder
+            ?? selectedThread?.cwd
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
         newThreadPrompt = ""
+        newThreadAttachments = []
+        threadOwnershipNotice = nil
+        selectedThreadMonitorTask?.cancel()
+        selectedThreadMonitorTask = nil
+        discardPendingDeltas()
+        isExternalThreadProcessing = false
+        selectedThreadID = nil
+        messages = []
         showingNewThread = true
+        Task { await loadPermissionProfiles(cwd: newThreadFolder) }
+    }
+
+    func cancelNewThread() {
+        if speechTargetsNewThread { speech.stop() }
+        speechTargetsNewThread = false
+        showingNewThread = false
+        newThreadPrompt = ""
+        newThreadAttachments = []
     }
 
     func createThread() async {
         let folder = newThreadFolder.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !folder.isEmpty else { return }
-        isLoading = true
+        let prompt = newThreadPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outgoingAttachments = newThreadAttachments
+        guard !folder.isEmpty,
+              (!prompt.isEmpty || !outgoingAttachments.isEmpty),
+              !isCreatingThread else { return }
+        if speechTargetsNewThread { speech.stop() }
+        speechTargetsNewThread = false
+        isCreatingThread = true
         do {
             let thread = try await client.createThread(
                 cwd: folder,
@@ -733,15 +826,15 @@ final class AppModel: ObservableObject {
             selectedThreadID = thread.id
             messages = []
             showingNewThread = false
-            let prompt = newThreadPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            isLoading = false
-            if !prompt.isEmpty {
-                composerText = prompt
-                await sendMessage()
-            }
+            newThreadPrompt = ""
+            newThreadAttachments = []
+            composerText = prompt
+            attachments = outgoingAttachments
+            isCreatingThread = false
+            await sendMessage()
             await refreshThreads()
         } catch {
-            isLoading = false
+            isCreatingThread = false
             errorMessage = error.localizedDescription
         }
     }
