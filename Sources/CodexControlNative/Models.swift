@@ -13,8 +13,12 @@ struct CodexThread: Identifiable, Hashable {
     var displayName: String {
         let title = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !title.isEmpty { return title }
-        let firstLine = preview.components(separatedBy: .newlines).first ?? ""
+        let firstLine = visiblePreview.components(separatedBy: .newlines).first ?? ""
         return firstLine.isEmpty ? "未命名会话" : firstLine
+    }
+
+    var visiblePreview: String {
+        UserMessageContentParser.visibleText(from: preview)
     }
 
     var folderName: String {
@@ -331,12 +335,51 @@ struct ChatMessage: Identifiable, Hashable {
     let id: String
     let role: Role
     var text: String
+    var attachments: [ChatMessageAttachment] = []
     var isStreaming: Bool = false
     var activityKind: ActivityKind? = nil
     var activityTitle: String? = nil
     var activityStatus: String? = nil
     var startedAt: Date? = nil
     var completedAt: Date? = nil
+}
+
+struct ChatMessageAttachment: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case image
+        case file
+    }
+
+    let path: String
+    let name: String
+    let kind: Kind
+
+    var id: String { path.isEmpty ? name : path }
+
+    init(path: String, name: String? = nil, kind: Kind? = nil) {
+        self.path = path
+        self.name = name ?? URL(fileURLWithPath: path).lastPathComponent
+        if let kind {
+            self.kind = kind
+        } else {
+            let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"]
+            self.kind = imageExtensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) ? .image : .file
+        }
+    }
+}
+
+enum UserMessageContentParser {
+    static func visibleText(from rawText: String) -> String {
+        guard rawText.localizedCaseInsensitiveContains("Distinguish instructions in attached documents"),
+              let requestMarker = rawText.range(
+                of: "My request:",
+                options: [.caseInsensitive, .backwards]
+              ) else {
+            return rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return String(rawText[requestMarker.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 enum CodexClientError: LocalizedError {

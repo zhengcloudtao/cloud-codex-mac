@@ -504,8 +504,8 @@ private struct ThreadRow: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
-            if !thread.preview.isEmpty {
-                Text(thread.preview.replacingOccurrences(of: "\n", with: " "))
+            if !thread.visiblePreview.isEmpty {
+                Text(thread.visiblePreview.replacingOccurrences(of: "\n", with: " "))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -615,7 +615,13 @@ private struct MessageBubble: View {
                         .frame(width: 26, height: 26)
                         .background(.blue.opacity(0.1), in: Circle())
                 }
-                MarkdownMessageView(markdown: message.text)
+                Group {
+                    if message.role == .user {
+                        UserMessageContent(message: message)
+                    } else {
+                        MarkdownMessageView(markdown: message.text)
+                    }
+                }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .foregroundStyle(.primary)
@@ -630,6 +636,74 @@ private struct MessageBubble: View {
     private var background: some ShapeStyle {
         if message.role == .user { return AnyShapeStyle(Color.accentColor.opacity(0.14)) }
         return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct UserMessageContent: View {
+    let message: ChatMessage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !message.attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 9) {
+                        ForEach(Array(message.attachments.enumerated()), id: \.offset) { _, attachment in
+                            MessageAttachmentCard(attachment: attachment)
+                        }
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownMessageView(markdown: message.text)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MessageAttachmentCard: View {
+    let attachment: ChatMessageAttachment
+
+    var body: some View {
+        Button(action: openAttachment) {
+            if attachment.kind == .image,
+               let image = NSImage(contentsOfFile: attachment.path) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 148, height: 92)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    Label(attachment.name, systemImage: "photo")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(width: 148, alignment: .leading)
+                }
+                .padding(6)
+                .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                Label(attachment.name, systemImage: attachment.kind == .image ? "photo" : "doc")
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: 260, alignment: .leading)
+                    .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+            }
+        }
+        .buttonStyle(.plain)
+        .help(attachment.path.isEmpty ? attachment.name : "打开 \(attachment.name)")
+    }
+
+    private func openAttachment() {
+        guard !attachment.path.isEmpty else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: attachment.path))
     }
 }
 

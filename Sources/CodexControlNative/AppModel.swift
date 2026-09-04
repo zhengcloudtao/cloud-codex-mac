@@ -154,7 +154,7 @@ final class AppModel: ObservableObject {
             let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             let matchesSearch = query.isEmpty
                 || thread.displayName.localizedCaseInsensitiveContains(query)
-                || thread.preview.localizedCaseInsensitiveContains(query)
+                || thread.visiblePreview.localizedCaseInsensitiveContains(query)
             return matchesSearch
         }
     }
@@ -298,9 +298,19 @@ final class AppModel: ObservableObject {
         attachments = []
         isSending = true
         isExternalThreadProcessing = false
-        let attachmentNames = outgoingAttachments.map { "📎 \($0.url.lastPathComponent)" }
-        let localText = ([text].filter { !$0.isEmpty } + attachmentNames).joined(separator: "\n")
-        messages.append(.init(id: "local-\(UUID().uuidString)", role: .user, text: localText))
+        let localAttachments = outgoingAttachments.map {
+            ChatMessageAttachment(
+                path: $0.url.path,
+                name: $0.url.lastPathComponent,
+                kind: $0.isImage ? .image : .file
+            )
+        }
+        messages.append(.init(
+            id: "local-\(UUID().uuidString)",
+            role: .user,
+            text: text,
+            attachments: localAttachments
+        ))
         beginTurnProgress()
         do {
             try await client.resumeThread(id)

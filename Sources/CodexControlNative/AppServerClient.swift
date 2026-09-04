@@ -328,20 +328,26 @@ final class AppServerClient {
                 switch type {
                 case "userMessage":
                     let content = item["content"] as? [JSON] ?? []
-                    let text = content.compactMap { part -> String? in
+                    let rawText = content.compactMap { part in
+                        part["type"] as? String == "text" ? part["text"] as? String : nil
+                    }.joined(separator: "\n")
+                    let text = UserMessageContentParser.visibleText(from: rawText)
+                    let attachments = content.compactMap { part -> ChatMessageAttachment? in
                         switch part["type"] as? String {
-                        case "text":
-                            return part["text"] as? String
                         case "localImage":
-                            let path = part["path"] as? String ?? "图片"
-                            return "🖼 \(URL(fileURLWithPath: path).lastPathComponent)"
+                            guard let path = part["path"] as? String else { return nil }
+                            return ChatMessageAttachment(path: path, kind: .image)
                         case "mention":
-                            return "📎 \(part["name"] as? String ?? "文件")"
+                            let path = part["path"] as? String ?? ""
+                            let name = part["name"] as? String ?? (path.isEmpty ? "文件" : nil)
+                            return ChatMessageAttachment(path: path, name: name, kind: .file)
                         default:
                             return nil
                         }
-                    }.joined(separator: "\n")
-                    if !text.isEmpty { messages.append(.init(id: id, role: .user, text: text)) }
+                    }
+                    if !text.isEmpty || !attachments.isEmpty {
+                        messages.append(.init(id: id, role: .user, text: text, attachments: attachments))
+                    }
                 case "agentMessage":
                     if let text = item["text"] as? String, !text.isEmpty {
                         messages.append(.init(id: id, role: .assistant, text: text))
