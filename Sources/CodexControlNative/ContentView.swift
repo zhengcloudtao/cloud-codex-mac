@@ -501,9 +501,7 @@ private struct ThreadRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Circle()
-                    .fill(thread.status == "active" ? .green : .secondary.opacity(0.35))
-                    .frame(width: 7, height: 7)
+                ThreadStatusLight(isRunning: thread.status == "active")
                 Text(thread.displayName)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
@@ -530,6 +528,32 @@ private struct ThreadRow: View {
             .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 5)
+    }
+}
+
+private struct ThreadStatusLight: View {
+    let isRunning: Bool
+
+    var body: some View {
+        if isRunning {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                let phase = context.date.timeIntervalSinceReferenceDate * 2.2
+                let pulse = (sin(phase) + 1) / 2
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 9, height: 9)
+                    .shadow(color: .green.opacity(0.55 + pulse * 0.35), radius: 3 + pulse * 3)
+                    .scaleEffect(0.94 + pulse * 0.12)
+                    .accessibilityLabel("正在执行")
+            }
+            .frame(width: 13, height: 13)
+        } else {
+            Circle()
+                .fill(.secondary.opacity(0.35))
+                .frame(width: 7, height: 7)
+                .frame(width: 13, height: 13)
+                .accessibilityLabel("未在执行")
+        }
     }
 }
 

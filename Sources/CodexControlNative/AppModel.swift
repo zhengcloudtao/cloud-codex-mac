@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     private var hasStarted = false
     private var threadRequestGeneration = 0
     private var selectedThreadMonitorTask: Task<Void, Never>?
+    private var threadStatusMonitorTask: Task<Void, Never>?
     private var turnProgressHintTask: Task<Void, Never>?
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
 
@@ -197,6 +198,7 @@ final class AppModel: ObservableObject {
             await loadComposerOptions(cwd: nil)
             await loadFolderCatalog()
             await refreshThreads()
+            startThreadStatusMonitor()
         } catch {
             connectionText = "连接失败"
             errorMessage = error.localizedDescription
@@ -227,6 +229,43 @@ final class AppModel: ObservableObject {
             guard generation == threadRequestGeneration else { return }
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func startThreadStatusMonitor() {
+        threadStatusMonitorTask?.cancel()
+        threadStatusMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                await self.syncVisibleThreadStatuses()
+            }
+        }
+    }
+
+    /// Refresh only the lightweight thread summaries currently represented in
+    /// the list. This deliberately avoids loading turns or message history.
+    private func syncVisibleThreadStatuses() async {
+        let requestedFolder = selectedFolder
+        do {
+            let page = try await client.listThreads(limit: 60, cwd: requestedFolder)
+            guard requestedFolder == selectedFolder else { return }
+            let statuses = Dictionary(uniqueKeysWithValues: page.threads.map { ($0.id, $0.status) })
+            for index in threads.indices {
+                let threadID = threads[index].id
+                guard let status = statuses[threadID] else { continue }
+                // Keep the optimistic light on while this app is submitting or
+                // streaming a turn; app-server's list snapshot can lag briefly.
+                if isSending, threadID == selectedThreadID { continue }
+                threads[index].status = status
+            }
+        } catch {
+            // Status lights are best-effort and must never interrupt the task.
+        }
+    }
+
+    private func setThreadRunning(_ threadID: String, running: Bool) {
+        guard let index = threads.firstIndex(where: { $0.id == threadID }) else { return }
+        threads[index].status = running ? "active" : "idle"
     }
 
     func selectFolder(_ path: String?) {
@@ -303,6 +342,7 @@ final class AppModel: ObservableObject {
         attachments = []
         isSending = true
         isExternalThreadProcessing = false
+        setThreadRunning(id, running: true)
         threadOwnershipNotice = nil
         let localAttachments = outgoingAttachments.map {
             ChatMessageAttachment(
@@ -369,6 +409,7 @@ final class AppModel: ObservableObject {
     ) {
         isSending = false
         activeTurnID = nil
+        setThreadRunning(threadID, running: false)
         turnProgressHintTask?.cancel()
         turnProgressHintTask = nil
         messages.removeAll { $0.id == localMessageID || $0.id == "turn-progress" }
@@ -594,8 +635,14 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        if method == "turn/started" {
+            setThreadRunning(eventThreadID, running: true)
+        } else if method == "turn/completed" {
+            setThreadRunning(eventThreadID, running: false)
+        }
+
         guard eventThreadID == selectedThreadID else {
-            if method == "turn/completed" { Task { await refreshThreads() } }
+            if method == "turn/completed" { Task { await syncVisibleThreadStatuses() } }
             return
         }
 
@@ -739,6 +786,7 @@ final class AppModel: ObservableObject {
         case "error":
             isSending = false
             activeTurnID = nil
+            setThreadRunning(eventThreadID, running: false)
             finishTurnProgress(status: "失败")
             if let error = params["error"] as? [String: Any] {
                 errorMessage = error["message"] as? String ?? "Codex 发生错误"

@@ -3,6 +3,30 @@ import XCTest
 
 @MainActor
 final class StreamingEventTests: XCTestCase {
+    func testTurnEventsUpdateThreadListRunningStatus() throws {
+        let model = AppModel()
+        let thread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-1",
+            "cwd": "/tmp/project",
+            "preview": "正在执行的任务",
+            "status": ["type": "idle"]
+        ]))
+        model.threads = [thread]
+        model.selectedThreadID = "thread-1"
+
+        model.handleEvent("turn/started", [
+            "threadId": "thread-1",
+            "turn": ["id": "turn-1"]
+        ])
+        XCTAssertEqual(model.threads.first?.status, "active")
+
+        model.handleEvent("turn/completed", [
+            "threadId": "thread-1",
+            "turn": ["id": "turn-1", "status": "completed"]
+        ])
+        XCTAssertEqual(model.threads.first?.status, "idle")
+    }
+
     func testStreamingReasoningCommandAndFileEventsAreVisible() {
         let model = AppModel()
         model.selectedThreadID = "thread-1"
