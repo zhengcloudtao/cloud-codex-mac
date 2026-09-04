@@ -422,6 +422,7 @@ struct ContentView: View {
                 ConversationHeader(thread: thread)
                 Divider()
                 MessageList(messages: model.messages, isLoading: model.isLoading)
+                    .id(thread.id)
                 Divider()
                 Composer()
             }
@@ -593,39 +594,123 @@ private struct ConversationHeader: View {
 private struct MessageList: View {
     let messages: [ChatMessage]
     let isLoading: Bool
+    @State private var hasPositionedInitialContent = false
+    @State private var isNearBottom = true
+    @State private var hasNewContentBelow = false
+
+    private let bottomAnchorID = "message-list-bottom"
+    private let scrollCoordinateSpace = "message-list-scroll"
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 18) {
-                    if messages.isEmpty && isLoading {
-                        ProgressView("正在读取会话…").padding(.top, 80)
-                    } else if messages.isEmpty {
-                        ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
-                            .padding(.top, 80)
+        GeometryReader { viewport in
+            ScrollViewReader { proxy in
+                ZStack(alignment: .bottomTrailing) {
+                    ScrollView {
+                        LazyVStack(spacing: 18) {
+                            if messages.isEmpty && isLoading {
+                                ProgressView("正在读取会话…").padding(.top, 80)
+                            } else if messages.isEmpty {
+                                ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
+                                    .padding(.top, 80)
+                            }
+                            ForEach(messages) { message in
+                                MessageBubble(message: message).id(message.id)
+                            }
+                            Color.clear
+                                .frame(height: 1)
+                                .id(bottomAnchorID)
+                                .background {
+                                    GeometryReader { bottomMarker in
+                                        Color.clear.preference(
+                                            key: MessageListBottomPreferenceKey.self,
+                                            value: bottomMarker.frame(in: .named(scrollCoordinateSpace)).maxY
+                                        )
+                                    }
+                                }
+                        }
+                        .padding(22)
                     }
-                    ForEach(messages) { message in
-                        MessageBubble(message: message).id(message.id)
+                    .coordinateSpace(name: scrollCoordinateSpace)
+
+                    if hasNewContentBelow {
+                        Button {
+                            jumpToBottom(using: proxy)
+                        } label: {
+                            Label("回到最新", systemImage: "arrow.down")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.regularMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(.quaternary))
+                        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                        .padding(.trailing, 18)
+                        .padding(.bottom, 14)
                     }
                 }
-                .padding(22)
-            }
-            .onChange(of: messages.last?.id) { _, _ in
-                if let lastID = messages.last?.id {
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(lastID, anchor: .bottom) }
+                .onAppear {
+                    positionInitialContent(using: proxy)
                 }
-            }
-            .onChange(of: streamingScrollToken) { _, _ in
-                if let lastID = messages.last?.id {
-                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(lastID, anchor: .bottom) }
+                .onChange(of: messages.last?.id) { _, _ in
+                    handleNewContent(using: proxy, alwaysFollow: messages.last?.role == .user)
+                }
+                .onChange(of: streamingScrollToken) { _, _ in
+                    handleNewContent(using: proxy, alwaysFollow: false)
+                }
+                .onPreferenceChange(MessageListBottomPreferenceKey.self) { bottomY in
+                    guard bottomY.isFinite else { return }
+                    let nearBottom = bottomY <= viewport.size.height + 100
+                    isNearBottom = nearBottom
+                    if nearBottom {
+                        hasNewContentBelow = false
+                    }
                 }
             }
         }
     }
 
+    private func positionInitialContent(using proxy: ScrollViewProxy) {
+        guard !messages.isEmpty, !hasPositionedInitialContent else { return }
+        hasPositionedInitialContent = true
+        DispatchQueue.main.async {
+            proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+        }
+    }
+
+    private func handleNewContent(using proxy: ScrollViewProxy, alwaysFollow: Bool) {
+        guard !messages.isEmpty else { return }
+        guard hasPositionedInitialContent else {
+            positionInitialContent(using: proxy)
+            return
+        }
+        if alwaysFollow || isNearBottom {
+            DispatchQueue.main.async {
+                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+            }
+            hasNewContentBelow = false
+        } else {
+            hasNewContentBelow = true
+        }
+    }
+
+    private func jumpToBottom(using proxy: ScrollViewProxy) {
+        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+        isNearBottom = true
+        hasNewContentBelow = false
+    }
+
     private var streamingScrollToken: String {
         guard let last = messages.last else { return "empty" }
         return "\(messages.count):\(last.id):\(last.text.count):\(last.isStreaming)"
+    }
+}
+
+private struct MessageListBottomPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = .infinity
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
