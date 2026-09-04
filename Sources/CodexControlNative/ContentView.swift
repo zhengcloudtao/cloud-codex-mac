@@ -507,7 +507,7 @@ private struct ThreadRow: View {
                     .font(.body.weight(.medium))
                     .lineLimit(1)
                 Spacer()
-                Text(thread.updatedAt, style: .relative)
+                Text(relativeTimeLabel)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -530,6 +530,24 @@ private struct ThreadRow: View {
         }
         .padding(.vertical, 5)
     }
+
+    /// `Text(date, style: .relative)` installs an independent timeline for
+    /// every row. With 60 visible summaries those timelines repeatedly wake
+    /// and relayout the whole list, so render a snapshot instead. The regular
+    /// status refresh and manual refresh keep this label sufficiently current.
+    private var relativeTimeLabel: String {
+        let elapsed = max(0, Int(Date().timeIntervalSince(thread.updatedAt)))
+        switch elapsed {
+        case ..<60:
+            return "刚刚"
+        case ..<3_600:
+            return "\(elapsed / 60)分钟前"
+        case ..<86_400:
+            return "\(elapsed / 3_600)小时前"
+        default:
+            return "\(elapsed / 86_400)天前"
+        }
+    }
 }
 
 private struct ThreadStatusLight: View {
@@ -537,16 +555,11 @@ private struct ThreadStatusLight: View {
 
     var body: some View {
         if isRunning {
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                let phase = context.date.timeIntervalSinceReferenceDate * 2.2
-                let pulse = (sin(phase) + 1) / 2
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 9, height: 9)
-                    .shadow(color: .green.opacity(0.55 + pulse * 0.35), radius: 3 + pulse * 3)
-                    .scaleEffect(0.94 + pulse * 0.12)
-                    .accessibilityLabel("正在执行")
-            }
+            Circle()
+                .fill(Color.green)
+                .frame(width: 9, height: 9)
+                .shadow(color: .green.opacity(0.9), radius: 5)
+                .accessibilityLabel("正在执行")
             .frame(width: 13, height: 13)
         } else {
             Circle()
@@ -595,98 +608,89 @@ private struct MessageList: View {
     let messages: [ChatMessage]
     let isLoading: Bool
     @State private var hasPositionedInitialContent = false
-    @State private var isNearBottom = true
+    @State private var scrollPositionID: String?
+    @State private var followsLatest = true
     @State private var hasNewContentBelow = false
 
     private let bottomAnchorID = "message-list-bottom"
-    private let scrollCoordinateSpace = "message-list-scroll"
 
     var body: some View {
-        GeometryReader { viewport in
-            ScrollViewReader { proxy in
-                ZStack(alignment: .bottomTrailing) {
-                    ScrollView {
-                        LazyVStack(spacing: 18) {
-                            if messages.isEmpty && isLoading {
-                                ProgressView("正在读取会话…").padding(.top, 80)
-                            } else if messages.isEmpty {
-                                ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
-                                    .padding(.top, 80)
-                            }
-                            ForEach(messages) { message in
-                                MessageBubble(message: message).id(message.id)
-                            }
-                            Color.clear
-                                .frame(height: 1)
-                                .id(bottomAnchorID)
-                                .background {
-                                    GeometryReader { bottomMarker in
-                                        Color.clear.preference(
-                                            key: MessageListBottomPreferenceKey.self,
-                                            value: bottomMarker.frame(in: .named(scrollCoordinateSpace)).maxY
-                                        )
-                                    }
-                                }
-                        }
-                        .padding(22)
+        ZStack(alignment: .bottomTrailing) {
+            ScrollView {
+                LazyVStack(spacing: 18) {
+                    if messages.isEmpty && isLoading {
+                        ProgressView("正在读取会话…").padding(.top, 80)
+                    } else if messages.isEmpty {
+                        ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
+                            .padding(.top, 80)
                     }
-                    .coordinateSpace(name: scrollCoordinateSpace)
+                    ForEach(messages) { message in
+                        MessageBubble(message: message).id(message.id)
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomAnchorID)
+                }
+                .scrollTargetLayout()
+                .padding(22)
+            }
+            .scrollPosition(id: $scrollPositionID, anchor: .bottom)
 
-                    if hasNewContentBelow {
-                        Button {
-                            jumpToBottom(using: proxy)
-                        } label: {
-                            Label("回到最新", systemImage: "arrow.down")
-                                .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                        }
-                        .buttonStyle(.plain)
-                        .background(.regularMaterial, in: Capsule())
-                        .overlay(Capsule().stroke(.quaternary))
-                        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-                        .padding(.trailing, 18)
-                        .padding(.bottom, 14)
-                    }
+            if hasNewContentBelow {
+                Button {
+                    jumpToBottom()
+                } label: {
+                    Label("回到最新", systemImage: "arrow.down")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                 }
-                .onAppear {
-                    positionInitialContent(using: proxy)
-                }
-                .onChange(of: messages.last?.id) { _, _ in
-                    handleNewContent(using: proxy, alwaysFollow: messages.last?.role == .user)
-                }
-                .onChange(of: streamingScrollToken) { _, _ in
-                    handleNewContent(using: proxy, alwaysFollow: false)
-                }
-                .onPreferenceChange(MessageListBottomPreferenceKey.self) { bottomY in
-                    guard bottomY.isFinite else { return }
-                    let nearBottom = bottomY <= viewport.size.height + 100
-                    isNearBottom = nearBottom
-                    if nearBottom {
-                        hasNewContentBelow = false
-                    }
-                }
+                .buttonStyle(.plain)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().stroke(.quaternary))
+                .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                .padding(.trailing, 18)
+                .padding(.bottom, 14)
+            }
+        }
+        .onAppear {
+            positionInitialContent()
+        }
+        .onChange(of: messages.last?.id) { _, _ in
+            handleNewContent(alwaysFollow: messages.last?.role == .user)
+        }
+        .onChange(of: streamingScrollToken) { _, _ in
+            handleNewContent(alwaysFollow: false)
+        }
+        .onChange(of: scrollPositionID) { _, position in
+            guard hasPositionedInitialContent else { return }
+            let isAtLatest = position == bottomAnchorID || position == messages.last?.id
+            followsLatest = isAtLatest
+            if isAtLatest {
+                hasNewContentBelow = false
             }
         }
     }
 
-    private func positionInitialContent(using proxy: ScrollViewProxy) {
+    private func positionInitialContent() {
         guard !messages.isEmpty, !hasPositionedInitialContent else { return }
         hasPositionedInitialContent = true
+        followsLatest = true
         DispatchQueue.main.async {
-            proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+            scrollPositionID = bottomAnchorID
         }
     }
 
-    private func handleNewContent(using proxy: ScrollViewProxy, alwaysFollow: Bool) {
+    private func handleNewContent(alwaysFollow: Bool) {
         guard !messages.isEmpty else { return }
         guard hasPositionedInitialContent else {
-            positionInitialContent(using: proxy)
+            positionInitialContent()
             return
         }
-        if alwaysFollow || isNearBottom {
+        if alwaysFollow || followsLatest {
+            followsLatest = true
             DispatchQueue.main.async {
-                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                scrollPositionID = bottomAnchorID
             }
             hasNewContentBelow = false
         } else {
@@ -694,23 +698,19 @@ private struct MessageList: View {
         }
     }
 
-    private func jumpToBottom(using proxy: ScrollViewProxy) {
-        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
-        isNearBottom = true
+    private func jumpToBottom() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollPositionID = bottomAnchorID
+        }
+        followsLatest = true
         hasNewContentBelow = false
     }
 
     private var streamingScrollToken: String {
         guard let last = messages.last else { return "empty" }
         return "\(messages.count):\(last.id):\(last.text.count):\(last.isStreaming)"
-    }
-}
-
-private struct MessageListBottomPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .infinity
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 
@@ -828,43 +828,51 @@ private struct ProcessingBubble: View {
     let message: ChatMessage
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 10) {
-                    if message.isStreaming {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: completionIcon)
-                            .foregroundStyle(completionColor)
-                    }
-
-                    Text(durationLabel(at: context.date))
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    Text(message.activityStatus ?? "进行中")
-                        .font(.caption)
-                        .foregroundStyle(statusColor)
-                }
-
-                Divider()
-
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(.blue)
-                        .padding(.top, 1)
-                    Text(message.text.isEmpty ? "Codex 正在处理你的任务…" : message.text)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+        if message.isStreaming {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                content(at: context.date)
             }
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            content(at: message.completedAt ?? message.startedAt ?? Date())
         }
+    }
+
+    private func content(at date: Date) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                if message.isStreaming {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: completionIcon)
+                        .foregroundStyle(completionColor)
+                }
+
+                Text(durationLabel(at: date))
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text(message.activityStatus ?? "进行中")
+                    .font(.caption)
+                    .foregroundStyle(statusColor)
+            }
+
+            Divider()
+
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.blue)
+                    .padding(.top, 1)
+                Text(message.text.isEmpty ? "Codex 正在处理你的任务…" : message.text)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func durationLabel(at currentDate: Date) -> String {

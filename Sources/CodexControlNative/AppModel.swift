@@ -250,16 +250,31 @@ final class AppModel: ObservableObject {
             let page = try await client.listThreads(limit: 60, cwd: requestedFolder)
             guard requestedFolder == selectedFolder else { return }
             let statuses = Dictionary(uniqueKeysWithValues: page.threads.map { ($0.id, $0.status) })
-            for index in threads.indices {
-                let threadID = threads[index].id
-                guard let status = statuses[threadID] else { continue }
-                // Keep the optimistic light on while this app is submitting or
-                // streaming a turn; app-server's list snapshot can lag briefly.
-                if isSending, threadID == selectedThreadID { continue }
-                threads[index].status = status
-            }
+            applyVisibleThreadStatuses(statuses)
         } catch {
             // Status lights are best-effort and must never interrupt the task.
+        }
+    }
+
+    /// Apply a polling snapshot only when a light actually changed. Mutating an
+    /// element of an `@Published` array emits a full model update even when the
+    /// new value equals the old one; doing that for every visible row used to
+    /// rebuild the entire three-column interface every four seconds.
+    func applyVisibleThreadStatuses(_ statuses: [String: String]) {
+        var updatedThreads = threads
+        var didChange = false
+        for index in updatedThreads.indices {
+            let threadID = updatedThreads[index].id
+            guard let status = statuses[threadID],
+                  status != updatedThreads[index].status else { continue }
+            // Keep the optimistic light on while this app is submitting or
+            // streaming a turn; app-server's list snapshot can lag briefly.
+            if isSending, threadID == selectedThreadID { continue }
+            updatedThreads[index].status = status
+            didChange = true
+        }
+        if didChange {
+            threads = updatedThreads
         }
     }
 
@@ -455,7 +470,8 @@ final class AppModel: ObservableObject {
 
     func applyExternalActivitySnapshot(_ snapshot: ThreadActivitySnapshot, threadID: String) {
         guard selectedThreadID == threadID, !isSending else { return }
-        if let index = threads.firstIndex(where: { $0.id == threadID }) {
+        if let index = threads.firstIndex(where: { $0.id == threadID }),
+           threads[index] != snapshot.thread {
             threads[index] = snapshot.thread
         }
 
@@ -491,8 +507,12 @@ final class AppModel: ObservableObject {
             merged.append(contentsOf: snapshot.messages)
         }
 
-        messages = merged
-        isExternalThreadProcessing = isActive
+        if messages != merged {
+            messages = merged
+        }
+        if isExternalThreadProcessing != isActive {
+            isExternalThreadProcessing = isActive
+        }
     }
 
     func chooseNewThreadFolder() {

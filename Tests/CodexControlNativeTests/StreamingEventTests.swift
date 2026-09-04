@@ -1,8 +1,85 @@
+import Combine
 import XCTest
 @testable import CloudCodex
 
 @MainActor
 final class StreamingEventTests: XCTestCase {
+    func testUnchangedStatusPollDoesNotRepublishThreadList() throws {
+        let model = AppModel()
+        let idleThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-idle",
+            "cwd": "/tmp/project",
+            "status": ["type": "idle"]
+        ]))
+        let activeThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-active",
+            "cwd": "/tmp/project",
+            "status": ["type": "active"]
+        ]))
+        model.threads = [idleThread, activeThread]
+
+        var publishCount = 0
+        let cancellable = model.$threads.dropFirst().sink { _ in
+            publishCount += 1
+        }
+
+        model.applyVisibleThreadStatuses([
+            "thread-idle": "idle",
+            "thread-active": "active"
+        ])
+        XCTAssertEqual(publishCount, 0)
+
+        model.applyVisibleThreadStatuses([
+            "thread-idle": "active",
+            "thread-active": "idle"
+        ])
+        XCTAssertEqual(publishCount, 1)
+        XCTAssertEqual(model.threads.map(\.status), ["active", "idle"])
+        withExtendedLifetime(cancellable) {}
+    }
+
+    func testUnchangedExternalActivityPollDoesNotRepublishConversation() throws {
+        let model = AppModel()
+        let thread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-idle",
+            "cwd": "/tmp/project",
+            "preview": "已经完成",
+            "status": ["type": "idle"]
+        ]))
+        let existingMessage = ChatMessage(
+            id: "answer",
+            role: .assistant,
+            text: "已经完成"
+        )
+        model.threads = [thread]
+        model.selectedThreadID = thread.id
+        model.messages = [existingMessage]
+
+        var threadPublishCount = 0
+        var messagePublishCount = 0
+        var processingPublishCount = 0
+        let threadCancellable = model.$threads.dropFirst().sink { _ in
+            threadPublishCount += 1
+        }
+        let messageCancellable = model.$messages.dropFirst().sink { _ in
+            messagePublishCount += 1
+        }
+        let processingCancellable = model.$isExternalThreadProcessing.dropFirst().sink { _ in
+            processingPublishCount += 1
+        }
+
+        model.applyExternalActivitySnapshot(
+            ThreadActivitySnapshot(thread: thread, turn: nil, messages: []),
+            threadID: thread.id
+        )
+
+        XCTAssertEqual(threadPublishCount, 0)
+        XCTAssertEqual(messagePublishCount, 0)
+        XCTAssertEqual(processingPublishCount, 0)
+        XCTAssertEqual(model.messages, [existingMessage])
+        withExtendedLifetime((threadCancellable, messageCancellable, processingCancellable)) {}
+    }
+
     func testTurnEventsUpdateThreadListRunningStatus() throws {
         let model = AppModel()
         let thread = try XCTUnwrap(CodexThread(json: [
