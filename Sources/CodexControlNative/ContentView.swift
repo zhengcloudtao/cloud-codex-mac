@@ -329,9 +329,7 @@ private struct MessageBubble: View {
                         .frame(width: 26, height: 26)
                         .background(.blue.opacity(0.1), in: Circle())
                 }
-                Text(message.text)
-                    .font(.body)
-                    .textSelection(.enabled)
+                MarkdownMessageView(markdown: message.text)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .foregroundStyle(.primary)
