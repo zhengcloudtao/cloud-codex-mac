@@ -766,6 +766,12 @@ private struct Composer: View {
 
                     permissionMenu
 
+                    if model.isExternalThreadProcessing {
+                        Label("Codex 中处理中", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Spacer(minLength: 18)
 
                     modelMenu
@@ -786,7 +792,9 @@ private struct Composer: View {
                         }
                     } label: {
                         Group {
-                            if model.isSending && model.activeTurnID == nil {
+                            if model.isExternalThreadProcessing {
+                                ProgressView().controlSize(.small)
+                            } else if model.isSending && model.activeTurnID == nil {
                                 ProgressView().controlSize(.small)
                             } else if model.isSending {
                                 Image(systemName: "stop.fill")
@@ -801,7 +809,11 @@ private struct Composer: View {
                     .buttonStyle(.borderedProminent)
                     .clipShape(Circle())
                     .disabled(!model.canSend && !model.isSending)
-                    .help(model.isSending ? "停止当前任务" : "发送（Return）")
+                    .help(
+                        model.isExternalThreadProcessing
+                            ? "此任务正在 Codex 主应用中处理"
+                            : (model.isSending ? "停止当前任务" : "发送（Return）")
+                    )
                 }
             }
             .padding(.horizontal, 16)

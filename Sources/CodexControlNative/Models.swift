@@ -123,6 +123,21 @@ struct ThreadPage {
     let hasMore: Bool
 }
 
+struct TurnRuntimeState {
+    let id: String
+    let status: String
+    let startedAt: Date?
+    let completedAt: Date?
+
+    var isActive: Bool { status == "inProgress" }
+}
+
+struct ThreadActivitySnapshot {
+    let thread: CodexThread
+    let turn: TurnRuntimeState?
+    let messages: [ChatMessage]
+}
+
 struct CodexModelOption: Identifiable, Hashable {
     let id: String
     let model: String

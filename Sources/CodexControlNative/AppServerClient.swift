@@ -153,6 +153,30 @@ final class AppServerClient {
         return (thread, Self.parseMessages(from: newestFirst.reversed()))
     }
 
+    func readLatestThreadActivity(_ id: String) async throws -> ThreadActivitySnapshot {
+        let result = try await request(
+            "thread/read",
+            params: ["threadId": id, "includeTurns": false]
+        )
+        guard let json = result["thread"] as? JSON,
+              let thread = CodexThread(json: json) else {
+            throw CodexClientError.invalidResponse
+        }
+        let turnsResult = try await request(
+            "thread/turns/list",
+            params: [
+                "threadId": id,
+                "limit": 1,
+                "itemsView": "full",
+                "sortDirection": "desc"
+            ]
+        )
+        let latestTurn = (turnsResult["data"] as? [JSON])?.first
+        let runtime = latestTurn.flatMap(Self.parseTurnRuntime)
+        let messages = latestTurn.map { Self.parseMessages(from: [$0]) } ?? []
+        return ThreadActivitySnapshot(thread: thread, turn: runtime, messages: messages)
+    }
+
     func createThread(cwd: String, model: String?, permissions: String?) async throws -> CodexThread {
         var params: JSON = ["cwd": cwd, "ephemeral": false]
         if let model { params["model"] = model }
@@ -434,6 +458,18 @@ final class AppServerClient {
             }
         }
         return messages
+    }
+
+    private static func parseTurnRuntime(_ turn: JSON) -> TurnRuntimeState? {
+        guard let id = turn["id"] as? String,
+              let status = turn["status"] as? String else { return nil }
+        let startedAt = (turn["startedAt"] as? NSNumber).map {
+            Date(timeIntervalSince1970: $0.doubleValue)
+        }
+        let completedAt = (turn["completedAt"] as? NSNumber).map {
+            Date(timeIntervalSince1970: $0.doubleValue)
+        }
+        return TurnRuntimeState(id: id, status: status, startedAt: startedAt, completedAt: completedAt)
     }
 
     private static func clippedActivityText(_ text: String) -> String {

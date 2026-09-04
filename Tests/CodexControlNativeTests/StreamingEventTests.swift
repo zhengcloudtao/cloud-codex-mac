@@ -87,4 +87,62 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertLessThan(output.count, 12_100)
         XCTAssertTrue(output.hasPrefix("…已省略较早输出…"))
     }
+
+    func testExternallyStartedTurnShowsAndClearsProcessingState() throws {
+        let model = AppModel()
+        model.selectedThreadID = "thread-external"
+        let activeThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-external",
+            "cwd": "/tmp/project",
+            "preview": "外部任务",
+            "status": ["type": "active"]
+        ]))
+        let start = Date(timeIntervalSince1970: 1_788_500_000)
+        let userMessage = ChatMessage(id: "user-external", role: .user, text: "继续处理")
+        let commandMessage = ChatMessage(
+            id: "command-external",
+            role: .activity,
+            text: "$ swift test",
+            isStreaming: true,
+            activityKind: .command,
+            activityTitle: "执行命令",
+            activityStatus: "运行中"
+        )
+
+        model.applyExternalActivitySnapshot(
+            ThreadActivitySnapshot(
+                thread: activeThread,
+                turn: TurnRuntimeState(id: "turn-external", status: "inProgress", startedAt: start, completedAt: nil),
+                messages: [userMessage, commandMessage]
+            ),
+            threadID: "thread-external"
+        )
+
+        XCTAssertTrue(model.isExternalThreadProcessing)
+        XCTAssertFalse(model.canSend)
+        let progressIndex = try XCTUnwrap(model.messages.firstIndex { $0.id == "turn-progress" })
+        XCTAssertEqual(progressIndex, 1)
+        XCTAssertEqual(model.messages[progressIndex].startedAt, start)
+        XCTAssertEqual(model.messages[progressIndex + 1].id, "command-external")
+
+        let idleThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-external",
+            "cwd": "/tmp/project",
+            "preview": "外部任务",
+            "status": ["type": "idle"]
+        ]))
+        let assistantMessage = ChatMessage(id: "answer-external", role: .assistant, text: "已经完成")
+        model.applyExternalActivitySnapshot(
+            ThreadActivitySnapshot(
+                thread: idleThread,
+                turn: TurnRuntimeState(id: "turn-external", status: "completed", startedAt: start, completedAt: Date()),
+                messages: [userMessage, commandMessage, assistantMessage]
+            ),
+            threadID: "thread-external"
+        )
+
+        XCTAssertFalse(model.isExternalThreadProcessing)
+        XCTAssertFalse(model.messages.contains { $0.id == "turn-progress" })
+        XCTAssertEqual(model.messages.last?.id, "answer-external")
+    }
 }

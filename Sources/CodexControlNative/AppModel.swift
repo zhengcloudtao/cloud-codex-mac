@@ -13,6 +13,7 @@ final class AppModel: ObservableObject {
     @Published var connectionText = "正在连接…"
     @Published var isLoading = false
     @Published var isSending = false
+    @Published var isExternalThreadProcessing = false
     @Published var hasMoreThreads = false
     @Published var errorMessage: String?
     @Published var showingNewThread = false
@@ -37,6 +38,7 @@ final class AppModel: ObservableObject {
     private let speech = SpeechInputController()
     private var hasStarted = false
     private var threadRequestGeneration = 0
+    private var selectedThreadMonitorTask: Task<Void, Never>?
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
 
     init() {
@@ -152,6 +154,7 @@ final class AppModel: ObservableObject {
     var canSend: Bool {
         (!composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
             && !isSending
+            && !isExternalThreadProcessing
     }
 
     func start() async {
@@ -201,6 +204,9 @@ final class AppModel: ObservableObject {
     }
 
     func selectFolder(_ path: String?) {
+        selectedThreadMonitorTask?.cancel()
+        selectedThreadMonitorTask = nil
+        isExternalThreadProcessing = false
         selectedFolder = path
         selectedThreadID = nil
         threads = []
@@ -214,8 +220,25 @@ final class AppModel: ObservableObject {
     }
 
     func selectThread(_ id: String?) {
+        selectedThreadMonitorTask?.cancel()
+        selectedThreadMonitorTask = nil
+        isExternalThreadProcessing = false
         selectedThreadID = id
-        Task { await loadSelectedThread() }
+        guard let id else {
+            messages = []
+            return
+        }
+        selectedThreadMonitorTask = Task { [weak self] in
+            guard let self else { return }
+            await self.loadSelectedThread()
+            await self.syncLatestExternalActivity(threadID: id)
+            while !Task.isCancelled, self.selectedThreadID == id {
+                let delaySeconds: UInt64 = self.isExternalThreadProcessing ? 2 : 5
+                try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                await self.syncLatestExternalActivity(threadID: id)
+            }
+        }
     }
 
     func loadSelectedThread() async {
@@ -245,11 +268,12 @@ final class AppModel: ObservableObject {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         let outgoingAttachments = attachments
         guard (!text.isEmpty || !outgoingAttachments.isEmpty),
-              let id = selectedThreadID, !isSending else { return }
+              let id = selectedThreadID, !isSending, !isExternalThreadProcessing else { return }
         speech.stop()
         composerText = ""
         attachments = []
         isSending = true
+        isExternalThreadProcessing = false
         let attachmentNames = outgoingAttachments.map { "📎 \($0.url.lastPathComponent)" }
         let localText = ([text].filter { !$0.isEmpty } + attachmentNames).joined(separator: "\n")
         messages.append(.init(id: "local-\(UUID().uuidString)", role: .user, text: localText))
@@ -285,6 +309,60 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func syncLatestExternalActivity(threadID: String) async {
+        guard selectedThreadID == threadID, !isSending else { return }
+        do {
+            let snapshot = try await client.readLatestThreadActivity(threadID)
+            guard selectedThreadID == threadID, !isSending else { return }
+            applyExternalActivitySnapshot(snapshot, threadID: threadID)
+        } catch {
+            // Monitoring is best-effort. The primary app-server connection and
+            // manual refresh remain available if another Codex process is busy.
+        }
+    }
+
+    func applyExternalActivitySnapshot(_ snapshot: ThreadActivitySnapshot, threadID: String) {
+        guard selectedThreadID == threadID, !isSending else { return }
+        if let index = threads.firstIndex(where: { $0.id == threadID }) {
+            threads[index] = snapshot.thread
+        }
+
+        let wasStartedAt = messages.first(where: { $0.id == "turn-progress" })?.startedAt
+        let latestIDs = Set(snapshot.messages.map(\.id))
+        var merged = messages.filter { $0.id != "turn-progress" && !latestIDs.contains($0.id) }
+        let isActive = snapshot.turn?.isActive == true || snapshot.thread.status == "active"
+
+        if isActive {
+            let startedAt = snapshot.turn?.startedAt ?? wasStartedAt ?? Date()
+            let progress = ChatMessage(
+                id: "turn-progress",
+                role: .activity,
+                text: "Codex 主应用正在处理这个任务，最新进度会自动同步。",
+                isStreaming: true,
+                activityKind: .status,
+                activityTitle: "Codex 正在处理",
+                activityStatus: "进行中",
+                startedAt: startedAt
+            )
+            if let lastUserIndex = snapshot.messages.lastIndex(where: { $0.role == .user }) {
+                merged.append(contentsOf: snapshot.messages[...lastUserIndex])
+                merged.append(progress)
+                let nextIndex = snapshot.messages.index(after: lastUserIndex)
+                if nextIndex < snapshot.messages.endIndex {
+                    merged.append(contentsOf: snapshot.messages[nextIndex...])
+                }
+            } else {
+                merged.append(progress)
+                merged.append(contentsOf: snapshot.messages)
+            }
+        } else {
+            merged.append(contentsOf: snapshot.messages)
+        }
+
+        messages = merged
+        isExternalThreadProcessing = isActive
     }
 
     func chooseNewThreadFolder() {
