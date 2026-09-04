@@ -4,6 +4,42 @@ import XCTest
 
 @MainActor
 final class StreamingEventTests: XCTestCase {
+    func testModelParsesAdvertisedFastServiceTier() throws {
+        let option = try XCTUnwrap(CodexModelOption(json: [
+            "id": "gpt-test",
+            "model": "gpt-test",
+            "displayName": "GPT Test",
+            "defaultReasoningEffort": "medium",
+            "supportedReasoningEfforts": [
+                ["reasoningEffort": "medium"]
+            ],
+            "defaultServiceTier": "default",
+            "serviceTiers": [
+                ["id": "fast", "name": "Fast", "description": "Faster responses"]
+            ]
+        ]))
+
+        XCTAssertEqual(option.defaultServiceTier, "default")
+        XCTAssertEqual(option.fastServiceTierID, "fast")
+        XCTAssertEqual(option.serviceTiers.first?.name, "Fast")
+    }
+
+    func testTurnStartUsesPerTurnServiceTierOverride() {
+        let parameters = AppServerClient.turnStartParameters(
+            threadID: "thread-1",
+            text: "继续处理",
+            attachments: [],
+            model: "gpt-test",
+            effort: "high",
+            permissions: ":workspace",
+            serviceTierForTurn: "fast"
+        )
+
+        XCTAssertEqual(parameters["serviceTierForTurn"] as? String, "fast")
+        XCTAssertEqual(parameters["threadId"] as? String, "thread-1")
+        XCTAssertEqual(parameters["model"] as? String, "gpt-test")
+    }
+
     func testUnchangedStatusPollDoesNotRepublishThreadList() throws {
         let model = AppModel()
         let idleThread = try XCTUnwrap(CodexThread(json: [
@@ -80,6 +116,48 @@ final class StreamingEventTests: XCTestCase {
         withExtendedLifetime((threadCancellable, messageCancellable, processingCancellable)) {}
     }
 
+    func testActiveExternalSnapshotIgnoresNonVisibleThreadTimestampChanges() throws {
+        let model = AppModel()
+        let original = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-active",
+            "cwd": "/tmp/project",
+            "preview": "正在处理",
+            "updatedAt": 1_788_500_000,
+            "status": ["type": "active"]
+        ]))
+        let newerSnapshot = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-active",
+            "cwd": "/tmp/project",
+            "preview": "正在处理",
+            "updatedAt": 1_788_500_100,
+            "status": ["type": "active"]
+        ]))
+        model.threads = [original]
+        model.selectedThreadID = original.id
+
+        var publishCount = 0
+        let cancellable = model.$threads.dropFirst().sink { _ in
+            publishCount += 1
+        }
+        model.applyExternalActivitySnapshot(
+            ThreadActivitySnapshot(
+                thread: newerSnapshot,
+                turn: TurnRuntimeState(
+                    id: "turn-active",
+                    status: "inProgress",
+                    startedAt: nil,
+                    completedAt: nil
+                ),
+                messages: []
+            ),
+            threadID: original.id
+        )
+
+        XCTAssertEqual(publishCount, 0)
+        XCTAssertEqual(model.threads.first?.updatedAt, original.updatedAt)
+        withExtendedLifetime(cancellable) {}
+    }
+
     func testTurnEventsUpdateThreadListRunningStatus() throws {
         let model = AppModel()
         let thread = try XCTUnwrap(CodexThread(json: [
@@ -125,6 +203,7 @@ final class StreamingEventTests: XCTestCase {
             "threadId": "thread-1", "turnId": "turn-1",
             "itemId": "reasoning-1", "delta": "再定位需要修改的文件。"
         ])
+        model.flushPendingDeltas()
         let reasoning = model.messages.first { $0.id == "reasoning-1" }
         XCTAssertEqual(reasoning?.activityKind, .reasoning)
         XCTAssertEqual(reasoning?.text, "先检查项目结构。再定位需要修改的文件。")
@@ -135,6 +214,7 @@ final class StreamingEventTests: XCTestCase {
             "itemId": "reasoning-live-1", "contentIndex": 0,
             "delta": "正在检查工程中的相关实现。"
         ])
+        model.flushPendingDeltas()
         let liveReasoning = model.messages.first { $0.id == "reasoning-live-1-live" }
         XCTAssertEqual(liveReasoning?.activityTitle, "实时推理")
         XCTAssertEqual(liveReasoning?.text, "正在检查工程中的相关实现。")
@@ -161,6 +241,7 @@ final class StreamingEventTests: XCTestCase {
             "threadId": "thread-1", "turnId": "turn-1",
             "itemId": "command-1", "delta": "Build complete!"
         ])
+        model.flushPendingDeltas()
         let command = model.messages.first { $0.id == "command-1" }
         XCTAssertEqual(command?.activityKind, .command)
         XCTAssertTrue(command?.text.contains("swift build") == true)
@@ -203,9 +284,32 @@ final class StreamingEventTests: XCTestCase {
             "threadId": "thread-1", "turnId": "turn-1",
             "itemId": "command-1", "delta": String(repeating: "x", count: 20_000)
         ])
+        model.flushPendingDeltas()
         let output = model.messages.first { $0.id == "command-1" }?.text ?? ""
         XCTAssertLessThan(output.count, 12_100)
         XCTAssertTrue(output.hasPrefix("…已省略较早输出…"))
+    }
+
+    func testHighFrequencyDeltasPublishOneConversationUpdatePerBatch() {
+        let model = AppModel()
+        model.selectedThreadID = "thread-1"
+        var publishCount = 0
+        let cancellable = model.$messages.dropFirst().sink { _ in
+            publishCount += 1
+        }
+
+        for _ in 0..<100 {
+            model.handleEvent("item/agentMessage/delta", [
+                "threadId": "thread-1", "turnId": "turn-1",
+                "itemId": "answer-1", "delta": "字"
+            ])
+        }
+
+        XCTAssertEqual(publishCount, 0)
+        model.flushPendingDeltas()
+        XCTAssertEqual(publishCount, 1)
+        XCTAssertEqual(model.messages.first?.text.count, 100)
+        withExtendedLifetime(cancellable) {}
     }
 
     func testExternallyStartedTurnShowsAndClearsProcessingState() throws {

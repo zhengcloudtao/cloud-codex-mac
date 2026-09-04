@@ -607,36 +607,58 @@ private struct ConversationHeader: View {
 private struct MessageList: View {
     let messages: [ChatMessage]
     let isLoading: Bool
-    @State private var hasPositionedInitialContent = false
-    @State private var scrollPositionID: String?
-    @State private var followsLatest = true
+    @State private var isAtLatest = true
+    @State private var hasUnseenUpdates = false
     @State private var hasNewContentBelow = false
+    @State private var visibleMessageLimit = 12
+    @State private var viewportResetID = UUID()
 
-    private let bottomAnchorID = "message-list-bottom"
+    private let messageBatchSize = 12
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             ScrollView {
-                LazyVStack(spacing: 18) {
+                VStack(spacing: 18) {
                     if messages.isEmpty && isLoading {
                         ProgressView("正在读取会话…").padding(.top, 80)
                     } else if messages.isEmpty {
                         ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
                             .padding(.top, 80)
                     }
-                    ForEach(messages) { message in
-                        MessageBubble(message: message).id(message.id)
+
+                    if hiddenMessageCount > 0 {
+                        Button {
+                            showEarlierMessages()
+                        } label: {
+                            Label(
+                                "显示更早的 \(min(messageBatchSize, hiddenMessageCount)) 条消息",
+                                systemImage: "clock.arrow.circlepath"
+                            )
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.quaternary.opacity(0.65), in: Capsule())
+
+                        Text("为保持流畅，已隐藏更早的 \(hiddenMessageCount) 条消息")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
-                    Color.clear
-                        .frame(height: 1)
-                        .id(bottomAnchorID)
+
+                    ForEach(renderedMessages) { message in
+                        MessageBubble(message: message)
+                            .equatable()
+                            .id(message.id)
+                    }
                 }
-                .scrollTargetLayout()
                 .padding(22)
             }
-            .scrollPosition(id: $scrollPositionID, anchor: .bottom)
+            .defaultScrollAnchor(.bottom)
+            .background(ScrollLatestObserver(isAtLatest: $isAtLatest))
+            .id(viewportResetID)
 
-            if hasNewContentBelow {
+            if hasNewContentBelow && !isAtLatest {
                 Button {
                     jumpToBottom()
                 } label: {
@@ -654,58 +676,62 @@ private struct MessageList: View {
             }
         }
         .onAppear {
-            positionInitialContent()
+            isAtLatest = true
+            hasUnseenUpdates = false
+            hasNewContentBelow = false
         }
         .onChange(of: messages.last?.id) { _, _ in
-            handleNewContent(alwaysFollow: messages.last?.role == .user)
+            handleNewMessage()
         }
         .onChange(of: streamingScrollToken) { _, _ in
-            handleNewContent(alwaysFollow: false)
+            markNewContent()
         }
-        .onChange(of: scrollPositionID) { _, position in
-            guard hasPositionedInitialContent else { return }
-            let isAtLatest = position == bottomAnchorID || position == messages.last?.id
-            followsLatest = isAtLatest
-            if isAtLatest {
+        .onChange(of: isAtLatest) { _, latest in
+            if latest {
+                hasUnseenUpdates = false
                 hasNewContentBelow = false
+            } else {
+                hasNewContentBelow = hasUnseenUpdates
             }
         }
     }
 
-    private func positionInitialContent() {
-        guard !messages.isEmpty, !hasPositionedInitialContent else { return }
-        hasPositionedInitialContent = true
-        followsLatest = true
-        DispatchQueue.main.async {
-            scrollPositionID = bottomAnchorID
-        }
+    private var renderedMessages: ArraySlice<ChatMessage> {
+        messages.suffix(visibleMessageLimit)
     }
 
-    private func handleNewContent(alwaysFollow: Bool) {
-        guard !messages.isEmpty else { return }
-        guard hasPositionedInitialContent else {
-            positionInitialContent()
-            return
-        }
-        if alwaysFollow || followsLatest {
-            followsLatest = true
-            DispatchQueue.main.async {
-                scrollPositionID = bottomAnchorID
-            }
-            hasNewContentBelow = false
+    private var hiddenMessageCount: Int {
+        max(0, messages.count - visibleMessageLimit)
+    }
+
+    private func handleNewMessage() {
+        guard let last = messages.last else { return }
+        if last.role == .user {
+            jumpToBottom()
         } else {
-            hasNewContentBelow = true
+            markNewContent()
         }
+    }
+
+    private func markNewContent() {
+        guard !messages.isEmpty else { return }
+        hasUnseenUpdates = true
+        hasNewContentBelow = !isAtLatest
     }
 
     private func jumpToBottom() {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollPositionID = bottomAnchorID
-        }
-        followsLatest = true
+        // Recreate the bounded 12-message viewport with a declarative bottom
+        // anchor. This is an instant jump and deliberately avoids ScrollView
+        // position bindings / proxy scrolling, both of which can create a
+        // persistent SwiftUI focus-layout feedback loop on very long content.
+        isAtLatest = true
+        hasUnseenUpdates = false
+        viewportResetID = UUID()
         hasNewContentBelow = false
+    }
+
+    private func showEarlierMessages() {
+        visibleMessageLimit = min(messages.count, visibleMessageLimit + messageBatchSize)
     }
 
     private var streamingScrollToken: String {
@@ -714,7 +740,125 @@ private struct MessageList: View {
     }
 }
 
-private struct MessageBubble: View {
+/// Observes AppKit's clip view instead of feeding scroll offsets through
+/// SwiftUI preferences. It only publishes when the bottom/not-bottom state
+/// actually changes, avoiding continuous layout invalidation while streaming.
+private struct ScrollLatestObserver: NSViewRepresentable {
+    @Binding var isAtLatest: Bool
+
+    func makeNSView(context: Context) -> ScrollLatestProbeView {
+        let view = ScrollLatestProbeView()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrollLatestProbeView, context: Context) {
+        update(nsView)
+    }
+
+    static func dismantleNSView(_ nsView: ScrollLatestProbeView, coordinator: ()) {
+        nsView.disconnect()
+    }
+
+    private func update(_ view: ScrollLatestProbeView) {
+        view.onLatestChanged = { latest in
+            if isAtLatest != latest {
+                isAtLatest = latest
+            }
+        }
+        view.connectWhenReady()
+    }
+}
+
+private final class ScrollLatestProbeView: NSView {
+    var onLatestChanged: ((Bool) -> Void)?
+
+    private weak var observedScrollView: NSScrollView?
+    private var observationTokens: [NSObjectProtocol] = []
+    private var lastReportedValue: Bool?
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        connectWhenReady()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        connectWhenReady()
+    }
+
+    func connectWhenReady() {
+        DispatchQueue.main.async { [weak self] in
+            self?.connectToEnclosingScrollView()
+        }
+    }
+
+    func disconnect() {
+        observationTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        observationTokens.removeAll()
+        observedScrollView = nil
+    }
+
+    deinit {
+        disconnect()
+    }
+
+    private func connectToEnclosingScrollView() {
+        var ancestor = superview
+        while let view = ancestor, !(view is NSScrollView) {
+            ancestor = view.superview
+        }
+        guard let scrollView = ancestor as? NSScrollView else { return }
+        guard observedScrollView !== scrollView else {
+            reportCurrentPosition()
+            return
+        }
+
+        disconnect()
+        observedScrollView = scrollView
+
+        let center = NotificationCenter.default
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        observationTokens.append(center.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reportCurrentPosition()
+        })
+
+        if let documentView = scrollView.documentView {
+            documentView.postsFrameChangedNotifications = true
+            observationTokens.append(center.addObserver(
+                forName: NSView.frameDidChangeNotification,
+                object: documentView,
+                queue: .main
+            ) { [weak self] _ in
+                self?.reportCurrentPosition()
+            })
+        }
+        reportCurrentPosition()
+    }
+
+    private func reportCurrentPosition() {
+        guard let scrollView = observedScrollView,
+              let documentView = scrollView.documentView else { return }
+        let visibleRect = scrollView.documentVisibleRect
+        let documentBounds = documentView.bounds
+        let threshold: CGFloat = 28
+        let remaining = documentView.isFlipped
+            ? documentBounds.maxY - visibleRect.maxY
+            : visibleRect.minY - documentBounds.minY
+        let latest = remaining <= threshold
+        guard latest != lastReportedValue else { return }
+        lastReportedValue = latest
+        DispatchQueue.main.async { [weak self] in
+            self?.onLatestChanged?(latest)
+        }
+    }
+}
+
+private struct MessageBubble: View, Equatable {
     let message: ChatMessage
 
     @ViewBuilder
@@ -735,8 +879,12 @@ private struct MessageBubble: View {
                 Group {
                     if message.role == .user {
                         UserMessageContent(message: message)
+                    } else if message.isStreaming {
+                        Text(streamingAssistantPreview)
+                            .font(.body)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        MarkdownMessageView(markdown: message.text)
+                        AssistantMessageContent(text: message.text)
                     }
                 }
                     .padding(.horizontal, 14)
@@ -753,6 +901,101 @@ private struct MessageBubble: View {
     private var background: some ShapeStyle {
         if message.role == .user { return AnyShapeStyle(Color.accentColor.opacity(0.14)) }
         return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var streamingAssistantPreview: String {
+        let limit = 6_000
+        guard message.text.count > limit else { return message.text }
+        return "…正在生成，仅显示最新内容…\n" + String(message.text.suffix(limit))
+    }
+}
+
+private struct AssistantMessageContent: View {
+    let text: String
+
+    var body: some View {
+        if text.count > LongAssistantMessageView.pageSize {
+            LongAssistantMessageView(text: text)
+        } else {
+            MarkdownMessageView(markdown: text)
+        }
+    }
+}
+
+/// Very long final replies can contain hundreds of Markdown blocks. Building
+/// all of them at once causes a large one-off CPU and memory spike even though
+/// only a small part is visible. Page the raw text so every page has a strict
+/// layout ceiling while preserving access to the entire answer.
+private struct LongAssistantMessageView: View {
+    static let pageSize = 8_000
+
+    let text: String
+    @State private var page: Int
+
+    init(text: String) {
+        self.text = text
+        let lastPage = max(0, (text.count - 1) / Self.pageSize)
+        _page = State(initialValue: lastPage)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(pageText)
+                .font(.body)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Label(
+                    "长回复性能模式 · 第 \(boundedPage + 1) / \(totalPages) 页",
+                    systemImage: "doc.text.magnifyingglass"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button {
+                    page = max(0, boundedPage - 1)
+                } label: {
+                    Label("上一页", systemImage: "chevron.left")
+                }
+                .disabled(boundedPage == 0)
+
+                Button {
+                    page = min(totalPages - 1, boundedPage + 1)
+                } label: {
+                    Label("下一页", systemImage: "chevron.right")
+                }
+                .disabled(boundedPage >= totalPages - 1)
+
+                Button("复制全文") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+            }
+            .font(.caption)
+            .buttonStyle(.borderless)
+        }
+    }
+
+    private var totalPages: Int {
+        max(1, (text.count + Self.pageSize - 1) / Self.pageSize)
+    }
+
+    private var boundedPage: Int {
+        min(max(0, page), totalPages - 1)
+    }
+
+    private var pageText: String {
+        let characterCount = text.count
+        let lowerOffset = min(characterCount, boundedPage * Self.pageSize)
+        let upperOffset = min(characterCount, lowerOffset + Self.pageSize)
+        let lower = text.index(text.startIndex, offsetBy: lowerOffset)
+        let upper = text.index(text.startIndex, offsetBy: upperOffset)
+        return String(text[lower..<upper])
     }
 }
 
@@ -923,13 +1166,22 @@ private struct ActivityBubble: View {
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             if !message.text.isEmpty {
-                ScrollView(.horizontal, showsIndicators: true) {
-                    Text(message.text)
+                if message.isStreaming {
+                    Text(liveDetail)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(12)
                         .padding(.top, 9)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        Text(message.text)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 9)
+                    }
                 }
             }
         } label: {
@@ -956,9 +1208,15 @@ private struct ActivityBubble: View {
         .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
         .onChange(of: message.isStreaming) { _, streaming in
-            if streaming { isExpanded = true }
+            isExpanded = streaming
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var liveDetail: String {
+        let limit = 2_000
+        guard message.text.count > limit else { return message.text }
+        return "…仅显示最新输出…\n" + String(message.text.suffix(limit))
     }
 
     private var iconColor: Color {
@@ -1169,6 +1427,31 @@ private struct Composer: View {
                     }
                 }
             }
+
+            Section("响应速度") {
+                Button {
+                    model.setFastModeEnabled(false)
+                } label: {
+                    HStack {
+                        Text("标准")
+                        if !model.isFastModeEnabled || !model.supportsFastMode {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+
+                Button {
+                    model.setFastModeEnabled(true)
+                } label: {
+                    HStack {
+                        Text(model.supportsFastMode ? "加速" : "加速（当前模型不支持）")
+                        if model.isFastModeEnabled && model.supportsFastMode {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                .disabled(!model.supportsFastMode)
+            }
         } label: {
             Text(modelAndEffortCompactLabel)
                 .font(.callout)
@@ -1178,19 +1461,23 @@ private struct Composer: View {
         .menuStyle(.borderlessButton)
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel(modelAndEffortAccessibilityLabel)
-        .help("选择模型和推理强度")
+        .help("选择模型、推理强度和响应速度")
     }
 
     private var modelAndEffortCompactLabel: String {
         let modelName = model.selectedModel?.compactName ?? "选择模型"
-        guard let effort = model.selectedEffort else { return modelName }
-        return "\(modelName) · \(effortCompactName(effort))"
+        guard let effort = model.selectedEffort else {
+            return "\(modelName) · \(model.selectedSpeedLabel)"
+        }
+        return "\(modelName) · \(effortCompactName(effort)) · \(model.selectedSpeedLabel)"
     }
 
     private var modelAndEffortAccessibilityLabel: String {
         let modelName = model.selectedModel?.compactName ?? "选择模型"
-        guard let effort = model.selectedEffort else { return modelName }
-        return "\(modelName)，\(effortDisplayName(effort))"
+        guard let effort = model.selectedEffort else {
+            return "\(modelName)，\(model.selectedSpeedLabel)速度"
+        }
+        return "\(modelName)，\(effortDisplayName(effort))，\(model.selectedSpeedLabel)速度"
     }
 
     private func effortDisplayName(_ effort: String) -> String {

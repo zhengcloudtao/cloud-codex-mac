@@ -239,6 +239,15 @@ struct CodexModelOption: Identifiable, Hashable {
     let description: String
     let defaultEffort: String
     let supportedEfforts: [String]
+    let defaultServiceTier: String?
+    let serviceTiers: [CodexServiceTier]
+
+    var fastServiceTierID: String? {
+        serviceTiers.first {
+            $0.id.caseInsensitiveCompare("fast") == .orderedSame
+                || $0.id.caseInsensitiveCompare("priority") == .orderedSame
+        }?.id
+    }
 
     var compactName: String {
         displayName
@@ -259,6 +268,39 @@ struct CodexModelOption: Identifiable, Hashable {
         self.defaultEffort = defaultEffort
         let efforts = json["supportedReasoningEfforts"] as? [[String: Any]] ?? []
         self.supportedEfforts = efforts.compactMap { $0["reasoningEffort"] as? String }
+        self.defaultServiceTier = json["defaultServiceTier"] as? String
+
+        let declaredTiers = json["serviceTiers"] as? [[String: Any]] ?? []
+        var parsedTiers = declaredTiers.compactMap(CodexServiceTier.init(json:))
+        if parsedTiers.isEmpty {
+            let legacyTiers = json["additionalSpeedTiers"] as? [String] ?? []
+            parsedTiers = legacyTiers.map {
+                CodexServiceTier(id: $0, name: $0.capitalized, description: "")
+            }
+        }
+        self.serviceTiers = parsedTiers
+    }
+}
+
+struct CodexServiceTier: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let description: String
+
+    init(id: String, name: String, description: String) {
+        self.id = id
+        self.name = name
+        self.description = description
+    }
+
+    init?(json: [String: Any]) {
+        guard let id = json["id"] as? String,
+              let name = json["name"] as? String else { return nil }
+        self.init(
+            id: id,
+            name: name,
+            description: json["description"] as? String ?? ""
+        )
     }
 }
 

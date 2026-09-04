@@ -24,6 +24,7 @@ final class AppModel: ObservableObject {
     @Published var permissionProfiles: [PermissionProfileOption] = []
     @Published var selectedModelID: String?
     @Published var selectedEffort: String?
+    @Published private(set) var isFastModeEnabled: Bool
     @Published var selectedPermissionID: String? = ":danger-full-access"
     @Published var attachments: [ComposerAttachment] = []
     @Published var isRecording = false
@@ -42,9 +43,26 @@ final class AppModel: ObservableObject {
     private var selectedThreadMonitorTask: Task<Void, Never>?
     private var threadStatusMonitorTask: Task<Void, Never>?
     private var turnProgressHintTask: Task<Void, Never>?
+    private var pendingDeltaFlushTask: Task<Void, Never>?
+    private var pendingActivityDeltas: [String: PendingActivityDelta] = [:]
+    private var pendingAssistantDeltas: [String: [String]] = [:]
+    private var pendingDeltaOrder: [PendingDeltaTarget] = []
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
+    private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
+
+    private struct PendingActivityDelta {
+        var kind: ChatMessage.ActivityKind
+        var title: String
+        var chunks: [String]
+    }
+
+    private enum PendingDeltaTarget: Hashable {
+        case activity(String)
+        case assistant(String)
+    }
 
     init() {
+        isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
         if let data = UserDefaults.standard.data(forKey: workspaceOrganizationKey),
            let saved = try? JSONDecoder().decode(WorkspaceOrganization.self, from: data) {
             workspaceOrganization = saved
@@ -178,6 +196,21 @@ final class AppModel: ObservableObject {
         selectedModel?.supportedEfforts ?? []
     }
 
+    var supportsFastMode: Bool {
+        selectedModel?.fastServiceTierID != nil
+    }
+
+    var selectedSpeedLabel: String {
+        isFastModeEnabled && supportsFastMode ? "加速" : "标准"
+    }
+
+    var serviceTierForTurn: String {
+        if isFastModeEnabled, let tier = selectedModel?.fastServiceTierID {
+            return tier
+        }
+        return "default"
+    }
+
     var canSend: Bool {
         (!composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
             && !isSending
@@ -286,6 +319,7 @@ final class AppModel: ObservableObject {
     func selectFolder(_ path: String?) {
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
+        discardPendingDeltas()
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
         selectedFolder = path
@@ -303,6 +337,7 @@ final class AppModel: ObservableObject {
     func selectThread(_ id: String?) {
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
+        discardPendingDeltas()
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
         selectedThreadID = id
@@ -382,7 +417,8 @@ final class AppModel: ObservableObject {
                 attachments: outgoingAttachments,
                 model: selectedModel?.model,
                 effort: selectedEffort,
-                permissions: selectedPermissionID
+                permissions: selectedPermissionID,
+                serviceTierForTurn: serviceTierForTurn
             )
         } catch {
             handleSendFailure(
@@ -470,15 +506,24 @@ final class AppModel: ObservableObject {
 
     func applyExternalActivitySnapshot(_ snapshot: ThreadActivitySnapshot, threadID: String) {
         guard selectedThreadID == threadID, !isSending else { return }
-        if let index = threads.firstIndex(where: { $0.id == threadID }),
-           threads[index] != snapshot.thread {
-            threads[index] = snapshot.thread
+        let isActive = snapshot.turn?.isActive == true || snapshot.thread.status == "active"
+        if let index = threads.firstIndex(where: { $0.id == threadID }) {
+            if isActive {
+                // `updatedAt` and preview can change on every active snapshot.
+                // Replacing the whole row would invalidate the entire root view
+                // every two seconds even when its visible running state is the
+                // same. The final idle snapshot refreshes all summary fields.
+                if threads[index].status != "active" {
+                    threads[index].status = "active"
+                }
+            } else if threads[index] != snapshot.thread {
+                threads[index] = snapshot.thread
+            }
         }
 
         let wasStartedAt = messages.first(where: { $0.id == "turn-progress" })?.startedAt
         let latestIDs = Set(snapshot.messages.map(\.id))
         var merged = messages.filter { $0.id != "turn-progress" && !latestIDs.contains($0.id) }
-        let isActive = snapshot.turn?.isActive == true || snapshot.thread.status == "active"
 
         if isActive {
             let startedAt = snapshot.turn?.startedAt ?? wasStartedAt ?? Date()
@@ -560,6 +605,12 @@ final class AppModel: ObservableObject {
         } else {
             selectedEffort = option.defaultEffort
         }
+    }
+
+    func setFastModeEnabled(_ enabled: Bool) {
+        guard !enabled || supportsFastMode else { return }
+        isFastModeEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: fastModeKey)
     }
 
     func prepareNewThread() {
@@ -648,6 +699,7 @@ final class AppModel: ObservableObject {
     func handleEvent(_ method: String, _ params: [String: Any]) {
         guard let eventThreadID = params["threadId"] as? String else {
             if method == "error", let error = params["error"] as? [String: Any] {
+                flushPendingDeltas()
                 isSending = false
                 activeTurnID = nil
                 finishTurnProgress(status: "失败")
@@ -688,7 +740,7 @@ final class AppModel: ObservableObject {
             updateActivityItem(item, completed: false)
         case "item/reasoning/summaryTextDelta":
             guard let delta = params["delta"] as? String else { return }
-            appendActivity(
+            enqueueActivityDelta(
                 id: params["itemId"] as? String ?? "reasoning",
                 kind: .reasoning,
                 title: "思考摘要",
@@ -706,7 +758,7 @@ final class AppModel: ObservableObject {
         case "item/reasoning/textDelta":
             guard let delta = params["delta"] as? String else { return }
             let itemID = params["itemId"] as? String ?? "reasoning"
-            appendActivity(
+            enqueueActivityDelta(
                 id: "\(itemID)-live",
                 kind: .reasoning,
                 title: "实时推理",
@@ -714,7 +766,7 @@ final class AppModel: ObservableObject {
             )
         case "item/plan/delta":
             guard let delta = params["delta"] as? String else { return }
-            appendActivity(
+            enqueueActivityDelta(
                 id: params["itemId"] as? String ?? "plan",
                 kind: .plan,
                 title: "制定计划",
@@ -738,7 +790,7 @@ final class AppModel: ObservableObject {
             )
         case "item/commandExecution/outputDelta":
             guard let delta = params["delta"] as? String else { return }
-            appendActivity(
+            enqueueActivityDelta(
                 id: params["itemId"] as? String ?? "command",
                 kind: .command,
                 title: "执行命令",
@@ -746,7 +798,7 @@ final class AppModel: ObservableObject {
             )
         case "item/fileChange/outputDelta":
             guard let delta = params["delta"] as? String else { return }
-            appendActivity(
+            enqueueActivityDelta(
                 id: params["itemId"] as? String ?? "file-change",
                 kind: .file,
                 title: "修改文件",
@@ -765,7 +817,7 @@ final class AppModel: ObservableObject {
             )
         case "item/mcpToolCall/progress":
             guard let message = params["message"] as? String else { return }
-            appendActivity(
+            enqueueActivityDelta(
                 id: params["itemId"] as? String ?? "tool",
                 kind: .tool,
                 title: "工具调用",
@@ -774,12 +826,9 @@ final class AppModel: ObservableObject {
         case "item/agentMessage/delta":
             guard let delta = params["delta"] as? String else { return }
             let itemID = params["itemId"] as? String ?? "streaming-agent"
-            if let index = messages.firstIndex(where: { $0.id == itemID }) {
-                messages[index].text += delta
-            } else {
-                messages.append(.init(id: itemID, role: .assistant, text: delta, isStreaming: true))
-            }
+            enqueueAssistantDelta(id: itemID, delta: delta)
         case "item/completed":
+            flushPendingDeltas()
             guard let item = params["item"] as? [String: Any] else { return }
             if item["type"] as? String == "agentMessage",
                let id = item["id"] as? String,
@@ -794,6 +843,7 @@ final class AppModel: ObservableObject {
                 updateActivityItem(item, completed: true)
             }
         case "turn/completed":
+            flushPendingDeltas()
             isSending = false
             activeTurnID = nil
             completeStreamingActivities()
@@ -804,6 +854,7 @@ final class AppModel: ObservableObject {
                 await refreshThreads()
             }
         case "error":
+            flushPendingDeltas()
             isSending = false
             activeTurnID = nil
             setThreadRunning(eventThreadID, running: false)
@@ -925,16 +976,113 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func appendActivity(id: String, kind: ChatMessage.ActivityKind, title: String, delta: String) {
-        if let index = messages.firstIndex(where: { $0.id == id }) {
-            messages[index].text = clippedActivityText(messages[index].text + delta)
-            messages[index].activityStatus = "进行中"
-            messages[index].isStreaming = true
+    private func enqueueActivityDelta(
+        id: String,
+        kind: ChatMessage.ActivityKind,
+        title: String,
+        delta: String
+    ) {
+        if var pending = pendingActivityDeltas[id] {
+            pending.chunks.append(delta)
+            pending.kind = kind
+            pending.title = title
+            pendingActivityDeltas[id] = pending
         } else {
-            messages.append(.init(id: id, role: .activity, text: clippedActivityText(delta),
-                                  isStreaming: true, activityKind: kind,
-                                  activityTitle: title, activityStatus: "进行中"))
+            pendingActivityDeltas[id] = PendingActivityDelta(
+                kind: kind,
+                title: title,
+                chunks: [delta]
+            )
+            pendingDeltaOrder.append(.activity(id))
         }
+        schedulePendingDeltaFlush()
+    }
+
+    private func enqueueAssistantDelta(id: String, delta: String) {
+        if pendingAssistantDeltas[id] == nil {
+            pendingDeltaOrder.append(.assistant(id))
+        }
+        pendingAssistantDeltas[id, default: []].append(delta)
+        schedulePendingDeltaFlush()
+    }
+
+    /// App-server can emit hundreds of token/output events per second. Publishing
+    /// every token forces SwiftUI to lay out the whole conversation repeatedly,
+    /// which makes a long active task appear frozen. Keep collecting immediately,
+    /// but expose a single coherent UI update at most twice per second.
+    private func schedulePendingDeltaFlush() {
+        guard pendingDeltaFlushTask == nil else { return }
+        pendingDeltaFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.flushPendingDeltas()
+        }
+    }
+
+    func flushPendingDeltas() {
+        pendingDeltaFlushTask?.cancel()
+        pendingDeltaFlushTask = nil
+        guard !pendingDeltaOrder.isEmpty else { return }
+
+        let order = pendingDeltaOrder
+        let activityDeltas = pendingActivityDeltas
+        let assistantDeltas = pendingAssistantDeltas
+        pendingDeltaOrder.removeAll(keepingCapacity: true)
+        pendingActivityDeltas.removeAll(keepingCapacity: true)
+        pendingAssistantDeltas.removeAll(keepingCapacity: true)
+
+        var updatedMessages = messages
+        for target in order {
+            switch target {
+            case let .activity(id):
+                guard let pending = activityDeltas[id] else { continue }
+                let delta = pending.chunks.joined()
+                if let index = updatedMessages.firstIndex(where: { $0.id == id }) {
+                    updatedMessages[index].text = clippedActivityText(
+                        updatedMessages[index].text + delta
+                    )
+                    updatedMessages[index].activityKind = pending.kind
+                    updatedMessages[index].activityTitle = pending.title
+                    updatedMessages[index].activityStatus = "进行中"
+                    updatedMessages[index].isStreaming = true
+                } else {
+                    updatedMessages.append(.init(
+                        id: id,
+                        role: .activity,
+                        text: clippedActivityText(delta),
+                        isStreaming: true,
+                        activityKind: pending.kind,
+                        activityTitle: pending.title,
+                        activityStatus: "进行中"
+                    ))
+                }
+            case let .assistant(id):
+                guard let chunks = assistantDeltas[id] else { continue }
+                let delta = chunks.joined()
+                if let index = updatedMessages.firstIndex(where: { $0.id == id }) {
+                    updatedMessages[index].text += delta
+                    updatedMessages[index].isStreaming = true
+                } else {
+                    updatedMessages.append(.init(
+                        id: id,
+                        role: .assistant,
+                        text: delta,
+                        isStreaming: true
+                    ))
+                }
+            }
+        }
+        if updatedMessages != messages {
+            messages = updatedMessages
+        }
+    }
+
+    private func discardPendingDeltas() {
+        pendingDeltaFlushTask?.cancel()
+        pendingDeltaFlushTask = nil
+        pendingDeltaOrder.removeAll(keepingCapacity: true)
+        pendingActivityDeltas.removeAll(keepingCapacity: true)
+        pendingAssistantDeltas.removeAll(keepingCapacity: true)
     }
 
     private func completeStreamingActivities() {

@@ -231,8 +231,34 @@ final class AppServerClient {
         attachments: [ComposerAttachment],
         model: String?,
         effort: String?,
-        permissions: String?
+        permissions: String?,
+        serviceTierForTurn: String?
     ) async throws -> String? {
+        let params = Self.turnStartParameters(
+            threadID: threadID,
+            text: text,
+            attachments: attachments,
+            model: model,
+            effort: effort,
+            permissions: permissions,
+            serviceTierForTurn: serviceTierForTurn
+        )
+        let result = try await request(
+            "turn/start",
+            params: params
+        )
+        return (result["turn"] as? JSON)?["id"] as? String
+    }
+
+    static func turnStartParameters(
+        threadID: String,
+        text: String,
+        attachments: [ComposerAttachment],
+        model: String?,
+        effort: String?,
+        permissions: String?,
+        serviceTierForTurn: String?
+    ) -> JSON {
         var input: [[String: Any]] = []
         if !text.isEmpty { input.append(["type": "text", "text": text]) }
         input.append(contentsOf: attachments.map(\.userInput))
@@ -240,11 +266,8 @@ final class AppServerClient {
         if let model { params["model"] = model }
         if let effort { params["effort"] = effort }
         if let permissions { params["permissions"] = permissions }
-        let result = try await request(
-            "turn/start",
-            params: params
-        )
-        return (result["turn"] as? JSON)?["id"] as? String
+        if let serviceTierForTurn { params["serviceTierForTurn"] = serviceTierForTurn }
+        return params
     }
 
     func interruptTurn(threadID: String, turnID: String) async throws {
