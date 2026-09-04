@@ -17,6 +17,7 @@ struct ContentView: View {
         }
         .toolbar { toolbar }
         .sheet(isPresented: $model.showingNewThread) { newThreadSheet }
+        .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -32,41 +33,37 @@ struct ContentView: View {
             get: { model.selectedFolder ?? "__all__" },
             set: { model.selectFolder($0 == "__all__" ? nil : $0) }
         )) {
-            Section("工作区") {
-                Label {
-                    HStack {
-                        Text("最近会话")
-                        Spacer()
-                        CountBadge(count: model.threads.count)
+            Section {
+                Label("最近会话", systemImage: "tray.full")
+                    .tag("__all__")
+            } header: {
+                HStack {
+                    Text("工作区")
+                    Spacer()
+                    Button {
+                        model.showingCategoryManager = true
+                    } label: {
+                        Image(systemName: "folder.badge.gearshape")
                     }
-                } icon: {
-                    Image(systemName: "tray.full")
+                    .buttonStyle(.plain)
+                    .help("管理分类")
                 }
-                .tag("__all__")
+            }
 
-                ForEach(model.folders) { folder in
-                    Label {
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack {
-                                Text(folder.name).lineLimit(1)
-                                Spacer()
-                                if let count = folder.threadCount {
-                                    CountBadge(count: count)
-                                }
-                            }
-                            Text(folder.path)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    } icon: {
-                        Image(systemName: "folder")
-                            .foregroundStyle(.blue)
+            ForEach(model.workspaceCategories) { category in
+                workspaceCategorySection(category)
+            }
+
+            Section {
+                if model.uncategorizedFolders.isEmpty {
+                    categoryDropPlaceholder("拖动工作区到这里", categoryID: nil)
+                } else {
+                    ForEach(model.uncategorizedFolders) { folder in
+                        workspaceRow(folder)
                     }
-                    .tag(folder.path)
-                    .help(folder.path)
                 }
+            } header: {
+                categoryDropHeader("未分类", systemImage: "tray", categoryID: nil)
             }
         }
         .listStyle(.sidebar)
@@ -83,6 +80,201 @@ struct ContentView: View {
             .padding(12)
             .background(.bar)
         }
+    }
+
+    private func workspaceCategorySection(_ category: WorkspaceCategory) -> some View {
+        Section {
+            let folders = model.folders(inCategory: category.id)
+            if folders.isEmpty {
+                categoryDropPlaceholder("拖动工作区到这里", categoryID: category.id)
+            } else {
+                ForEach(folders) { folder in
+                    workspaceRow(folder)
+                }
+            }
+        } header: {
+            categoryDropHeader(category.name, systemImage: "folder.fill", categoryID: category.id)
+                .contextMenu {
+                    Button("重命名") {
+                        model.showingCategoryManager = true
+                        model.beginRenamingCategory(category)
+                    }
+                    Button("删除分类", role: .destructive) {
+                        model.deleteCategory(category.id)
+                    }
+                }
+        }
+    }
+
+    private func workspaceRow(_ folder: WorkspaceFolder) -> some View {
+        Label {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(folder.name).lineLimit(1)
+                Text(folder.path)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        } icon: {
+            Image(systemName: "folder")
+                .foregroundStyle(.blue)
+        }
+        .tag(folder.path)
+        .help(folder.path)
+        .draggable(folder.path) {
+            Label(folder.name, systemImage: "folder.fill")
+                .padding(8)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .contextMenu {
+            Menu("移动到分类") {
+                Button {
+                    model.assignFolders([folder.path], to: nil)
+                } label: {
+                    Label("未分类", systemImage: model.categoryID(forFolder: folder.path) == nil ? "checkmark" : "tray")
+                }
+                Divider()
+                ForEach(model.workspaceCategories) { category in
+                    Button {
+                        model.assignFolders([folder.path], to: category.id)
+                    } label: {
+                        Label(
+                            category.name,
+                            systemImage: model.categoryID(forFolder: folder.path) == category.id ? "checkmark" : "folder"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func categoryDropHeader(_ title: String, systemImage: String, categoryID: String?) -> some View {
+        Label(title, systemImage: systemImage)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .dropDestination(for: String.self) { paths, _ in
+                model.assignFolders(paths, to: categoryID)
+                return !paths.isEmpty
+            }
+            .help("可将工作区拖到此分类")
+    }
+
+    private func categoryDropPlaceholder(_ title: String, categoryID: String?) -> some View {
+        Text(title)
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+            .contentShape(Rectangle())
+            .dropDestination(for: String.self) { paths, _ in
+                model.assignFolders(paths, to: categoryID)
+                return !paths.isEmpty
+            }
+    }
+
+    private var categoryManagerSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("管理工作区分类")
+                    .font(.title2.bold())
+                Spacer()
+                Button("完成") { model.showingCategoryManager = false }
+                    .keyboardShortcut(.defaultAction)
+            }
+
+            Text("分类只用于整理侧边栏，不会移动或删除磁盘上的文件夹。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            if model.workspaceCategories.isEmpty {
+                ContentUnavailableView(
+                    "还没有分类",
+                    systemImage: "folder.badge.plus",
+                    description: Text("新建分类后，可以把左侧工作区拖进去。")
+                )
+                .frame(maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(Array(model.workspaceCategories.enumerated()), id: \.element.id) { index, category in
+                        HStack(spacing: 10) {
+                            Image(systemName: "folder.fill")
+                                .foregroundStyle(.blue)
+                            Text(category.name)
+                            Spacer()
+                            Button {
+                                model.moveCategory(category.id, offset: -1)
+                            } label: {
+                                Image(systemName: "chevron.up")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(index == 0)
+                            .help("上移")
+
+                            Button {
+                                model.moveCategory(category.id, offset: 1)
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(index == model.workspaceCategories.count - 1)
+                            .help("下移")
+
+                            Button {
+                                model.beginRenamingCategory(category)
+                            } label: {
+                                Image(systemName: "pencil")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("重命名")
+
+                            Button(role: .destructive) {
+                                model.deleteCategory(category.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("删除分类；其中的工作区会回到未分类")
+                        }
+                    }
+                }
+                .listStyle(.inset)
+            }
+
+            Button {
+                model.beginCreatingCategory()
+            } label: {
+                Label("新建分类", systemImage: "plus")
+            }
+        }
+        .padding(20)
+        .frame(width: 480, height: 420)
+        .sheet(isPresented: $model.showingCategoryEditor) {
+            categoryEditorSheet
+        }
+    }
+
+    private var categoryEditorSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(model.editingCategoryID == nil ? "新建分类" : "重命名分类")
+                .font(.title2.bold())
+            TextField("分类名称", text: $model.categoryNameDraft)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(model.saveCategoryEditor)
+            if let error = model.categoryEditorError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("取消") { model.showingCategoryEditor = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存", action: model.saveCategoryEditor)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
     }
 
     private var threadList: some View {
@@ -655,17 +847,5 @@ private struct AttachmentPreview: View {
         }
         .padding(.top, 6)
         .padding(.trailing, 6)
-    }
-}
-
-private struct CountBadge: View {
-    let count: Int
-    var body: some View {
-        Text("\(count)")
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(.quaternary, in: Capsule())
     }
 }

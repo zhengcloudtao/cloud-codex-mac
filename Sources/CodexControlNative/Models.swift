@@ -51,6 +51,73 @@ struct WorkspaceFolder: Identifiable, Hashable {
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
 }
 
+struct WorkspaceCategory: Identifiable, Codable, Hashable {
+    let id: String
+    var name: String
+
+    init(id: String = UUID().uuidString, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+struct WorkspaceOrganization: Codable, Equatable {
+    var categories: [WorkspaceCategory] = []
+    var folderAssignments: [String: String] = [:]
+
+    @discardableResult
+    mutating func addCategory(named rawName: String) -> WorkspaceCategory? {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !containsCategory(named: name) else { return nil }
+        let category = WorkspaceCategory(name: name)
+        categories.append(category)
+        return category
+    }
+
+    mutating func renameCategory(id: String, to rawName: String) -> Bool {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              !categories.contains(where: { $0.id != id && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }),
+              let index = categories.firstIndex(where: { $0.id == id }) else { return false }
+        categories[index].name = name
+        return true
+    }
+
+    mutating func deleteCategory(id: String) {
+        categories.removeAll { $0.id == id }
+        folderAssignments = folderAssignments.filter { $0.value != id }
+    }
+
+    mutating func moveCategory(id: String, offset: Int) {
+        guard let source = categories.firstIndex(where: { $0.id == id }) else { return }
+        let destination = source + offset
+        guard categories.indices.contains(destination) else { return }
+        categories.swapAt(source, destination)
+    }
+
+    mutating func assignFolders(_ paths: [String], to categoryID: String?) {
+        let validCategoryID = categoryID.flatMap { candidate in
+            categories.contains(where: { $0.id == candidate }) ? candidate : nil
+        }
+        for path in paths where !path.isEmpty {
+            if let validCategoryID {
+                folderAssignments[path] = validCategoryID
+            } else {
+                folderAssignments.removeValue(forKey: path)
+            }
+        }
+    }
+
+    func categoryID(forFolder path: String) -> String? {
+        guard let id = folderAssignments[path], categories.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    private func containsCategory(named name: String) -> Bool {
+        categories.contains { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }
+    }
+}
+
 struct ThreadPage {
     let threads: [CodexThread]
     let hasMore: Bool

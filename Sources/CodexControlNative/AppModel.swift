@@ -26,13 +26,24 @@ final class AppModel: ObservableObject {
     @Published var attachments: [ComposerAttachment] = []
     @Published var isRecording = false
     @Published var activeTurnID: String?
+    @Published private(set) var workspaceOrganization = WorkspaceOrganization()
+    @Published var showingCategoryManager = false
+    @Published var showingCategoryEditor = false
+    @Published var editingCategoryID: String?
+    @Published var categoryNameDraft = ""
+    @Published var categoryEditorError: String?
 
     private let client = AppServerClient()
     private let speech = SpeechInputController()
     private var hasStarted = false
     private var threadRequestGeneration = 0
+    private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
 
     init() {
+        if let data = UserDefaults.standard.data(forKey: workspaceOrganizationKey),
+           let saved = try? JSONDecoder().decode(WorkspaceOrganization.self, from: data) {
+            workspaceOrganization = saved
+        }
         speech.onTranscript = { [weak self] transcript in self?.composerText = transcript }
         speech.onRecordingChanged = { [weak self] recording in self?.isRecording = recording }
         speech.onError = { [weak self] message in self?.errorMessage = message }
@@ -40,6 +51,76 @@ final class AppModel: ObservableObject {
 
     var folders: [WorkspaceFolder] {
         folderCatalog
+    }
+
+    var workspaceCategories: [WorkspaceCategory] {
+        workspaceOrganization.categories
+    }
+
+    var uncategorizedFolders: [WorkspaceFolder] {
+        folderCatalog.filter { workspaceOrganization.categoryID(forFolder: $0.path) == nil }
+    }
+
+    func folders(inCategory categoryID: String) -> [WorkspaceFolder] {
+        folderCatalog.filter { workspaceOrganization.categoryID(forFolder: $0.path) == categoryID }
+    }
+
+    func categoryID(forFolder path: String) -> String? {
+        workspaceOrganization.categoryID(forFolder: path)
+    }
+
+    func assignFolders(_ paths: [String], to categoryID: String?) {
+        workspaceOrganization.assignFolders(paths, to: categoryID)
+        saveWorkspaceOrganization()
+    }
+
+    func beginCreatingCategory() {
+        editingCategoryID = nil
+        categoryNameDraft = ""
+        categoryEditorError = nil
+        showingCategoryEditor = true
+    }
+
+    func beginRenamingCategory(_ category: WorkspaceCategory) {
+        editingCategoryID = category.id
+        categoryNameDraft = category.name
+        categoryEditorError = nil
+        showingCategoryEditor = true
+    }
+
+    func saveCategoryEditor() {
+        let name = categoryNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            categoryEditorError = "分类名称不能为空。"
+            return
+        }
+        let succeeded: Bool
+        if let editingCategoryID {
+            succeeded = workspaceOrganization.renameCategory(id: editingCategoryID, to: name)
+        } else {
+            succeeded = workspaceOrganization.addCategory(named: name) != nil
+        }
+        guard succeeded else {
+            categoryEditorError = "已经存在同名分类，请换一个名称。"
+            return
+        }
+        saveWorkspaceOrganization()
+        showingCategoryEditor = false
+    }
+
+    func deleteCategory(_ id: String) {
+        workspaceOrganization.deleteCategory(id: id)
+        saveWorkspaceOrganization()
+    }
+
+    func moveCategory(_ id: String, offset: Int) {
+        workspaceOrganization.moveCategory(id: id, offset: offset)
+        saveWorkspaceOrganization()
+    }
+
+    private func saveWorkspaceOrganization() {
+        guard let data = try? JSONEncoder().encode(workspaceOrganization) else { return }
+        UserDefaults.standard.set(data, forKey: workspaceOrganizationKey)
     }
 
     var visibleThreads: [CodexThread] {
