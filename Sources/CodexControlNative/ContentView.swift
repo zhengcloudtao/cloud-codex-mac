@@ -1341,16 +1341,16 @@ private struct Composer: View {
                     .frame(height: 82)
                 }
 
-                TextEditor(text: $model.composerText)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, 5)
-                    .frame(minHeight: 54, maxHeight: 120)
-                    .onKeyPress(.return, phases: .down) { press in
-                        if press.modifiers.contains(.shift) { return .ignored }
-                        if model.canSend { Task { await model.sendMessage() } }
-                        return .handled
+                ComposerTextEditor(
+                    text: $model.composerText,
+                    pasteImages: { model.pasteImages() },
+                    submit: {
+                        if model.canSend {
+                            Task { await model.sendMessage() }
+                        }
                     }
+                )
+                    .frame(minHeight: 54, maxHeight: 120)
 
                 HStack(spacing: 12) {
                     Button(action: model.chooseAttachments) {
@@ -1358,7 +1358,7 @@ private struct Composer: View {
                             .font(.system(size: 17, weight: .medium))
                     }
                     .buttonStyle(.plain)
-                    .help("添加图片或文件")
+                    .help("添加图片或文件；也可按 ⌘V 直接粘贴图片")
 
                     permissionMenu
 
@@ -1558,6 +1558,87 @@ private struct Composer: View {
         case "ultra": return "极致"
         default: return effort
         }
+    }
+}
+
+private struct ComposerTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    let pasteImages: () -> Bool
+    let submit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+
+        let textView = ComposerNSTextView()
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.font = NSFont.preferredFont(forTextStyle: .body)
+        textView.textContainerInset = NSSize(width: 5, height: 7)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.string = text
+        textView.pasteImages = pasteImages
+        textView.submit = submit
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? ComposerNSTextView else { return }
+        context.coordinator.parent = self
+        textView.pasteImages = pasteImages
+        textView.submit = submit
+        guard textView.string != text else { return }
+        let selectionLocation = min(textView.selectedRange().location, text.utf16.count)
+        textView.string = text
+        textView.setSelectedRange(NSRange(location: selectionLocation, length: 0))
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ComposerTextEditor
+
+        init(parent: ComposerTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            if parent.text != textView.string {
+                parent.text = textView.string
+            }
+        }
+    }
+}
+
+private final class ComposerNSTextView: NSTextView {
+    var pasteImages: (() -> Bool)?
+    var submit: (() -> Void)?
+
+    override func paste(_ sender: Any?) {
+        if pasteImages?() == true { return }
+        super.paste(sender)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let isReturn = event.keyCode == 36 || event.keyCode == 76
+        if isReturn && !event.modifierFlags.contains(.shift) && !hasMarkedText() {
+            submit?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 

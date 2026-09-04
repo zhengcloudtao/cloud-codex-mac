@@ -594,6 +594,70 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Imports image files or bitmap data from a pasteboard into the existing
+    /// attachment flow. Bitmap-only clipboard content (for example a macOS
+    /// screenshot) is converted to PNG so the app-server receives a stable
+    /// localImage path rather than transient pasteboard data.
+    @discardableResult
+    func pasteImages(from pasteboard: NSPasteboard = .general) -> Bool {
+        let pastedFileURLs = (pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] ?? []).filter { ComposerAttachment(url: $0).isImage }
+
+        if !pastedFileURLs.isEmpty {
+            let newItems = pastedFileURLs
+                .filter { url in !attachments.contains(where: { $0.url == url }) }
+                .map { ComposerAttachment(url: $0) }
+            attachments.append(contentsOf: newItems)
+            return true
+        }
+
+        let pastedImages = pasteboard.readObjects(
+            forClasses: [NSImage.self],
+            options: nil
+        ) as? [NSImage] ?? []
+        guard !pastedImages.isEmpty else { return false }
+
+        do {
+            let directory = try pastedImageDirectory()
+            var newItems: [ComposerAttachment] = []
+            for image in pastedImages {
+                guard let data = Self.pngData(for: image) else { continue }
+                let url = directory
+                    .appendingPathComponent("cloudcodex-paste-\(UUID().uuidString)")
+                    .appendingPathExtension("png")
+                try data.write(to: url, options: .atomic)
+                newItems.append(ComposerAttachment(url: url))
+            }
+            attachments.append(contentsOf: newItems)
+            if newItems.isEmpty {
+                errorMessage = "无法读取剪贴板中的图片。"
+            }
+            return true
+        } catch {
+            errorMessage = "无法粘贴图片：\(error.localizedDescription)"
+            return true
+        }
+    }
+
+    private func pastedImageDirectory() throws -> URL {
+        let fileManager = FileManager.default
+        let base = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        let directory = base
+            .appendingPathComponent("CloudCodex", isDirectory: true)
+            .appendingPathComponent("PastedImages", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private static func pngData(for image: NSImage) -> Data? {
+        guard let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+
     func removeAttachment(_ id: UUID) {
         attachments.removeAll { $0.id == id }
     }
