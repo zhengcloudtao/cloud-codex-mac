@@ -11,7 +11,11 @@ final class AppServerClient {
     private var errorOutput: FileHandle?
     private var buffer = Data()
     private var nextID = 1
-    private var pending: [Int: CheckedContinuation<JSON, Error>] = [:]
+    private struct PendingRequest {
+        let continuation: CheckedContinuation<JSON, Error>
+        let timeoutTask: Task<Void, Never>
+    }
+    private var pending: [Int: PendingRequest] = [:]
     private var loadedThreadIDs: Set<String> = []
     private(set) var connected = false
     var onEvent: EventHandler?
@@ -153,7 +157,7 @@ final class AppServerClient {
         return (thread, Self.parseMessages(from: newestFirst.reversed()))
     }
 
-    func readLatestThreadActivity(_ id: String) async throws -> ThreadActivitySnapshot {
+    func readThreadState(_ id: String) async throws -> CodexThread {
         let result = try await request(
             "thread/read",
             params: ["threadId": id, "includeTurns": false]
@@ -162,12 +166,28 @@ final class AppServerClient {
               let thread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
+        return thread
+    }
+
+    func readLatestThreadActivity(
+        _ id: String,
+        knownThread: CodexThread? = nil
+    ) async throws -> ThreadActivitySnapshot {
+        let thread: CodexThread
+        if let knownThread {
+            thread = knownThread
+        } else {
+            thread = try await readThreadState(id)
+        }
         let turnsResult = try await request(
             "thread/turns/list",
             params: [
                 "threadId": id,
                 "limit": 1,
-                "itemsView": "full",
+                // Full command output can be several megabytes and previously
+                // made JSON parsing block the UI. Summary still carries the
+                // visible activity records needed by the external monitor.
+                "itemsView": "summary",
                 "sortDirection": "desc"
             ]
         )
@@ -235,11 +255,19 @@ final class AppServerClient {
         let id = nextID
         nextID += 1
         return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 12_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.timeoutRequest(id, method: method)
+            }
+            pending[id] = PendingRequest(
+                continuation: continuation,
+                timeoutTask: timeoutTask
+            )
             do {
                 try send(["id": id, "method": method, "params": params])
             } catch {
-                pending.removeValue(forKey: id)
+                pending.removeValue(forKey: id)?.timeoutTask.cancel()
                 continuation.resume(throwing: error)
             }
         }
@@ -271,14 +299,15 @@ final class AppServerClient {
 
     private func handle(_ object: JSON) {
         if let idNumber = object["id"] as? NSNumber,
-           let continuation = pending.removeValue(forKey: idNumber.intValue) {
+           let request = pending.removeValue(forKey: idNumber.intValue) {
+            request.timeoutTask.cancel()
             if let error = object["error"] as? JSON {
                 let message = error["message"] as? String ?? "Codex 请求失败"
-                continuation.resume(throwing: CodexClientError.server(message))
+                request.continuation.resume(throwing: CodexClientError.server(message))
             } else if let result = object["result"] as? JSON {
-                continuation.resume(returning: result)
+                request.continuation.resume(returning: result)
             } else {
-                continuation.resume(throwing: CodexClientError.invalidResponse)
+                request.continuation.resume(throwing: CodexClientError.invalidResponse)
             }
             return
         }
@@ -293,8 +322,16 @@ final class AppServerClient {
         let error = CodexClientError.process("Codex 本地服务已退出（状态码 \(status)）")
         let callbacks = pending.values
         pending.removeAll()
-        callbacks.forEach { $0.resume(throwing: error) }
+        callbacks.forEach {
+            $0.timeoutTask.cancel()
+            $0.continuation.resume(throwing: error)
+        }
         onDisconnect?(error.localizedDescription)
+    }
+
+    private func timeoutRequest(_ id: Int, method: String) {
+        guard let request = pending.removeValue(forKey: id) else { return }
+        request.continuation.resume(throwing: CodexClientError.timeout(method))
     }
 
     private func locateCodex() throws -> URL {

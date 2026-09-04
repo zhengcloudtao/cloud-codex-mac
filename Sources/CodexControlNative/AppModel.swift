@@ -297,17 +297,6 @@ final class AppModel: ObservableObject {
         guard (!text.isEmpty || !outgoingAttachments.isEmpty),
               let id = selectedThreadID, !isSending, !isExternalThreadProcessing else { return }
 
-        // Refresh once immediately before sending. The background monitor may be
-        // a few seconds behind when the same task was just started in Codex.
-        if let snapshot = try? await client.readLatestThreadActivity(id),
-           selectedThreadID == id, !isSending {
-            applyExternalActivitySnapshot(snapshot, threadID: id)
-            if isExternalThreadProcessing {
-                threadOwnershipNotice = "此任务正在 Codex 主应用中处理，完成后会自动同步到这里。"
-                return
-            }
-        }
-
         speech.stop()
         composerText = ""
         attachments = []
@@ -401,7 +390,17 @@ final class AppModel: ObservableObject {
     private func syncLatestExternalActivity(threadID: String) async {
         guard selectedThreadID == threadID, !isSending else { return }
         do {
-            let snapshot = try await client.readLatestThreadActivity(threadID)
+            let thread = try await client.readThreadState(threadID)
+            guard selectedThreadID == threadID, !isSending else { return }
+            let snapshot: ThreadActivitySnapshot
+            if thread.status == "active" || isExternalThreadProcessing {
+                snapshot = try await client.readLatestThreadActivity(
+                    threadID,
+                    knownThread: thread
+                )
+            } else {
+                snapshot = ThreadActivitySnapshot(thread: thread, turn: nil, messages: [])
+            }
             guard selectedThreadID == threadID, !isSending else { return }
             applyExternalActivitySnapshot(snapshot, threadID: threadID)
         } catch {

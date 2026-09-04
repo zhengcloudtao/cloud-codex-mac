@@ -32,7 +32,11 @@ struct ContentView: View {
     private var folderSidebar: some View {
         List(selection: Binding(
             get: { model.selectedFolder ?? "__all__" },
-            set: { model.selectFolder($0 == "__all__" ? nil : $0) }
+            set: { selection in
+                DispatchQueue.main.async {
+                    model.selectFolder(selection == "__all__" ? nil : selection)
+                }
+            }
         )) {
             Section {
                 Label("最近会话", systemImage: "tray.full")
@@ -375,7 +379,11 @@ struct ContentView: View {
 
             List(selection: Binding(
                 get: { model.selectedThreadID },
-                set: model.selectThread
+                set: { selection in
+                    DispatchQueue.main.async {
+                        model.selectThread(selection)
+                    }
+                }
             )) {
                 ForEach(model.visibleThreads) { thread in
                     ThreadRow(thread: thread)

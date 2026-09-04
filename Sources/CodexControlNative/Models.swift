@@ -388,6 +388,7 @@ enum CodexClientError: LocalizedError {
     case invalidResponse
     case server(String)
     case process(String)
+    case timeout(String)
 
     var errorDescription: String? {
         switch self {
@@ -399,6 +400,8 @@ enum CodexClientError: LocalizedError {
             return "Codex 返回了无法识别的数据。"
         case .server(let message), .process(let message):
             return message
+        case .timeout(let method):
+            return "Codex 本地服务响应超时（\(method)），请稍后重试。"
         }
     }
 }
