@@ -245,7 +245,9 @@ final class AppServerClient {
         model: String?,
         effort: String?,
         permissions: String?,
-        serviceTierForTurn: String?
+        serviceTierForTurn: String?,
+        approvalPolicy: String? = nil,
+        approvalsReviewer: String? = nil
     ) async throws -> String? {
         let params = Self.turnStartParameters(
             threadID: threadID,
@@ -254,7 +256,9 @@ final class AppServerClient {
             model: model,
             effort: effort,
             permissions: permissions,
-            serviceTierForTurn: serviceTierForTurn
+            serviceTierForTurn: serviceTierForTurn,
+            approvalPolicy: approvalPolicy,
+            approvalsReviewer: approvalsReviewer
         )
         let result = try await request(
             "turn/start",
@@ -270,7 +274,9 @@ final class AppServerClient {
         model: String?,
         effort: String?,
         permissions: String?,
-        serviceTierForTurn: String?
+        serviceTierForTurn: String?,
+        approvalPolicy: String? = nil,
+        approvalsReviewer: String? = nil
     ) -> JSON {
         var input: [[String: Any]] = []
         if !text.isEmpty { input.append(["type": "text", "text": text]) }
@@ -280,6 +286,8 @@ final class AppServerClient {
         if let effort { params["effort"] = effort }
         if let permissions { params["permissions"] = permissions }
         if let serviceTierForTurn { params["serviceTierForTurn"] = serviceTierForTurn }
+        if let approvalPolicy { params["approvalPolicy"] = approvalPolicy }
+        if let approvalsReviewer { params["approvalsReviewer"] = approvalsReviewer }
         return params
     }
 

@@ -374,6 +374,9 @@ struct ComposerAttachment: Identifiable, Hashable {
     }
 
     var userInput: [String: Any] {
+        if !url.isFileURL {
+            return ["type": "image", "url": url.absoluteString]
+        }
         if isImage {
             return ["type": "localImage", "path": url.path]
         }

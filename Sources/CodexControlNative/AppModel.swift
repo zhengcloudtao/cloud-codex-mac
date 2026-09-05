@@ -1129,11 +1129,47 @@ final class AppModel: ObservableObject {
 
         var threadID = task.threadId.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
+            let permission: String?
+            let approval: String?
+            let reviewer: String?
+            switch task.permissionMode ?? "" {
+            case "": permission = selectedPermissionID; approval = nil; reviewer = nil
+            case "ask": permission = ":workspace"; approval = "untrusted"; reviewer = "user"
+            case "auto": permission = ":workspace"; approval = "on-request"; reviewer = "auto_review"
+            case "full": permission = ":danger-full-access"; approval = "never"; reviewer = "user"
+            default: throw RemoteControlError.server("不支持的远程权限模式。")
+            }
+            if let permission {
+                let profiles = try await client.listPermissionProfiles(cwd: task.workspace)
+                guard profiles.contains(where: { $0.id == permission }) else {
+                    throw RemoteControlError.server("这台 Mac 不允许所选权限模式。")
+                }
+            }
+            let tier: String
+            switch task.speed ?? "" {
+            case "": tier = isFastModeEnabled ? (modelOption?.fastServiceTierID ?? "default") : "default"
+            case "standard": tier = "default"
+            case "fast":
+                guard let fast = modelOption?.fastServiceTierID else {
+                    throw RemoteControlError.server("所选模型当前不支持加速，请选择标准速度。")
+                }
+                tier = fast
+            default: throw RemoteControlError.server("不支持的远程速度选项。")
+            }
+            guard (task.imageUrls ?? []).count <= 4 else {
+                throw RemoteControlError.server("远程任务最多支持 4 张图片。")
+            }
+            let attachments = try (task.imageUrls ?? []).map { value -> ComposerAttachment in
+                guard let url = URL(string: value), url.scheme == "https", url.host != nil else {
+                    throw RemoteControlError.server("图片地址无效，请重新上传。")
+                }
+                return ComposerAttachment(url: url)
+            }
             if threadID.isEmpty {
                 let thread = try await client.createThread(
                     cwd: task.workspace,
                     model: modelOption?.model,
-                    permissions: selectedPermissionID
+                    permissions: permission
                 )
                 threadID = thread.id
                 if !threads.contains(where: { $0.id == thread.id }) { threads.insert(thread, at: 0) }
@@ -1158,11 +1194,13 @@ final class AppModel: ObservableObject {
             let turnID = try await client.startTurn(
                 threadID: threadID,
                 text: task.prompt,
-                attachments: [],
+                attachments: attachments,
                 model: modelOption?.model,
                 effort: effort,
-                permissions: selectedPermissionID,
-                serviceTierForTurn: isFastModeEnabled ? (modelOption?.fastServiceTierID ?? "default") : "default"
+                permissions: permission,
+                serviceTierForTurn: tier,
+                approvalPolicy: approval,
+                approvalsReviewer: reviewer
             )
             remoteExecution?.turnID = turnID
             do {

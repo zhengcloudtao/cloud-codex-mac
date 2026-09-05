@@ -2,6 +2,27 @@ import XCTest
 @testable import CloudCodex
 
 final class RemoteControlAPITests: XCTestCase {
+    @MainActor func testRemoteImagesAndApprovalSettingsReachTurn() throws {
+        let data = Data(#"{"status":0,"msg":"ok","data":{"taskId":"t","deviceId":"d","threadId":"","workspace":"/tmp/project","prompt":"看图","model":"","effort":"","status":"queued","speed":"fast","permissionMode":"auto","imageUrls":["https://example.com/image.png"]}}"#.utf8)
+        let task = try RemoteControlAPI.decodeEnvelope(RemoteTask.self, data: data)
+        XCTAssertEqual(task.speed, "fast")
+        XCTAssertEqual(task.permissionMode, "auto")
+        let image = try XCTUnwrap(task.imageUrls?.first)
+        let params = AppServerClient.turnStartParameters(
+            threadID: "thread", text: task.prompt,
+            attachments: [ComposerAttachment(url: try XCTUnwrap(URL(string: image)))],
+            model: nil, effort: nil, permissions: ":workspace",
+            serviceTierForTurn: "priority", approvalPolicy: "on-request", approvalsReviewer: "auto_review"
+        )
+        let input = try XCTUnwrap(params["input"] as? [[String: Any]])
+        XCTAssertEqual(input[1]["type"] as? String, "image")
+        XCTAssertEqual(input[1]["url"] as? String, image)
+        XCTAssertNil(input[1]["path"])
+        XCTAssertEqual(params["serviceTierForTurn"] as? String, "priority")
+        XCTAssertEqual(params["approvalPolicy"] as? String, "on-request")
+        XCTAssertEqual(params["approvalsReviewer"] as? String, "auto_review")
+    }
+
     func testRegistrationEnvelopeDecodes() throws {
         let data = Data(#"{"status":0,"msg":"操作成功","data":{"deviceId":"mac-1","name":"Office Mac","paired":false,"pairingCode":"12345678","pairingExpiresAt":"2026-09-05T11:00:00+08:00","pollIntervalSeconds":3}}"#.utf8)
         let value = try RemoteControlAPI.decodeEnvelope(RemoteRegistration.self, data: data)
@@ -22,5 +43,8 @@ final class RemoteControlAPITests: XCTestCase {
         XCTAssertEqual(value.workspace, "/tmp/project")
         XCTAssertEqual(value.model, "gpt-5.6-sol")
         XCTAssertEqual(value.effort, "high")
+        XCTAssertNil(value.speed)
+        XCTAssertNil(value.permissionMode)
+        XCTAssertNil(value.imageUrls)
     }
 }

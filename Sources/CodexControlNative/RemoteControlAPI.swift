@@ -31,6 +31,9 @@ struct RemoteTask: Codable, Equatable {
     let model: String
     let effort: String
     let status: String
+    var speed: String? = nil
+    var permissionMode: String? = nil
+    var imageUrls: [String]? = nil
 }
 
 struct RemoteRegistration: Codable, Equatable {
