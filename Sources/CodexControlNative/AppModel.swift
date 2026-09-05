@@ -1106,17 +1106,6 @@ final class AppModel: ObservableObject {
         }
 
         let requestedModel = task.model.trimmingCharacters(in: .whitespacesAndNewlines)
-        if task.action == "readFile" {
-            do {
-                let content = try await Task.detached(priority: .utility) {
-                    try RemoteFilePreview.read(workspace: task.workspace, path: task.filePath ?? "")
-                }.value
-                await reportRemoteTaskStatus(task.taskId, body: RemoteTaskStatusBody(status: "completed", threadId: "", turnId: "", result: content, error: ""))
-            } catch {
-                await failRemoteTask(task, message: error.localizedDescription)
-            }
-            return
-        }
         guard task.action == nil || task.action == "" else {
             await failRemoteTask(task, message: "不支持的远程任务类型。")
             return

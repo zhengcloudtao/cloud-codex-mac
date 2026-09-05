@@ -34,27 +34,7 @@ struct RemoteTask: Codable, Equatable {
     var speed: String? = nil
     var permissionMode: String? = nil
     var imageUrls: [String]? = nil
-    var action: String? = nil
-    var filePath: String? = nil
-}
-
-enum RemoteFilePreview {
-    static func read(workspace: String, path: String) throws -> String {
-        let root = URL(fileURLWithPath: workspace).resolvingSymlinksInPath().standardizedFileURL
-        let target = (path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path)).resolvingSymlinksInPath().standardizedFileURL
-        guard root.path != "/", target.path.hasPrefix(root.path + "/") else {
-            throw RemoteControlError.server("只能查看所选工作区内的文件。")
-        }
-        let values = try target.resourceValues(forKeys: [.isRegularFileKey])
-        guard values.isRegularFile == true else { throw RemoteControlError.server("请选择普通文本文件。") }
-        let handle = try FileHandle(forReadingFrom: target)
-        defer { try? handle.close() }
-        let data = try handle.read(upToCount: 48_001) ?? Data()
-        guard !data.contains(0), let text = String(data: data, encoding: .utf8) else {
-            throw RemoteControlError.server("文件过大或不是 UTF-8 文本，暂不支持预览。")
-        }
-        return text + (data.count > 48_000 ? "\n\n[仅预览前 48 KB，请在 Mac 查看完整文件]" : "")
-    }
+    var action: String? = nil // Reject legacy queued file-preview actions.
 }
 
 struct RemoteRegistration: Codable, Equatable {
