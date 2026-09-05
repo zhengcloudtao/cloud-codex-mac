@@ -76,6 +76,7 @@ final class AppModel: ObservableObject {
         let threadID: String
         var turnID: String?
         var responseText: String
+        var fileDiff: String = ""
     }
 
     private struct PendingActivityDelta {
@@ -1249,6 +1250,12 @@ final class AppModel: ObservableObject {
     private func handleRemoteEvent(_ method: String, params: [String: Any], threadID: String) {
         guard var execution = remoteExecution, execution.threadID == threadID else { return }
         switch method {
+        case "turn/diff/updated":
+            if let turnID = params["turnId"] as? String, let expected = execution.turnID, turnID != expected { return }
+            if let diff = params["diff"] as? String {
+                execution.fileDiff = String(diff.prefix(200_000)) + (diff.count > 200_000 ? "\n[差异过长，已截断，请在 Mac 查看完整内容]" : "")
+                remoteExecution = execution
+            }
         case "turn/started":
             let turn = params["turn"] as? [String: Any]
             execution.turnID = turn?["id"] as? String ?? execution.turnID
@@ -1278,7 +1285,8 @@ final class AppModel: ObservableObject {
                         threadId: execution.threadID,
                         turnId: execution.turnID ?? "",
                         result: execution.responseText,
-                        error: errorText
+                        error: errorText,
+                        fileDiff: execution.fileDiff
                 ))
             }
         case "error":
@@ -1291,7 +1299,8 @@ final class AppModel: ObservableObject {
             Task { [weak self] in
                 await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
                         status: "failed", threadId: execution.threadID,
-                        turnId: execution.turnID ?? "", result: execution.responseText, error: message
+                        turnId: execution.turnID ?? "", result: execution.responseText, error: message,
+                        fileDiff: execution.fileDiff
                 ))
             }
         default:

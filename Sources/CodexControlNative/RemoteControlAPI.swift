@@ -60,6 +60,7 @@ struct RemoteTaskStatusBody: Codable, Equatable {
     let turnId: String
     let result: String
     let error: String
+    var fileDiff: String? = nil
 }
 
 private struct RemoteEnvelope<Value: Decodable>: Decodable {
