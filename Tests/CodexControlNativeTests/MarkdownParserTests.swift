@@ -36,6 +36,29 @@ final class MarkdownParserTests: XCTestCase {
         XCTAssertEqual(blocks, [.code(language: "swift", text: "let value = 1")])
     }
 
+    func testStreamingPreviewFormatsBlocksBeforeCompletion() {
+        let text = "## 输出中\n\n- **进度**：已完成 [检查](https://example.com)\n\n```swift\nlet value = 1"
+        let preview = StreamingMarkdownWindow.preview(text)
+        XCTAssertEqual(preview.markdown, text)
+        XCTAssertFalse(preview.isTruncated)
+        let blocks = MarkdownBlockParser.parse(preview.markdown)
+        XCTAssertTrue(blocks.contains(.heading(level: 2, text: "输出中")))
+        XCTAssertTrue(blocks.contains(.bullet("**进度**：已完成 [检查](https://example.com)")))
+        XCTAssertTrue(blocks.contains(.code(language: "swift", text: "let value = 1")))
+    }
+
+    func testLongStreamingPreviewIsBoundedAndRetainsOpenFence() {
+        let text = "```swift\n" + String(repeating: "let value = 1\n", count: 2_000) + "let last = 2"
+        let preview = StreamingMarkdownWindow.preview(text)
+        XCTAssertTrue(preview.isTruncated)
+        XCTAssertLessThanOrEqual(preview.markdown.count, 6_010)
+        XCTAssertTrue(preview.markdown.hasPrefix("```swift\n"))
+        XCTAssertTrue(preview.markdown.hasSuffix("let last = 2"))
+        guard case .code = MarkdownBlockParser.parse(preview.markdown).first else {
+            return XCTFail("Streaming code must not become plain Markdown after clipping")
+        }
+    }
+
     func testStandaloneLocalImageIsParsed() {
         let blocks = MarkdownBlockParser.parse("![截图](/tmp/example.png)")
         XCTAssertEqual(blocks, [.image(alt: "截图", target: "/tmp/example.png")])

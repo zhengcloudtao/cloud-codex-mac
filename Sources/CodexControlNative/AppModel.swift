@@ -54,9 +54,47 @@ final class AppModel: ObservableObject {
     private var threadStatusMonitorTask: Task<Void, Never>?
     private var turnProgressHintTask: Task<Void, Never>?
     private var pendingDeltaFlushTask: Task<Void, Never>?
-    private var pendingActivityDeltas: [String: PendingActivityDelta] = [:]
-    private var pendingAssistantDeltas: [String: [String]] = [:]
+    private var pendingActivityDeltas: [PendingItemKey: PendingActivityDelta] = [:]
+    private var pendingAssistantDeltas: [PendingItemKey: [String]] = [:]
     private var pendingDeltaOrder: [PendingDeltaTarget] = []
+    private var messagesByThread: [String: [ChatMessage]] = [:]
+    private var threadSummaries: [String: CodexThread] = [:]
+    private var selectionGeneration = 0
+    private var turnEventRevision: [String: Int] = [:]
+    // Reduce each event into its own conversation, publishing only once and
+    // only if that conversation is visible. Background events never disappear.
+    private var eventThreadID: String?
+    private var eventBuffer: [ChatMessage]?
+
+    private var eventMessages: [ChatMessage] {
+        get { eventBuffer ?? messages }
+        set {
+            if eventBuffer != nil { eventBuffer = newValue }
+            else if messages != newValue { messages = newValue }
+        }
+    }
+
+    func conversationMessages(for threadID: String) -> [ChatMessage] {
+        if eventThreadID == threadID, let eventBuffer { return eventBuffer }
+        return selectedThreadID == threadID ? messages : messagesByThread[threadID] ?? []
+    }
+
+    private func storeMessages(_ value: [ChatMessage], for threadID: String) {
+        if eventThreadID == threadID { eventBuffer = value; return }
+        messagesByThread[threadID] = value
+        if selectedThreadID == threadID, messages != value { messages = value }
+    }
+
+    private func preserveSelectedConversation() {
+        flushPendingDeltas()
+        if let id = selectedThreadID {
+            messagesByThread[id] = messages
+            if let thread = selectedThread { threadSummaries[id] = thread }
+        }
+        turnProgressHintTask?.cancel()
+        selectedThreadMetadataTask?.cancel()
+        selectionGeneration += 1
+    }
     /// Local app-server turns must be tracked by thread. A single global
     /// `isSending` flag leaks into whichever conversation the user selects
     /// next and makes an idle task look as if it were still thinking.
@@ -85,9 +123,20 @@ final class AppModel: ObservableObject {
         var chunks: [String]
     }
 
+    private struct PendingItemKey: Hashable {
+        let threadID: String
+        let itemID: String
+    }
+
     private enum PendingDeltaTarget: Hashable {
-        case activity(String)
-        case assistant(String)
+        case activity(PendingItemKey)
+        case assistant(PendingItemKey)
+
+        var key: PendingItemKey {
+            switch self {
+            case .activity(let key), .assistant(let key): return key
+            }
+        }
     }
 
     init() {
@@ -221,6 +270,7 @@ final class AppModel: ObservableObject {
 
     var selectedThread: CodexThread? {
         threads.first { $0.id == selectedThreadID }
+            ?? selectedThreadID.flatMap { threadSummaries[$0] }
     }
 
     var selectedModel: CodexModelOption? {
@@ -307,7 +357,7 @@ final class AppModel: ObservableObject {
             let page = try await client.listThreads(limit: 60, cwd: requestedFolder)
             guard generation == threadRequestGeneration,
                   requestedFolder == selectedFolder else { return }
-            threads = page.threads
+            applyThreadListSnapshot(page.threads)
             hasMoreThreads = page.hasMore
             if selectedFolder == nil {
                 mergeRecentFolders(from: page.threads)
@@ -321,6 +371,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func applyThreadListSnapshot(_ snapshot: [CodexThread]) {
+        let incomingIDs = Set(snapshot.map(\.id))
+        // A new/selected/running task may not have reached thread/list yet.
+        let retained = threads.filter {
+            !incomingIDs.contains($0.id)
+                && ($0.id == selectedThreadID || locallyRunningThreadIDs.contains($0.id))
+        }
+        let merged = (retained + snapshot).map { thread -> CodexThread in
+            var updated = thread
+            if locallyRunningThreadIDs.contains(thread.id) { updated.status = "active" }
+            threadSummaries[thread.id] = updated
+            return updated
+        }
+        if threads != merged { threads = merged }
+    }
+
     private func startThreadStatusMonitor() {
         threadStatusMonitorTask?.cancel()
         threadStatusMonitorTask = Task { [weak self] in
@@ -332,15 +398,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Refresh only the lightweight thread summaries currently represented in
-    /// the list. This deliberately avoids loading turns or message history.
+    /// Discover new rows as well as status changes, without loading history.
     private func syncVisibleThreadStatuses() async {
         let requestedFolder = selectedFolder
         do {
             let page = try await client.listThreads(limit: 60, cwd: requestedFolder)
             guard requestedFolder == selectedFolder else { return }
-            let statuses = Dictionary(uniqueKeysWithValues: page.threads.map { ($0.id, $0.status) })
-            applyVisibleThreadStatuses(statuses)
+            applyThreadListSnapshot(page.threads)
         } catch {
             // Status lights are best-effort and must never interrupt the task.
         }
@@ -369,8 +433,13 @@ final class AppModel: ObservableObject {
     }
 
     private func setThreadRunning(_ threadID: String, running: Bool) {
+        if var cached = threadSummaries[threadID] {
+            cached.status = running ? "active" : "idle"
+            threadSummaries[threadID] = cached
+        }
         guard let index = threads.firstIndex(where: { $0.id == threadID }) else { return }
-        threads[index].status = running ? "active" : "idle"
+        let status = running ? "active" : "idle"
+        if threads[index].status != status { threads[index].status = status }
     }
 
     private func setLocalTurnRunning(_ threadID: String, turnID: String? = nil) {
@@ -396,12 +465,13 @@ final class AppModel: ObservableObject {
     }
 
     func selectFolder(_ path: String?) {
+        guard path != selectedFolder else { return }
+        preserveSelectedConversation()
         if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
         selectedThreadMetadataTask?.cancel()
         selectedThreadMetadataTask = nil
-        discardPendingDeltas()
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
         selectedFolder = path
@@ -418,20 +488,22 @@ final class AppModel: ObservableObject {
     }
 
     func selectThread(_ id: String?) {
+        guard id != selectedThreadID else { return }
+        preserveSelectedConversation()
         if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
-        discardPendingDeltas()
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
         selectedThreadID = id
+        messages = id.flatMap { messagesByThread[$0] } ?? []
         syncSelectedLocalTurnState()
         guard let id else {
             messages = []
             return
         }
         selectedThreadMonitorTask = Task { [weak self] in
-            guard let self else { return }
+            guard !Task.isCancelled, let self, self.selectedThreadID == id else { return }
             await self.loadSelectedThread()
             await self.syncLatestExternalActivity(threadID: id)
             while !Task.isCancelled, self.selectedThreadID == id {
@@ -448,15 +520,20 @@ final class AppModel: ObservableObject {
             messages = []
             return
         }
+        let generation = selectionGeneration
         isLoading = true
-        defer { isLoading = false }
+        defer { if generation == selectionGeneration { isLoading = false } }
         do {
-            let (updated, loadedMessages) = try await client.readThread(id)
+            var (updated, loadedMessages) = try await client.readThread(id)
+            guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }
+            if locallyRunningThreadIDs.contains(id) { updated.status = "active" }
+            threadSummaries[id] = updated
             if let index = threads.firstIndex(where: { $0.id == id }), threads[index] != updated {
                 threads[index] = updated
             }
             if selectedThreadID == id {
-                messages = loadedMessages
+                flushPendingDeltas()
+                storeMessages(ConversationHistory.merge(snapshot: loadedMessages, cached: messages), for: id)
                 scheduleTurnModelMetadataLoad(
                     for: updated,
                     messages: loadedMessages,
@@ -467,15 +544,30 @@ final class AppModel: ObservableObject {
                     selectModel(model, preferredEffort: updated.reasoningEffort)
                 }
                 await loadPermissionProfiles(cwd: updated.cwd)
+                guard !Task.isCancelled, generation == selectionGeneration else { return }
+                let activity = try await client.readLatestThreadActivity(id, knownThread: updated)
+                guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }
+                flushPendingDeltas()
+                if locallyRunningThreadIDs.contains(id) {
+                    storeMessages(ConversationHistory.merge(snapshot: activity.messages, cached: messages), for: id)
+                } else {
+                    applyExternalActivitySnapshot(activity, threadID: id)
+                }
             }
         } catch {
-            errorMessage = error.localizedDescription
+            if !Task.isCancelled, generation == selectionGeneration {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
     func sendMessage() async {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         let outgoingAttachments = attachments
+        let outgoingModel = selectedModel?.model
+        let outgoingEffort = selectedEffort
+        let outgoingPermissions = selectedPermissionID
+        let outgoingServiceTier = serviceTierForTurn
         guard (!text.isEmpty || !outgoingAttachments.isEmpty),
               let id = selectedThreadID, !isSending, !isExternalThreadProcessing else { return }
 
@@ -512,10 +604,10 @@ final class AppModel: ObservableObject {
                 threadID: id,
                 text: text,
                 attachments: outgoingAttachments,
-                model: selectedModel?.model,
-                effort: selectedEffort,
-                permissions: selectedPermissionID,
-                serviceTierForTurn: serviceTierForTurn
+                model: outgoingModel,
+                effort: outgoingEffort,
+                permissions: outgoingPermissions,
+                serviceTierForTurn: outgoingServiceTier
             )
             setLocalTurnRunning(id, turnID: turnID)
         } catch {
@@ -558,9 +650,13 @@ final class AppModel: ObservableObject {
     ) {
         clearLocalTurn(threadID)
         setThreadRunning(threadID, running: false)
-        turnProgressHintTask?.cancel()
-        turnProgressHintTask = nil
-        messages.removeAll { $0.id == localMessageID || $0.id == "turn-progress" }
+        if selectedThreadID == threadID {
+            turnProgressHintTask?.cancel()
+            turnProgressHintTask = nil
+        }
+        storeMessages(conversationMessages(for: threadID).filter {
+            $0.id != localMessageID && $0.id != "turn-progress"
+        }, for: threadID)
         liveTurnMetadataByThread.removeValue(forKey: threadID)
         guard selectedThreadID == threadID else { return }
         composerText = text
@@ -582,11 +678,13 @@ final class AppModel: ObservableObject {
 
     private func syncLatestExternalActivity(threadID: String) async {
         guard selectedThreadID == threadID, !isSending else { return }
+        let generation = selectionGeneration
+        let revision = turnEventRevision[threadID, default: 0]
         do {
             let thread = try await client.readThreadState(threadID)
             guard selectedThreadID == threadID, !isSending else { return }
             let snapshot: ThreadActivitySnapshot
-            if thread.status == "active" {
+            if thread.status == "active" || isExternalThreadProcessing || client.shouldRefreshActivity(thread) {
                 snapshot = try await client.readLatestThreadActivity(
                     threadID,
                     knownThread: thread
@@ -594,7 +692,9 @@ final class AppModel: ObservableObject {
             } else {
                 snapshot = ThreadActivitySnapshot(thread: thread, turn: nil, messages: [])
             }
-            guard selectedThreadID == threadID, !isSending else { return }
+            guard !Task.isCancelled, selectedThreadID == threadID, !isSending,
+                  generation == selectionGeneration,
+                  revision == turnEventRevision[threadID, default: 0] else { return }
             applyExternalActivitySnapshot(snapshot, threadID: threadID)
         } catch {
             // Monitoring is best-effort. The primary app-server connection and
@@ -620,8 +720,10 @@ final class AppModel: ObservableObject {
         }
 
         let wasStartedAt = messages.first(where: { $0.id == "turn-progress" })?.startedAt
-        let latestIDs = Set(snapshot.messages.map(\.id))
-        var merged = messages.filter { $0.id != "turn-progress" && !latestIDs.contains($0.id) }
+        var merged = ConversationHistory.merge(
+            snapshot: snapshot.messages,
+            cached: messages.filter { $0.id != "turn-progress" }
+        )
 
         if isActive {
             let startedAt = snapshot.turn?.startedAt ?? wasStartedAt ?? Date()
@@ -635,24 +737,19 @@ final class AppModel: ObservableObject {
                 activityStatus: "进行中",
                 startedAt: startedAt
             )
-            if let lastUserIndex = snapshot.messages.lastIndex(where: { $0.role == .user }) {
-                merged.append(contentsOf: snapshot.messages[...lastUserIndex])
-                merged.append(progress)
-                let nextIndex = snapshot.messages.index(after: lastUserIndex)
-                if nextIndex < snapshot.messages.endIndex {
-                    merged.append(contentsOf: snapshot.messages[nextIndex...])
-                }
+            if let lastUserIndex = merged.lastIndex(where: { $0.role == .user }) {
+                merged.insert(progress, at: lastUserIndex + 1)
             } else {
-                merged.append(progress)
-                merged.append(contentsOf: snapshot.messages)
+                merged.insert(progress, at: 0)
             }
         } else {
-            merged.append(contentsOf: snapshot.messages)
+            for index in merged.indices where merged[index].isStreaming {
+                merged[index].isStreaming = false
+                if merged[index].role == .activity { merged[index].activityStatus = "已完成" }
+            }
         }
 
-        if messages != merged {
-            messages = merged
-        }
+        storeMessages(merged, for: threadID)
         if isExternalThreadProcessing != isActive {
             isExternalThreadProcessing = isActive
         }
@@ -861,7 +958,7 @@ final class AppModel: ObservableObject {
         threadOwnershipNotice = nil
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
-        discardPendingDeltas()
+        preserveSelectedConversation()
         isExternalThreadProcessing = false
         selectedThreadID = nil
         syncSelectedLocalTurnState()
@@ -894,7 +991,11 @@ final class AppModel: ObservableObject {
                 model: selectedModel?.model,
                 permissions: selectedPermissionID
             )
+            preserveSelectedConversation()
+            threadRequestGeneration += 1
+            if selectedFolder != folder { threads = [] }
             threads.insert(thread, at: 0)
+            threadSummaries[thread.id] = thread
             selectedFolder = folder
             selectedThreadID = thread.id
             messages = []
@@ -1328,6 +1429,10 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        if method == "turn/started" || method == "turn/completed" || method == "error" {
+            turnEventRevision[eventThreadID, default: 0] += 1
+        }
+        if method == "turn/completed" { flushPendingDeltas() }
         if method == "turn/started" {
             let turn = params["turn"] as? [String: Any]
             if liveTurnMetadataByThread[eventThreadID] == nil,
@@ -1346,13 +1451,22 @@ final class AppModel: ObservableObject {
 
         handleRemoteEvent(method, params: params, threadID: eventThreadID)
 
-        guard eventThreadID == selectedThreadID else {
-            if method == "turn/completed" { Task { await syncVisibleThreadStatuses() } }
-            return
+        self.eventBuffer = conversationMessages(for: eventThreadID)
+        self.eventThreadID = eventThreadID
+        defer {
+            let updated = self.eventBuffer ?? []
+            self.eventThreadID = nil
+            self.eventBuffer = nil
+            storeMessages(updated, for: eventThreadID)
         }
 
         switch method {
         case "turn/started":
+            // Associate the optimistic question before a history snapshot can
+            // introduce its confirmed server-side identity.
+            if let index = eventMessages.lastIndex(where: { $0.id.hasPrefix("local-") && $0.turnID == nil }) {
+                applyLiveTurnMetadata(to: &eventMessages[index], threadID: eventThreadID)
+            }
             upsertActivity(
                 id: "turn-progress",
                 kind: .status,
@@ -1361,9 +1475,9 @@ final class AppModel: ObservableObject {
                 status: "进行中",
                 isStreaming: true
             )
-            if let index = messages.firstIndex(where: { $0.id == "turn-progress" }),
-               messages[index].startedAt == nil {
-                messages[index].startedAt = Date()
+            if let index = eventMessages.firstIndex(where: { $0.id == "turn-progress" }),
+               eventMessages[index].startedAt == nil {
+                eventMessages[index].startedAt = Date()
             }
         case "item/started":
             guard let item = params["item"] as? [String: Any] else { return }
@@ -1377,14 +1491,14 @@ final class AppModel: ObservableObject {
                 delta: delta
             )
         case "item/reasoning/summaryPartAdded":
-            upsertActivity(
-                id: params["itemId"] as? String ?? "reasoning",
-                kind: .reasoning,
-                title: "思考摘要",
-                text: "正在整理当前推理结果…",
-                status: "进行中",
-                isStreaming: true
-            )
+            flushPendingDeltas()
+            let id = params["itemId"] as? String ?? "reasoning"
+            if let index = eventMessages.firstIndex(where: { $0.id == id }) {
+                if !eventMessages[index].text.isEmpty { eventMessages[index].text += "\n" }
+            } else {
+                upsertActivity(id: id, kind: .reasoning, title: "思考摘要", text: "",
+                               status: "进行中", isStreaming: true)
+            }
         case "item/reasoning/textDelta":
             guard let delta = params["delta"] as? String else { return }
             let itemID = params["itemId"] as? String ?? "reasoning"
@@ -1463,14 +1577,14 @@ final class AppModel: ObservableObject {
             if item["type"] as? String == "agentMessage",
                let id = item["id"] as? String,
                let text = item["text"] as? String {
-                if let index = messages.firstIndex(where: { $0.id == id }) {
-                    messages[index].text = text
-                    messages[index].isStreaming = false
-                    messages[index].timestamp = Date()
-                    applyLiveTurnMetadata(to: &messages[index], threadID: eventThreadID)
+                if let index = eventMessages.firstIndex(where: { $0.id == id }) {
+                    eventMessages[index].text = text
+                    eventMessages[index].isStreaming = false
+                    eventMessages[index].timestamp = Date()
+                    applyLiveTurnMetadata(to: &eventMessages[index], threadID: eventThreadID)
                 } else {
                     let metadata = liveTurnMetadataByThread[eventThreadID]
-                    messages.append(.init(
+                    eventMessages.append(.init(
                         id: id,
                         role: .assistant,
                         text: text,
@@ -1485,7 +1599,7 @@ final class AppModel: ObservableObject {
             }
         case "turn/completed":
             flushPendingDeltas()
-            isExternalThreadProcessing = false
+            if selectedThreadID == eventThreadID { isExternalThreadProcessing = false }
             completeStreamingActivities()
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String ?? "completed"
@@ -1497,7 +1611,7 @@ final class AppModel: ObservableObject {
         case "error":
             flushPendingDeltas()
             clearLocalTurn(eventThreadID)
-            isExternalThreadProcessing = false
+            if selectedThreadID == eventThreadID { isExternalThreadProcessing = false }
             setThreadRunning(eventThreadID, running: false)
             finishTurnProgress(status: "失败")
             if let error = params["error"] as? [String: Any] {
@@ -1605,15 +1719,16 @@ final class AppModel: ObservableObject {
         isStreaming: Bool
     ) {
         let clipped = clippedActivityText(text)
-        if let index = messages.firstIndex(where: { $0.id == id }) {
-            messages[index].activityKind = kind
-            messages[index].activityTitle = title
-            if !clipped.isEmpty { messages[index].text = clipped }
-            messages[index].activityStatus = status
-            messages[index].isStreaming = isStreaming
+        if let index = eventMessages.firstIndex(where: { $0.id == id }) {
+            eventMessages[index].activityKind = kind
+            eventMessages[index].activityTitle = title
+            if !clipped.isEmpty { eventMessages[index].text = clipped }
+            eventMessages[index].activityStatus = status
+            eventMessages[index].isStreaming = isStreaming
         } else {
-            messages.append(.init(id: id, role: .activity, text: clipped, isStreaming: isStreaming,
-                                  activityKind: kind, activityTitle: title, activityStatus: status))
+            eventMessages.append(.init(id: id, role: .activity, text: clipped, isStreaming: isStreaming,
+                                  activityKind: kind, activityTitle: title, activityStatus: status,
+                                  turnID: (eventThreadID ?? selectedThreadID).flatMap { activeTurnIDsByThread[$0] }))
         }
     }
 
@@ -1623,27 +1738,31 @@ final class AppModel: ObservableObject {
         title: String,
         delta: String
     ) {
-        if var pending = pendingActivityDeltas[id] {
+        guard let threadID = eventThreadID ?? selectedThreadID else { return }
+        let key = PendingItemKey(threadID: threadID, itemID: id)
+        if var pending = pendingActivityDeltas[key] {
             pending.chunks.append(delta)
             pending.kind = kind
             pending.title = title
-            pendingActivityDeltas[id] = pending
+            pendingActivityDeltas[key] = pending
         } else {
-            pendingActivityDeltas[id] = PendingActivityDelta(
+            pendingActivityDeltas[key] = PendingActivityDelta(
                 kind: kind,
                 title: title,
                 chunks: [delta]
             )
-            pendingDeltaOrder.append(.activity(id))
+            pendingDeltaOrder.append(.activity(key))
         }
         schedulePendingDeltaFlush()
     }
 
     private func enqueueAssistantDelta(id: String, delta: String) {
-        if pendingAssistantDeltas[id] == nil {
-            pendingDeltaOrder.append(.assistant(id))
+        guard let threadID = eventThreadID ?? selectedThreadID else { return }
+        let key = PendingItemKey(threadID: threadID, itemID: id)
+        if pendingAssistantDeltas[key] == nil {
+            pendingDeltaOrder.append(.assistant(key))
         }
-        pendingAssistantDeltas[id, default: []].append(delta)
+        pendingAssistantDeltas[key, default: []].append(delta)
         schedulePendingDeltaFlush()
     }
 
@@ -1672,11 +1791,15 @@ final class AppModel: ObservableObject {
         pendingActivityDeltas.removeAll(keepingCapacity: true)
         pendingAssistantDeltas.removeAll(keepingCapacity: true)
 
-        var updatedMessages = messages
+        var updates: [String: [ChatMessage]] = [:]
         for target in order {
+            let key = target.key
+            let id = key.itemID
+            let threadID = key.threadID
+            var updatedMessages = updates[threadID] ?? conversationMessages(for: threadID)
             switch target {
-            case let .activity(id):
-                guard let pending = activityDeltas[id] else { continue }
+            case .activity:
+                guard let pending = activityDeltas[key] else { continue }
                 let delta = pending.chunks.joined()
                 if let index = updatedMessages.firstIndex(where: { $0.id == id }) {
                     updatedMessages[index].text = clippedActivityText(
@@ -1694,34 +1817,34 @@ final class AppModel: ObservableObject {
                         isStreaming: true,
                         activityKind: pending.kind,
                         activityTitle: pending.title,
-                        activityStatus: "进行中"
+                        activityStatus: "进行中",
+                        turnID: activeTurnIDsByThread[threadID]
                     ))
                 }
-            case let .assistant(id):
-                guard let chunks = assistantDeltas[id] else { continue }
+            case .assistant:
+                guard let chunks = assistantDeltas[key] else { continue }
                 let delta = chunks.joined()
                 if let index = updatedMessages.firstIndex(where: { $0.id == id }) {
                     updatedMessages[index].text += delta
                     updatedMessages[index].isStreaming = true
-                    if let threadID = selectedThreadID {
-                        applyLiveTurnMetadata(to: &updatedMessages[index], threadID: threadID)
-                    }
+                    applyLiveTurnMetadata(to: &updatedMessages[index], threadID: threadID)
                 } else {
-                    let metadata = selectedThreadID.flatMap { liveTurnMetadataByThread[$0] }
+                    let metadata = liveTurnMetadataByThread[threadID]
                     updatedMessages.append(.init(
                         id: id,
                         role: .assistant,
                         text: delta,
                         isStreaming: true,
-                        turnID: activeTurnID,
+                        turnID: activeTurnIDsByThread[threadID],
                         model: metadata?.model,
                         reasoningEffort: metadata?.reasoningEffort
                     ))
                 }
             }
+            updates[threadID] = updatedMessages
         }
-        if updatedMessages != messages {
-            messages = updatedMessages
+        for (threadID, updatedMessages) in updates {
+            storeMessages(updatedMessages, for: threadID)
         }
     }
 
@@ -1748,7 +1871,7 @@ final class AppModel: ObservableObject {
         guard let turn,
               let turnID = turn["id"] as? String,
               let completedAt = dateFromUnixTimestamp(turn["completedAt"]) else { return }
-        var updatedMessages = messages
+        var updatedMessages = eventMessages
         var didChange = false
         for index in updatedMessages.indices where
             updatedMessages[index].role == .assistant && updatedMessages[index].turnID == turnID {
@@ -1757,7 +1880,7 @@ final class AppModel: ObservableObject {
                 didChange = true
             }
         }
-        if didChange { messages = updatedMessages }
+        if didChange { eventMessages = updatedMessages }
     }
 
     private func dateFromUnixTimestamp(_ value: Any?) -> Date? {
@@ -1792,21 +1915,12 @@ final class AppModel: ObservableObject {
         if message.turnID == nil { message.turnID = activeTurnIDsByThread[threadID] }
     }
 
-    private func discardPendingDeltas() {
-        pendingDeltaFlushTask?.cancel()
-        pendingDeltaFlushTask = nil
-        pendingDeltaOrder.removeAll(keepingCapacity: true)
-        pendingActivityDeltas.removeAll(keepingCapacity: true)
-        pendingAssistantDeltas.removeAll(keepingCapacity: true)
-    }
-
     private func completeStreamingActivities() {
-        for index in messages.indices
-        where messages[index].role == .activity
-            && messages[index].id != "turn-progress"
-            && messages[index].isStreaming {
-            messages[index].isStreaming = false
-            messages[index].activityStatus = "已完成"
+        for index in eventMessages.indices
+        where eventMessages[index].id != "turn-progress"
+            && eventMessages[index].isStreaming {
+            eventMessages[index].isStreaming = false
+            eventMessages[index].activityStatus = "已完成"
         }
     }
 
@@ -1835,12 +1949,14 @@ final class AppModel: ObservableObject {
     }
 
     private func finishTurnProgress(status: String) {
-        turnProgressHintTask?.cancel()
-        turnProgressHintTask = nil
-        guard let index = messages.firstIndex(where: { $0.id == "turn-progress" }) else { return }
-        messages[index].isStreaming = false
-        messages[index].activityStatus = status
-        messages[index].completedAt = Date()
+        if eventThreadID == nil || eventThreadID == selectedThreadID {
+            turnProgressHintTask?.cancel()
+            turnProgressHintTask = nil
+        }
+        guard let index = eventMessages.firstIndex(where: { $0.id == "turn-progress" }) else { return }
+        eventMessages[index].isStreaming = false
+        eventMessages[index].activityStatus = status
+        eventMessages[index].completedAt = Date()
     }
 
     private func updateQuietTurnHint(_ text: String) {

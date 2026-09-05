@@ -226,7 +226,7 @@ final class StreamingEventTests: XCTestCase {
         ])
         let summaryPlaceholder = model.messages.first { $0.id == "reasoning-placeholder" }
         XCTAssertEqual(summaryPlaceholder?.activityTitle, "思考摘要")
-        XCTAssertEqual(summaryPlaceholder?.text, "正在整理当前推理结果…")
+        XCTAssertEqual(summaryPlaceholder?.text, "")
         XCTAssertTrue(summaryPlaceholder?.isStreaming == true)
 
         model.handleEvent("item/started", [

@@ -18,6 +18,14 @@ final class AppServerClient {
     }
     private var pending: [Int: PendingRequest] = [:]
     private var loadedThreadIDs: Set<String> = []
+    private struct ActivityHistory {
+        var turnID: String
+        var tailCursor: String?
+        var messages: [ChatMessage] = []
+        var isComplete = false
+        var updatedAt: Date?
+    }
+    private var activityHistoryByThread: [String: ActivityHistory] = [:]
     private(set) var connected = false
     var onEvent: EventHandler?
     var onDisconnect: ((String) -> Void)?
@@ -161,7 +169,10 @@ final class AppServerClient {
             ]
         )
         let newestFirst = turnsResult["data"] as? [JSON] ?? []
-        return (thread, Self.parseMessages(from: newestFirst.reversed()))
+        let messages = await Task.detached(priority: .userInitiated) {
+            Self.parseMessages(from: newestFirst.reversed())
+        }.value
+        return (thread, messages)
     }
 
     func readThreadState(_ id: String) async throws -> CodexThread {
@@ -199,9 +210,8 @@ final class AppServerClient {
             params: [
                 "threadId": id,
                 "limit": 1,
-                // Full command output can be several megabytes and previously
-                // made JSON parsing block the UI. Summary still carries the
-                // visible activity records needed by the external monitor.
+                // Read turn metadata cheaply; actual process items are fetched
+                // below via the paginated item endpoint, not from this summary.
                 "itemsView": "summary",
                 "sortDirection": "desc"
             ]
@@ -210,10 +220,50 @@ final class AppServerClient {
         let runtime = latestTurn.flatMap(Self.parseTurnRuntime)
         let turnIDs = Set(latestTurn.flatMap { $0["id"] as? String }.map { [$0] } ?? [])
         let metadata = await readTurnModelMetadata(for: thread, turnIDs: turnIDs)
-        let messages = latestTurn.map {
-            Self.parseMessages(from: [$0], metadataByTurnID: metadata)
-        } ?? []
-        return ThreadActivitySnapshot(thread: thread, turn: runtime, messages: messages)
+        guard let latestTurn, let runtime else {
+            return ThreadActivitySnapshot(thread: thread, turn: runtime, messages: [])
+        }
+        var history = activityHistoryByThread[id].flatMap { $0.turnID == runtime.id ? $0 : nil }
+            ?? ActivityHistory(turnID: runtime.id)
+        if history.updatedAt != thread.updatedAt { history.isComplete = false }
+        if !history.isComplete {
+            // Summary contains only user/final messages. Read actual activities
+            // in small pages, retaining the last page cursor for the next poll
+            // so a still-running item can grow without re-reading the whole turn.
+            for _ in 0..<8 {
+                try Task.checkCancellation()
+                var params: JSON = ["threadId": id, "turnId": runtime.id,
+                                    "limit": 24, "sortDirection": "asc"]
+                if let cursor = history.tailCursor { params["cursor"] = cursor }
+                let page = try await request("thread/items/list", params: params)
+                let entries = page["data"] as? [JSON] ?? []
+                let decoded = await Task.detached(priority: .userInitiated) {
+                    var turn = latestTurn
+                    turn["items"] = entries.compactMap { $0["item"] as? JSON }
+                    return Self.parseMessages(from: [turn], metadataByTurnID: metadata)
+                }.value
+                history.messages = ConversationHistory.merge(snapshot: decoded, cached: history.messages)
+                if let next = page["nextCursor"] as? String, next != history.tailCursor {
+                    history.tailCursor = next
+                } else {
+                    history.isComplete = !runtime.isActive
+                    break
+                }
+            }
+            // Only normalized, clipped activity text is cached, never raw tool
+            // output. Additional pages continue on the next lightweight poll.
+            history.updatedAt = thread.updatedAt
+            activityHistoryByThread[id] = history
+        }
+        return ThreadActivitySnapshot(thread: thread, turn: runtime, messages: history.messages)
+    }
+
+    func hasMoreActivityHistory(_ threadID: String) -> Bool {
+        activityHistoryByThread[threadID]?.isComplete == false
+    }
+
+    func shouldRefreshActivity(_ thread: CodexThread) -> Bool {
+        hasMoreActivityHistory(thread.id) || activityHistoryByThread[thread.id]?.updatedAt != thread.updatedAt
     }
 
     func createThread(cwd: String, model: String?, permissions: String?) async throws -> CodexThread {
@@ -394,7 +444,7 @@ final class AppServerClient {
         throw CodexClientError.binaryNotFound
     }
 
-    static func parseMessages<S: Sequence>(
+    nonisolated static func parseMessages<S: Sequence>(
         from turns: S,
         metadataByTurnID: [String: TurnModelMetadata] = [:]
     ) -> [ChatMessage] where S.Element == JSON {
@@ -408,6 +458,7 @@ final class AppServerClient {
             for item in items {
                 guard let type = item["type"] as? String else { continue }
                 let id = item["id"] as? String ?? UUID().uuidString
+                let messageStart = messages.count
                 switch type {
                 case "userMessage":
                     let content = item["content"] as? [JSON] ?? []
@@ -561,12 +612,22 @@ final class AppServerClient {
                 default:
                     break
                 }
+                for index in messageStart..<messages.count {
+                    messages[index].turnID = turnID
+                    // Only explicit running statuses are active: a finished
+                    // tool in an active turn must not keep spinning forever.
+                    if messages[index].role == .activity,
+                       let status = item["status"] as? String {
+                        messages[index].isStreaming = status == "inProgress"
+                        messages[index].activityStatus = localizedStatus(status)
+                    }
+                }
             }
         }
         return messages
     }
 
-    private static func unixDate(_ value: Any?) -> Date? {
+    nonisolated private static func unixDate(_ value: Any?) -> Date? {
         let rawValue: Double?
         if let number = value as? NSNumber {
             rawValue = number.doubleValue
@@ -594,20 +655,20 @@ final class AppServerClient {
         return TurnRuntimeState(id: id, status: status, startedAt: startedAt, completedAt: completedAt)
     }
 
-    private static func clippedActivityText(_ text: String) -> String {
+    nonisolated private static func clippedActivityText(_ text: String) -> String {
         let limit = 12_000
         guard text.count > limit else { return text }
         return "…已省略较早输出…\n" + String(text.suffix(limit))
     }
 
-    private static func jsonPreview(_ value: Any?) -> String {
+    nonisolated private static func jsonPreview(_ value: Any?) -> String {
         guard let value, JSONSerialization.isValidJSONObject(value),
               let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
               let text = String(data: data, encoding: .utf8) else { return "" }
         return clippedActivityText(text)
     }
 
-    private static func localizedStatus(_ status: String?) -> String {
+    nonisolated private static func localizedStatus(_ status: String?) -> String {
         switch status {
         case "inProgress": return "进行中"
         case "failed": return "失败"

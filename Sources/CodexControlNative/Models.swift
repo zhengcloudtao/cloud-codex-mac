@@ -235,21 +235,27 @@ struct TurnModelMetadata: Hashable {
     var displayLabel: String? {
         guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines),
               !model.isEmpty else { return nil }
-        let effort = reasoningEffort.flatMap(Self.localizedEffort)
+        let effort = reasoningEffort.map(ReasoningEffortLabel.name)
         return [model, effort].compactMap { $0 }.joined(separator: " · ")
     }
 
-    private static func localizedEffort(_ effort: String) -> String? {
+}
+
+/// Matches the installed Codex composer's Chinese locale. IDs sent to
+/// app-server are unchanged; all UI surfaces share this one presentation map.
+enum ReasoningEffortLabel {
+    static func name(_ effort: String) -> String {
         switch effort.lowercased() {
-        case "low": return "低"
+        case "none": return "无"
+        case "minimal": return "极低"
+        case "low": return "轻度"
         case "medium": return "中"
         case "high": return "高"
-        case "xhigh": return "超高"
-        case "max": return "最大"
-        case "ultra": return "极致"
-        default:
-            let value = effort.trimmingCharacters(in: .whitespacesAndNewlines)
-            return value.isEmpty ? nil : value
+        case "xhigh": return "极高"
+        case "max": return "最高"
+        case "ultra": return "Ultra"
+        case "persistent": return "持续"
+        default: return effort
         }
     }
 }

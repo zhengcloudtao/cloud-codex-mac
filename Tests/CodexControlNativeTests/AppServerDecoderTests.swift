@@ -44,7 +44,7 @@ final class AppServerDecoderTests: XCTestCase {
 
         let reader = TurnMetadataReader()
         let first = await reader.metadata(filePath: sessionURL.path, turnIDs: ["turn-1"])
-        XCTAssertEqual(first["turn-1"]?.displayLabel, "gpt-5.6-sol · 超高")
+        XCTAssertEqual(first["turn-1"]?.displayLabel, "gpt-5.6-sol · 极高")
 
         let secondContext = """
         {"timestamp":"2026-09-05T02:00:00Z","type":"turn_context","payload":{"turn_id":"turn-2","model":"gpt-6-astra","effort":"high"}}
@@ -93,7 +93,7 @@ final class AppServerDecoderTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(messages.first { $0.id == "answer-old" }?.modelUsageLabel, "gpt-5.6-sol · 超高")
+        XCTAssertEqual(messages.first { $0.id == "answer-old" }?.modelUsageLabel, "gpt-5.6-sol · 极高")
         XCTAssertEqual(messages.first { $0.id == "answer-new" }?.modelUsageLabel, "gpt-6-astra · 高")
         XCTAssertEqual(messages.first { $0.id == "answer-old" }?.turnID, "turn-old")
         XCTAssertEqual(messages.first { $0.id == "answer-new" }?.turnID, "turn-new")

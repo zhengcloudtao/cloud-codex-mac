@@ -2,12 +2,68 @@ import AppKit
 import Foundation
 import SwiftUI
 
-struct MarkdownMessageView: View {
+struct MarkdownMessageView: View, Equatable {
     let markdown: String
 
     private var blocks: [MarkdownBlock] {
         MarkdownBlockParser.parse(markdown)
     }
+
+    var body: some View {
+        MarkdownBlocksView(blocks: blocks)
+    }
+}
+
+/// Parse a bounded preview away from the main actor. Cancellation and the
+/// task identity prevent a slow older parse from replacing newer output.
+struct StreamingMarkdownContent: View {
+    let text: String
+    @State private var blocks: [MarkdownBlock] = []
+    @State private var isTruncated = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if isTruncated {
+                Text("正在生成，仅预览最新内容；完整内容在完成后可查看")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            MarkdownBlocksView(blocks: blocks).equatable()
+        }
+        .task(id: text) {
+            let input = text
+            let parsed = await Task.detached(priority: .userInitiated) {
+                let preview = StreamingMarkdownWindow.preview(input)
+                return (MarkdownBlockParser.parse(preview.markdown), preview.isTruncated)
+            }.value
+            guard !Task.isCancelled else { return }
+            blocks = parsed.0
+            isTruncated = parsed.1
+        }
+    }
+}
+
+enum StreamingMarkdownWindow {
+    static func preview(_ text: String, limit: Int = 6_000) -> (markdown: String, isTruncated: Bool) {
+        guard text.count > limit else { return (text, false) }
+        var start = text.index(text.endIndex, offsetBy: -limit)
+        // Do not start half way through a bullet, link or Markdown delimiter.
+        if let newline = text[start...].firstIndex(of: "\n") {
+            start = text.index(after: newline)
+        }
+        var openFence: String?
+        text[..<start].enumerateLines { line, _ in
+            let line = line.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") {
+                openFence = openFence == nil ? line : nil
+            }
+        }
+        let prefix = openFence.map { $0 + "\n" } ?? ""
+        return (prefix + text[start...], true)
+    }
+}
+
+private struct MarkdownBlocksView: View, Equatable {
+    let blocks: [MarkdownBlock]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -199,7 +255,7 @@ private struct MarkdownImage: View {
     }
 }
 
-enum MarkdownBlock: Hashable {
+enum MarkdownBlock: Hashable, Sendable {
     case heading(level: Int, text: String)
     case paragraph(String)
     case bullet(String)

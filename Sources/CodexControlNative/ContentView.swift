@@ -33,7 +33,10 @@ struct ContentView: View {
         List(selection: Binding(
             get: { model.selectedFolder ?? "__all__" },
             set: { selection in
+                guard let selection else { return }
+                let previous = model.selectedFolder
                 DispatchQueue.main.async {
+                    guard model.selectedFolder == previous else { return }
                     model.selectFolder(selection == "__all__" ? nil : selection)
                 }
             }
@@ -380,7 +383,12 @@ struct ContentView: View {
             List(selection: Binding(
                 get: { model.selectedThreadID },
                 set: { selection in
+                    // List sends transient nil during row replacement/filtering.
+                    // It is not an explicit request to close the conversation.
+                    guard let selection else { return }
+                    let previous = model.selectedThreadID
                     DispatchQueue.main.async {
+                        guard model.selectedThreadID == previous else { return }
                         model.selectThread(selection)
                     }
                 }
@@ -758,7 +766,7 @@ private struct ConversationHeader: View {
             }
             Spacer()
             if let model = thread.model {
-                Text([model, thread.reasoningEffort].compactMap { $0 }.joined(separator: " · "))
+                Text(TurnModelMetadata(model: model, reasoningEffort: thread.reasoningEffort).displayLabel ?? model)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 9)
@@ -1104,9 +1112,7 @@ private struct MessageBubble: View, Equatable {
                     } else {
                         VStack(alignment: .leading, spacing: 9) {
                             if message.isStreaming {
-                                Text(streamingAssistantPreview)
-                                    .font(.body)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                StreamingMarkdownContent(text: message.text)
                             } else {
                                 AssistantMessageContent(text: message.text)
                             }
@@ -1132,11 +1138,6 @@ private struct MessageBubble: View, Equatable {
         return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
     }
 
-    private var streamingAssistantPreview: String {
-        let limit = 6_000
-        guard message.text.count > limit else { return message.text }
-        return "…正在生成，仅显示最新内容…\n" + String(message.text.suffix(limit))
-    }
 }
 
 private struct MessageMetadataFooter: View {
@@ -1439,7 +1440,16 @@ private struct ActivityBubble: View {
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             if !message.text.isEmpty {
-                if message.isStreaming {
+                if message.activityKind == .reasoning || message.activityKind == .plan {
+                    Group {
+                        if message.isStreaming {
+                            StreamingMarkdownContent(text: message.text)
+                        } else {
+                            AssistantMessageContent(text: message.text)
+                        }
+                    }
+                    .padding(.top, 9)
+                } else if message.isStreaming {
                     Text(liveDetail)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -1849,27 +1859,11 @@ private struct Composer: View {
     }
 
     private func effortDisplayName(_ effort: String) -> String {
-        switch effort {
-        case "low": return "低"
-        case "medium": return "中"
-        case "high": return "高"
-        case "xhigh": return "超高"
-        case "max": return "最大"
-        case "ultra": return "极致（自动委派）"
-        default: return effort
-        }
+        ReasoningEffortLabel.name(effort)
     }
 
     private func effortCompactName(_ effort: String) -> String {
-        switch effort {
-        case "low": return "低"
-        case "medium": return "中"
-        case "high": return "高"
-        case "xhigh": return "超高"
-        case "max": return "最大"
-        case "ultra": return "极致"
-        default: return effort
-        }
+        ReasoningEffortLabel.name(effort)
     }
 }
 
