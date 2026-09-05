@@ -9,6 +9,7 @@ struct CodexThread: Identifiable, Hashable {
     var reasoningEffort: String?
     var updatedAt: Date
     var status: String
+    var path: String?
 
     var displayName: String {
         let title = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -34,6 +35,7 @@ struct CodexThread: Identifiable, Hashable {
         self.cwd = cwd
         self.model = json["model"] as? String
         self.reasoningEffort = json["reasoningEffort"] as? String
+        self.path = json["path"] as? String
         let timestamp = (json["recencyAt"] as? NSNumber)?.doubleValue
             ?? (json["updatedAt"] as? NSNumber)?.doubleValue
             ?? 0
@@ -226,6 +228,32 @@ struct TurnRuntimeState {
     var isActive: Bool { status == "inProgress" }
 }
 
+struct TurnModelMetadata: Hashable {
+    let model: String?
+    let reasoningEffort: String?
+
+    var displayLabel: String? {
+        guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !model.isEmpty else { return nil }
+        let effort = reasoningEffort.flatMap(Self.localizedEffort)
+        return [model, effort].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private static func localizedEffort(_ effort: String) -> String? {
+        switch effort.lowercased() {
+        case "low": return "低"
+        case "medium": return "中"
+        case "high": return "高"
+        case "xhigh": return "超高"
+        case "max": return "最大"
+        case "ultra": return "极致"
+        default:
+            let value = effort.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+    }
+}
+
 struct ThreadActivitySnapshot {
     let thread: CodexThread
     let turn: TurnRuntimeState?
@@ -384,6 +412,13 @@ struct ChatMessage: Identifiable, Hashable {
     var activityStatus: String? = nil
     var startedAt: Date? = nil
     var completedAt: Date? = nil
+    var turnID: String? = nil
+    var model: String? = nil
+    var reasoningEffort: String? = nil
+
+    var modelUsageLabel: String? {
+        TurnModelMetadata(model: model, reasoningEffort: reasoningEffort).displayLabel
+    }
 }
 
 struct ChatMessageAttachment: Identifiable, Hashable {

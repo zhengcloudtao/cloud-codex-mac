@@ -28,4 +28,71 @@ final class AppServerDecoderTests: XCTestCase {
         XCTAssertTrue(decoder.consume(Data("{\"id\":1}\n{\"id\"".utf8)).map { $0["id"] as? Int } == [1])
         XCTAssertTrue(decoder.consume(Data(":2}\n\n{\"id\":3}\n".utf8)).map { $0["id"] as? Int } == [2, 3])
     }
+
+    func testTurnMetadataReaderFindsModelsAndScansOnlyAppendedContent() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CloudCodexTurnMetadataTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionURL = directory.appendingPathComponent("session.jsonl")
+        let firstContext = """
+        {"timestamp":"2026-09-05T01:00:00Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.6-sol","effort":"xhigh"}}
+        {"timestamp":"2026-09-05T01:00:01Z","type":"response_item","payload":{"type":"message"}}
+
+        """
+        try Data(firstContext.utf8).write(to: sessionURL)
+
+        let reader = TurnMetadataReader()
+        let first = await reader.metadata(filePath: sessionURL.path, turnIDs: ["turn-1"])
+        XCTAssertEqual(first["turn-1"]?.displayLabel, "gpt-5.6-sol · 超高")
+
+        let secondContext = """
+        {"timestamp":"2026-09-05T02:00:00Z","type":"turn_context","payload":{"turn_id":"turn-2","model":"gpt-6-astra","effort":"high"}}
+
+        """
+        let handle = try FileHandle(forWritingTo: sessionURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(secondContext.utf8))
+        try handle.close()
+
+        let second = await reader.metadata(
+            filePath: sessionURL.path,
+            turnIDs: ["turn-1", "turn-2"]
+        )
+        XCTAssertEqual(second["turn-1"]?.model, "gpt-5.6-sol")
+        XCTAssertEqual(second["turn-2"]?.displayLabel, "gpt-6-astra · 高")
+    }
+
+    @MainActor
+    func testHistoricalMessagesUseMetadataFromTheirOwnTurn() {
+        let turns: [[String: Any]] = [
+            [
+                "id": "turn-old",
+                "items": [
+                    ["id": "user-old", "type": "userMessage", "content": [["type": "text", "text": "旧问题"]]],
+                    ["id": "answer-old", "type": "agentMessage", "text": "旧回答"]
+                ]
+            ],
+            [
+                "id": "turn-new",
+                "items": [
+                    ["id": "user-new", "type": "userMessage", "content": [["type": "text", "text": "新问题"]]],
+                    ["id": "answer-new", "type": "agentMessage", "text": "新回答"]
+                ]
+            ]
+        ]
+        let messages = AppServerClient.parseMessages(
+            from: turns,
+            metadataByTurnID: [
+                "turn-old": TurnModelMetadata(model: "gpt-5.6-sol", reasoningEffort: "xhigh"),
+                "turn-new": TurnModelMetadata(model: "gpt-6-astra", reasoningEffort: "high")
+            ]
+        )
+
+        XCTAssertEqual(messages.first { $0.id == "answer-old" }?.modelUsageLabel, "gpt-5.6-sol · 超高")
+        XCTAssertEqual(messages.first { $0.id == "answer-new" }?.modelUsageLabel, "gpt-6-astra · 高")
+        XCTAssertEqual(messages.first { $0.id == "answer-old" }?.turnID, "turn-old")
+        XCTAssertEqual(messages.first { $0.id == "answer-new" }?.turnID, "turn-new")
+    }
+
 }

@@ -952,12 +952,27 @@ private struct MessageBubble: View, Equatable {
                 Group {
                     if message.role == .user {
                         UserMessageContent(message: message)
-                    } else if message.isStreaming {
-                        Text(streamingAssistantPreview)
-                            .font(.body)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        AssistantMessageContent(text: message.text)
+                        VStack(alignment: .leading, spacing: 9) {
+                            if message.isStreaming {
+                                Text(streamingAssistantPreview)
+                                    .font(.body)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                AssistantMessageContent(text: message.text)
+                            }
+
+                            if let modelUsageLabel = message.modelUsageLabel {
+                                Label(modelUsageLabel, systemImage: "cpu")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(.quaternary, in: Capsule())
+                                    .accessibilityLabel("本轮使用模型 \(modelUsageLabel)")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                     .padding(.horizontal, 14)

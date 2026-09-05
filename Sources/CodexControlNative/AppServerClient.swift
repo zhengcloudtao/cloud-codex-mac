@@ -10,6 +10,7 @@ final class AppServerClient {
     private var output: FileHandle?
     private var errorOutput: FileHandle?
     private let decodingWorker = JSONLineDecodingWorker()
+    private let turnMetadataReader = TurnMetadataReader()
     private var nextID = 1
     private struct PendingRequest {
         let continuation: CheckedContinuation<JSON, Error>
@@ -175,6 +176,14 @@ final class AppServerClient {
         return thread
     }
 
+    func readTurnModelMetadata(
+        for thread: CodexThread,
+        turnIDs: Set<String>
+    ) async -> [String: TurnModelMetadata] {
+        guard let path = thread.path, !turnIDs.isEmpty else { return [:] }
+        return await turnMetadataReader.metadata(filePath: path, turnIDs: turnIDs)
+    }
+
     func readLatestThreadActivity(
         _ id: String,
         knownThread: CodexThread? = nil
@@ -199,7 +208,11 @@ final class AppServerClient {
         )
         let latestTurn = (turnsResult["data"] as? [JSON])?.first
         let runtime = latestTurn.flatMap(Self.parseTurnRuntime)
-        let messages = latestTurn.map { Self.parseMessages(from: [$0]) } ?? []
+        let turnIDs = Set(latestTurn.flatMap { $0["id"] as? String }.map { [$0] } ?? [])
+        let metadata = await readTurnModelMetadata(for: thread, turnIDs: turnIDs)
+        let messages = latestTurn.map {
+            Self.parseMessages(from: [$0], metadataByTurnID: metadata)
+        } ?? []
         return ThreadActivitySnapshot(thread: thread, turn: runtime, messages: messages)
     }
 
@@ -373,9 +386,14 @@ final class AppServerClient {
         throw CodexClientError.binaryNotFound
     }
 
-    private static func parseMessages<S: Sequence>(from turns: S) -> [ChatMessage] where S.Element == JSON {
+    static func parseMessages<S: Sequence>(
+        from turns: S,
+        metadataByTurnID: [String: TurnModelMetadata] = [:]
+    ) -> [ChatMessage] where S.Element == JSON {
         var messages: [ChatMessage] = []
         for turn in turns {
+            let turnID = turn["id"] as? String
+            let turnMetadata = turnID.flatMap { metadataByTurnID[$0] }
             guard let items = turn["items"] as? [JSON] else { continue }
             for item in items {
                 guard let type = item["type"] as? String else { continue }
@@ -401,11 +419,26 @@ final class AppServerClient {
                         }
                     }
                     if !text.isEmpty || !attachments.isEmpty {
-                        messages.append(.init(id: id, role: .user, text: text, attachments: attachments))
+                        messages.append(.init(
+                            id: id,
+                            role: .user,
+                            text: text,
+                            attachments: attachments,
+                            turnID: turnID,
+                            model: turnMetadata?.model,
+                            reasoningEffort: turnMetadata?.reasoningEffort
+                        ))
                     }
                 case "agentMessage":
                     if let text = item["text"] as? String, !text.isEmpty {
-                        messages.append(.init(id: id, role: .assistant, text: text))
+                        messages.append(.init(
+                            id: id,
+                            role: .assistant,
+                            text: text,
+                            turnID: turnID,
+                            model: turnMetadata?.model,
+                            reasoningEffort: turnMetadata?.reasoningEffort
+                        ))
                     }
                 case "reasoning":
                     let summary = item["summary"] as? [String] ?? []
@@ -553,6 +586,102 @@ final class AppServerClient {
         case "declined": return "已拒绝"
         case "interrupted": return "已停止"
         default: return "已完成"
+        }
+    }
+}
+
+/// Reads the per-turn model recorded in Codex's local JSONL session without
+/// putting large history files on the main actor. The cache only scans bytes
+/// appended since the previous request, which keeps active-task polling cheap.
+actor TurnMetadataReader {
+    private struct FileCache {
+        var scannedThrough: UInt64 = 0
+        var metadataByTurnID: [String: TurnModelMetadata] = [:]
+    }
+
+    private var caches: [String: FileCache] = [:]
+    private let chunkSize: UInt64 = 1_048_576
+    private let overlapSize: UInt64 = 16_384
+
+    func metadata(filePath: String, turnIDs: Set<String>) -> [String: TurnModelMetadata] {
+        guard !turnIDs.isEmpty,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let sizeNumber = attributes[.size] as? NSNumber else { return [:] }
+
+        let fileSize = sizeNumber.uint64Value
+        var cache = caches[filePath] ?? FileCache()
+        if fileSize < cache.scannedThrough {
+            cache = FileCache()
+        }
+
+        if fileSize > cache.scannedThrough,
+           let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: filePath)) {
+            scan(
+                handle: handle,
+                primaryRange: cache.scannedThrough..<fileSize,
+                fileSize: fileSize,
+                metadataByTurnID: &cache.metadataByTurnID
+            )
+            try? handle.close()
+            cache.scannedThrough = fileSize
+            caches[filePath] = cache
+        }
+
+        return Dictionary(uniqueKeysWithValues: turnIDs.compactMap { turnID in
+            cache.metadataByTurnID[turnID].map { (turnID, $0) }
+        })
+    }
+
+    private func scan(
+        handle: FileHandle,
+        primaryRange: Range<UInt64>,
+        fileSize: UInt64,
+        metadataByTurnID: inout [String: TurnModelMetadata]
+    ) {
+        var blockStart = primaryRange.lowerBound
+        while blockStart < primaryRange.upperBound {
+            let blockEnd = min(primaryRange.upperBound, blockStart + chunkSize)
+            let readStart = blockStart > overlapSize ? blockStart - overlapSize : 0
+            let readEnd = min(fileSize, blockEnd + overlapSize)
+            do {
+                try handle.seek(toOffset: readStart)
+                guard let data = try handle.read(upToCount: Int(readEnd - readStart)),
+                      !data.isEmpty else { break }
+                parseTurnContexts(
+                    String(decoding: data, as: UTF8.self),
+                    metadataByTurnID: &metadataByTurnID
+                )
+            } catch {
+                break
+            }
+            blockStart = blockEnd
+        }
+    }
+
+    private func parseTurnContexts(
+        _ text: String,
+        metadataByTurnID: inout [String: TurnModelMetadata]
+    ) {
+        let marker = "\"type\":\"turn_context\""
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let markerRange = text.range(of: marker, range: searchStart..<text.endIndex) {
+            let lineStart = text[..<markerRange.lowerBound].lastIndex(of: "\n")
+                .map { text.index(after: $0) }
+                ?? text.startIndex
+            let lineEnd = text[markerRange.upperBound...].firstIndex(of: "\n") ?? text.endIndex
+            let line = String(text[lineStart..<lineEnd])
+            if let data = line.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               object["type"] as? String == "turn_context",
+               let payload = object["payload"] as? [String: Any],
+               let turnID = payload["turn_id"] as? String {
+                metadataByTurnID[turnID] = TurnModelMetadata(
+                    model: payload["model"] as? String,
+                    reasoningEffort: payload["effort"] as? String
+                )
+            }
+            searchStart = markerRange.upperBound
         }
     }
 }

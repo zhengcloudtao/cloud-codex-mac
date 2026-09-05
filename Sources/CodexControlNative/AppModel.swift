@@ -43,6 +43,7 @@ final class AppModel: ObservableObject {
     private var hasStarted = false
     private var threadRequestGeneration = 0
     private var selectedThreadMonitorTask: Task<Void, Never>?
+    private var selectedThreadMetadataTask: Task<Void, Never>?
     private var threadStatusMonitorTask: Task<Void, Never>?
     private var turnProgressHintTask: Task<Void, Never>?
     private var pendingDeltaFlushTask: Task<Void, Never>?
@@ -54,6 +55,7 @@ final class AppModel: ObservableObject {
     /// next and makes an idle task look as if it were still thinking.
     private var locallyRunningThreadIDs: Set<String> = []
     private var activeTurnIDsByThread: [String: String] = [:]
+    private var liveTurnMetadataByThread: [String: TurnModelMetadata] = [:]
     private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
     private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
@@ -374,6 +376,8 @@ final class AppModel: ObservableObject {
         if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
+        selectedThreadMetadataTask?.cancel()
+        selectedThreadMetadataTask = nil
         discardPendingDeltas()
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
@@ -425,9 +429,16 @@ final class AppModel: ObservableObject {
         defer { isLoading = false }
         do {
             let (updated, loadedMessages) = try await client.readThread(id)
-            if let index = threads.firstIndex(where: { $0.id == id }) { threads[index] = updated }
+            if let index = threads.firstIndex(where: { $0.id == id }), threads[index] != updated {
+                threads[index] = updated
+            }
             if selectedThreadID == id {
                 messages = loadedMessages
+                scheduleTurnModelMetadataLoad(
+                    for: updated,
+                    messages: loadedMessages,
+                    threadID: id
+                )
                 if let model = updated.model,
                    modelOptions.contains(where: { $0.id == model }) {
                     selectModel(model, preferredEffort: updated.reasoningEffort)
@@ -448,6 +459,10 @@ final class AppModel: ObservableObject {
         speech.stop()
         composerText = ""
         attachments = []
+        liveTurnMetadataByThread[id] = TurnModelMetadata(
+            model: selectedModel?.model,
+            reasoningEffort: selectedEffort
+        )
         setLocalTurnRunning(id)
         isExternalThreadProcessing = false
         setThreadRunning(id, running: true)
@@ -522,6 +537,7 @@ final class AppModel: ObservableObject {
         turnProgressHintTask?.cancel()
         turnProgressHintTask = nil
         messages.removeAll { $0.id == localMessageID || $0.id == "turn-progress" }
+        liveTurnMetadataByThread.removeValue(forKey: threadID)
         guard selectedThreadID == threadID else { return }
         composerText = text
         attachments = outgoingAttachments
@@ -933,6 +949,13 @@ final class AppModel: ObservableObject {
         }
         if method == "turn/started" {
             let turn = params["turn"] as? [String: Any]
+            if liveTurnMetadataByThread[eventThreadID] == nil,
+               eventThreadID == selectedThreadID {
+                liveTurnMetadataByThread[eventThreadID] = TurnModelMetadata(
+                    model: selectedModel?.model ?? selectedThread?.model,
+                    reasoningEffort: selectedEffort ?? selectedThread?.reasoningEffort
+                )
+            }
             setLocalTurnRunning(eventThreadID, turnID: turn?["id"] as? String)
             setThreadRunning(eventThreadID, running: true)
         } else if method == "turn/completed" {
@@ -1060,8 +1083,17 @@ final class AppModel: ObservableObject {
                 if let index = messages.firstIndex(where: { $0.id == id }) {
                     messages[index].text = text
                     messages[index].isStreaming = false
+                    applyLiveTurnMetadata(to: &messages[index], threadID: eventThreadID)
                 } else {
-                    messages.append(.init(id: id, role: .assistant, text: text))
+                    let metadata = liveTurnMetadataByThread[eventThreadID]
+                    messages.append(.init(
+                        id: id,
+                        role: .assistant,
+                        text: text,
+                        turnID: params["turnId"] as? String,
+                        model: metadata?.model,
+                        reasoningEffort: metadata?.reasoningEffort
+                    ))
                 }
             } else {
                 updateActivityItem(item, completed: true)
@@ -1285,12 +1317,19 @@ final class AppModel: ObservableObject {
                 if let index = updatedMessages.firstIndex(where: { $0.id == id }) {
                     updatedMessages[index].text += delta
                     updatedMessages[index].isStreaming = true
+                    if let threadID = selectedThreadID {
+                        applyLiveTurnMetadata(to: &updatedMessages[index], threadID: threadID)
+                    }
                 } else {
+                    let metadata = selectedThreadID.flatMap { liveTurnMetadataByThread[$0] }
                     updatedMessages.append(.init(
                         id: id,
                         role: .assistant,
                         text: delta,
-                        isStreaming: true
+                        isStreaming: true,
+                        turnID: activeTurnID,
+                        model: metadata?.model,
+                        reasoningEffort: metadata?.reasoningEffort
                     ))
                 }
             }
@@ -1298,6 +1337,51 @@ final class AppModel: ObservableObject {
         if updatedMessages != messages {
             messages = updatedMessages
         }
+    }
+
+    private func applyTurnModelMetadata(_ metadataByTurnID: [String: TurnModelMetadata]) {
+        guard !metadataByTurnID.isEmpty else { return }
+        var updatedMessages = messages
+        var didChange = false
+        for index in updatedMessages.indices {
+            guard let turnID = updatedMessages[index].turnID,
+                  let metadata = metadataByTurnID[turnID] else { continue }
+            if updatedMessages[index].model != metadata.model {
+                updatedMessages[index].model = metadata.model
+                didChange = true
+            }
+            if updatedMessages[index].reasoningEffort != metadata.reasoningEffort {
+                updatedMessages[index].reasoningEffort = metadata.reasoningEffort
+                didChange = true
+            }
+        }
+        if didChange { messages = updatedMessages }
+    }
+
+    private func scheduleTurnModelMetadataLoad(
+        for thread: CodexThread,
+        messages loadedMessages: [ChatMessage],
+        threadID: String
+    ) {
+        let turnIDs = Set(loadedMessages.compactMap(\.turnID))
+        guard !turnIDs.isEmpty else { return }
+        selectedThreadMetadataTask?.cancel()
+        selectedThreadMetadataTask = Task { [weak self] in
+            guard let self else { return }
+            let metadata = await self.client.readTurnModelMetadata(
+                for: thread,
+                turnIDs: turnIDs
+            )
+            guard !Task.isCancelled, self.selectedThreadID == threadID else { return }
+            self.applyTurnModelMetadata(metadata)
+        }
+    }
+
+    private func applyLiveTurnMetadata(to message: inout ChatMessage, threadID: String) {
+        guard let metadata = liveTurnMetadataByThread[threadID] else { return }
+        message.model = metadata.model
+        message.reasoningEffort = metadata.reasoningEffort
+        if message.turnID == nil { message.turnID = activeTurnIDsByThread[threadID] }
     }
 
     private func discardPendingDeltas() {
