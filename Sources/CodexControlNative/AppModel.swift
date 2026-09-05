@@ -37,8 +37,15 @@ final class AppModel: ObservableObject {
     @Published var editingCategoryID: String?
     @Published var categoryNameDraft = ""
     @Published var categoryEditorError: String?
+    @Published var showingRemoteControl = false
+    @Published private(set) var remoteControlEnabled: Bool
+    @Published private(set) var remoteControlStatus = "远程控制已关闭"
+    @Published private(set) var remotePairingCode = ""
+    @Published private(set) var remoteControlPaired = false
+    @Published private(set) var remoteLastSyncAt: Date?
 
     private let client = AppServerClient()
+    private let remoteControlAPI: RemoteControlAPI?
     private let speech = SpeechInputController()
     private var hasStarted = false
     private var threadRequestGeneration = 0
@@ -56,9 +63,20 @@ final class AppModel: ObservableObject {
     private var locallyRunningThreadIDs: Set<String> = []
     private var activeTurnIDsByThread: [String: String] = [:]
     private var liveTurnMetadataByThread: [String: TurnModelMetadata] = [:]
+    private var remoteControlLoopTask: Task<Void, Never>?
+    private var remoteExecution: RemoteExecution?
     private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
     private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
+    private let remoteControlEnabledKey = "CloudCodex.remoteControl.enabled.v1"
+    private let remotePairingCodeKey = "CloudCodex.remoteControl.pairingCode.v1"
+
+    private struct RemoteExecution {
+        let taskID: String
+        let threadID: String
+        var turnID: String?
+        var responseText: String
+    }
 
     private struct PendingActivityDelta {
         var kind: ChatMessage.ActivityKind
@@ -73,6 +91,9 @@ final class AppModel: ObservableObject {
 
     init() {
         isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
+        remoteControlEnabled = UserDefaults.standard.bool(forKey: remoteControlEnabledKey)
+        remotePairingCode = UserDefaults.standard.string(forKey: remotePairingCodeKey) ?? ""
+        remoteControlAPI = try? RemoteControlAPI()
         if let data = UserDefaults.standard.data(forKey: workspaceOrganizationKey),
            let saved = try? JSONDecoder().decode(WorkspaceOrganization.self, from: data) {
             workspaceOrganization = saved
@@ -266,6 +287,7 @@ final class AppModel: ObservableObject {
             await loadFolderCatalog()
             await refreshThreads()
             startThreadStatusMonitor()
+            startRemoteControlIfNeeded()
         } catch {
             connectionText = "连接失败"
             errorMessage = error.localizedDescription
@@ -938,6 +960,313 @@ final class AppModel: ObservableObject {
         folderCatalog.sort { $0.latestUpdate > $1.latestUpdate }
     }
 
+    var remotePermissionLabel: String {
+        selectedPermission?.displayName ?? selectedPermissionID ?? "当前权限"
+    }
+
+    func setRemoteControlEnabled(_ enabled: Bool) {
+        remoteControlEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: remoteControlEnabledKey)
+        if enabled {
+            startRemoteControlIfNeeded()
+        } else {
+            remoteControlLoopTask?.cancel()
+            remoteControlLoopTask = nil
+            remoteControlStatus = remoteExecution == nil ? "远程控制已关闭" : "当前远程任务完成后停止"
+            guard let api = remoteControlAPI else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                let body = self.makeRemoteHeartbeat(ready: false)
+                _ = try? await api.heartbeat(body)
+            }
+        }
+    }
+
+    func resetRemotePairingCode() {
+        guard remoteControlEnabled, !remoteControlPaired, let api = remoteControlAPI else { return }
+        remoteControlStatus = "正在生成新配对码…"
+        Task { [weak self] in
+            do {
+                let registration = try await api.register(resetPairing: true)
+                self?.applyRemoteRegistration(registration)
+            } catch {
+                self?.remoteControlStatus = "生成配对码失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func startRemoteControlIfNeeded() {
+        guard remoteControlEnabled, remoteControlLoopTask == nil else { return }
+        guard remoteControlAPI != nil else {
+            remoteControlStatus = "无法读取 Mac 钥匙串，远程控制不可用"
+            return
+        }
+        guard connectionText.hasPrefix("已连接") else {
+            remoteControlStatus = "等待连接本机 Codex…"
+            return
+        }
+        remoteControlStatus = "正在连接远程服务…"
+        remoteControlLoopTask = Task { [weak self] in
+            await self?.runRemoteControlLoop()
+        }
+    }
+
+    private func runRemoteControlLoop() async {
+        guard let api = remoteControlAPI else { return }
+        do {
+            let registration = try await api.register()
+            guard !Task.isCancelled, remoteControlEnabled else { return }
+            applyRemoteRegistration(registration)
+        } catch {
+            if !Task.isCancelled { remoteControlStatus = "远程服务连接失败：\(error.localizedDescription)" }
+        }
+
+        var heartbeatCountdown = 0
+        while !Task.isCancelled, remoteControlEnabled {
+            if heartbeatCountdown <= 0 {
+                do {
+                    let response = try await api.heartbeat(makeRemoteHeartbeat(ready: true))
+                    remoteControlPaired = response.paired
+                    remoteLastSyncAt = Date()
+                    if response.paired {
+                        remotePairingCode = ""
+                        UserDefaults.standard.removeObject(forKey: remotePairingCodeKey)
+                        if remoteExecution == nil { remoteControlStatus = "已配对，正在等待远程任务" }
+                    } else {
+                        remoteControlStatus = remotePairingCode.isEmpty
+                            ? "等待生成配对码…"
+                            : "等待小程序输入配对码"
+                    }
+                } catch {
+                    if !Task.isCancelled { remoteControlStatus = "状态同步失败：\(error.localizedDescription)" }
+                }
+                heartbeatCountdown = 3
+            }
+
+            if remoteControlPaired, remoteExecution == nil {
+                do {
+                    if let task = try await api.nextTask() {
+                        await executeRemoteTask(task)
+                    }
+                } catch {
+                    if !Task.isCancelled { remoteControlStatus = "任务领取失败：\(error.localizedDescription)" }
+                }
+            }
+
+            heartbeatCountdown -= 1
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+        }
+    }
+
+    private func applyRemoteRegistration(_ registration: RemoteRegistration) {
+        remoteControlPaired = registration.paired
+        if !registration.pairingCode.isEmpty {
+            remotePairingCode = registration.pairingCode
+            UserDefaults.standard.set(registration.pairingCode, forKey: remotePairingCodeKey)
+        }
+        if registration.paired {
+            remotePairingCode = ""
+            UserDefaults.standard.removeObject(forKey: remotePairingCodeKey)
+            remoteControlStatus = "已配对，正在等待远程任务"
+        } else {
+            remoteControlStatus = remotePairingCode.isEmpty ? "等待生成配对码…" : "等待小程序输入配对码"
+        }
+    }
+
+    private func makeRemoteHeartbeat(ready: Bool) -> RemoteHeartbeatBody {
+        let allowedPaths = Set(folderCatalog.map(\.path))
+        let workspaces = folderCatalog.prefix(200).map {
+            RemoteWorkspaceSnapshot(path: $0.path, name: $0.name)
+        }
+        let snapshots = threads.prefix(300).compactMap { thread -> RemoteThreadSnapshot? in
+            guard allowedPaths.contains(thread.cwd) else { return nil }
+            return RemoteThreadSnapshot(
+                id: thread.id,
+                title: thread.displayName,
+                workspace: thread.cwd,
+                model: thread.model ?? "",
+                status: thread.status
+            )
+        }
+        return RemoteHeartbeatBody(
+            name: remoteControlAPI?.deviceName ?? "CloudCodex Mac",
+            permissionLabel: remotePermissionLabel,
+            remoteControlReady: ready,
+            workspaces: Array(workspaces),
+            threads: Array(snapshots)
+        )
+    }
+
+    private func executeRemoteTask(_ task: RemoteTask) async {
+        guard let api = remoteControlAPI else { return }
+        guard folderCatalog.contains(where: { $0.path == task.workspace }) else {
+            await failRemoteTask(task, message: "工作区不在 CloudCodex 的授权列表中。")
+            return
+        }
+
+        let requestedModel = task.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelOption: CodexModelOption?
+        if requestedModel.isEmpty {
+            modelOption = selectedModel
+        } else {
+            guard let available = modelOptions.first(where: { $0.id == requestedModel || $0.model == requestedModel }) else {
+                await failRemoteTask(task, message: "这台 Mac 当前不支持模型 \(requestedModel)。")
+                return
+            }
+            modelOption = available
+        }
+
+        let requestedEffort = task.effort.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effort: String?
+        if requestedEffort.isEmpty {
+            effort = selectedEffort
+        } else if let modelOption, modelOption.supportedEfforts.contains(requestedEffort) {
+            effort = requestedEffort
+        } else {
+            await failRemoteTask(task, message: "所选模型不支持推理强度 \(requestedEffort)。")
+            return
+        }
+
+        var threadID = task.threadId.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if threadID.isEmpty {
+                let thread = try await client.createThread(
+                    cwd: task.workspace,
+                    model: modelOption?.model,
+                    permissions: selectedPermissionID
+                )
+                threadID = thread.id
+                if !threads.contains(where: { $0.id == thread.id }) { threads.insert(thread, at: 0) }
+            } else {
+                if locallyRunningThreadIDs.contains(threadID) {
+                    throw RemoteControlError.server("这个会话正在执行其他任务，请稍后重试。")
+                }
+                let state = try await client.readThreadState(threadID)
+                guard state.cwd == task.workspace else {
+                    throw RemoteControlError.server("会话与工作区不匹配。")
+                }
+                guard state.status != "active" else {
+                    throw RemoteControlError.server("这个会话正在 Codex 中运行，请稍后重试。")
+                }
+                try await client.resumeThread(threadID)
+            }
+
+            remoteExecution = RemoteExecution(taskID: task.taskId, threadID: threadID, turnID: nil, responseText: "")
+            remoteControlStatus = "正在执行远程任务"
+            setLocalTurnRunning(threadID)
+            setThreadRunning(threadID, running: true)
+            let turnID = try await client.startTurn(
+                threadID: threadID,
+                text: task.prompt,
+                attachments: [],
+                model: modelOption?.model,
+                effort: effort,
+                permissions: selectedPermissionID,
+                serviceTierForTurn: isFastModeEnabled ? (modelOption?.fastServiceTierID ?? "default") : "default"
+            )
+            remoteExecution?.turnID = turnID
+            do {
+                try await api.updateTask(task.taskId, body: RemoteTaskStatusBody(
+                    status: "running",
+                    threadId: threadID,
+                    turnId: turnID ?? "",
+                    result: "",
+                    error: ""
+                ))
+            } catch {
+                // The server already marked the task running when it was claimed.
+                // Keep tracking the real Codex turn so its completion can retry
+                // the final status instead of abandoning an active task.
+                remoteControlStatus = "任务正在执行，运行状态暂未同步"
+            }
+            await refreshThreads()
+        } catch {
+            clearLocalTurn(threadID)
+            setThreadRunning(threadID, running: false)
+            remoteExecution = nil
+            await failRemoteTask(task, threadID: threadID, message: error.localizedDescription)
+        }
+    }
+
+    private func failRemoteTask(_ task: RemoteTask, threadID: String = "", message: String) async {
+        remoteControlStatus = "远程任务失败：\(message)"
+        await reportRemoteTaskStatus(task.taskId, body: RemoteTaskStatusBody(
+            status: "failed", threadId: threadID, turnId: "", result: "", error: message
+        ))
+    }
+
+    private func reportRemoteTaskStatus(_ taskID: String, body: RemoteTaskStatusBody) async {
+        guard let api = remoteControlAPI else { return }
+        for delay: UInt64 in [0, 2, 5] {
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay * 1_000_000_000) }
+            do {
+                try await api.updateTask(taskID, body: body)
+                return
+            } catch {
+                if Task.isCancelled { return }
+            }
+        }
+    }
+
+    private func handleRemoteEvent(_ method: String, params: [String: Any], threadID: String) {
+        guard var execution = remoteExecution, execution.threadID == threadID else { return }
+        switch method {
+        case "turn/started":
+            let turn = params["turn"] as? [String: Any]
+            execution.turnID = turn?["id"] as? String ?? execution.turnID
+            remoteExecution = execution
+        case "item/agentMessage/delta":
+            if let delta = params["delta"] as? String {
+                execution.responseText = Self.clippedRemoteResult(execution.responseText + delta)
+                remoteExecution = execution
+            }
+        case "item/completed":
+            if let item = params["item"] as? [String: Any],
+               item["type"] as? String == "agentMessage",
+               let text = item["text"] as? String {
+                execution.responseText = Self.clippedRemoteResult(text)
+                remoteExecution = execution
+            }
+        case "turn/completed":
+            let turn = params["turn"] as? [String: Any]
+            let status = turn?["status"] as? String ?? "completed"
+            let errorObject = turn?["error"] as? [String: Any]
+            let errorText = errorObject?["message"] as? String ?? ""
+            remoteExecution = nil
+            remoteControlStatus = status == "completed" ? "远程任务已完成" : "远程任务执行失败"
+            Task { [weak self] in
+                await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
+                        status: status == "completed" ? "completed" : "failed",
+                        threadId: execution.threadID,
+                        turnId: execution.turnID ?? "",
+                        result: execution.responseText,
+                        error: errorText
+                ))
+            }
+        case "error":
+            let errorObject = params["error"] as? [String: Any]
+            let message = errorObject?["message"] as? String ?? "Codex 执行远程任务失败。"
+            remoteExecution = nil
+            clearLocalTurn(execution.threadID)
+            setThreadRunning(execution.threadID, running: false)
+            remoteControlStatus = "远程任务失败：\(message)"
+            Task { [weak self] in
+                await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
+                        status: "failed", threadId: execution.threadID,
+                        turnId: execution.turnID ?? "", result: execution.responseText, error: message
+                ))
+            }
+        default:
+            break
+        }
+    }
+
+    private static func clippedRemoteResult(_ text: String) -> String {
+        let limit = 60_000
+        guard text.count > limit else { return text }
+        return String(text.suffix(limit))
+    }
+
     func handleEvent(_ method: String, _ params: [String: Any]) {
         guard let eventThreadID = params["threadId"] as? String else {
             if method == "error", let error = params["error"] as? [String: Any] {
@@ -963,6 +1292,8 @@ final class AppModel: ObservableObject {
             clearLocalTurn(eventThreadID)
             setThreadRunning(eventThreadID, running: false)
         }
+
+        handleRemoteEvent(method, params: params, threadID: eventThreadID)
 
         guard eventThreadID == selectedThreadID else {
             if method == "turn/completed" { Task { await syncVisibleThreadStatuses() } }

@@ -18,6 +18,7 @@ struct ContentView: View {
         }
         .toolbar { toolbar }
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
+        .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -456,9 +457,154 @@ struct ContentView: View {
             Button(action: model.prepareNewThread) {
                 Label("新建会话", systemImage: "plus")
             }
+
+            Button {
+                model.showingRemoteControl = true
+            } label: {
+                Label("远程控制", systemImage: "antenna.radiowaves.left.and.right")
+            }
+            .help("用 AI 小程序远程发送任务")
         }
     }
 
+}
+
+private struct RemoteControlSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 13) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(.blue.gradient, in: RoundedRectangle(cornerRadius: 11))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("远程控制")
+                        .font(.headline)
+                    Text("通过 AI 小程序向这台 Mac 发送任务")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(20)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("允许远程任务")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("关闭后不再领取新任务；默认保持关闭。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { model.remoteControlEnabled },
+                            set: { model.setRemoteControlEnabled($0) }
+                        ))
+                        .labelsHidden()
+                    }
+                    .padding(16)
+                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 9, height: 9)
+                            .shadow(color: statusColor.opacity(0.65), radius: model.remoteControlEnabled ? 5 : 0)
+                        Text(model.remoteControlStatus)
+                            .font(.subheadline)
+                        Spacer()
+                    }
+
+                    if model.remoteControlEnabled && !model.remoteControlPaired {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("在 AI 小程序中输入配对码")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if model.remotePairingCode.isEmpty {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                HStack {
+                                    Text(model.remotePairingCode)
+                                        .font(.system(size: 34, weight: .bold, design: .monospaced))
+                                        .tracking(5)
+                                        .textSelection(.enabled)
+                                    Spacer()
+                                    Button {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(model.remotePairingCode, forType: .string)
+                                    } label: {
+                                        Label("复制", systemImage: "doc.on.doc")
+                                    }
+                                }
+                            }
+                            HStack {
+                                Text("配对码 10 分钟内有效")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                Spacer()
+                                Button("生成新配对码") { model.resetRemotePairingCode() }
+                                    .buttonStyle(.link)
+                            }
+                        }
+                        .padding(18)
+                        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.blue.opacity(0.22)))
+                    }
+
+                    VStack(alignment: .leading, spacing: 11) {
+                        Label("执行边界", systemImage: "shield.lefthalf.filled")
+                            .font(.system(size: 13, weight: .semibold))
+                        detailRow("工作区", "仅限左侧已经出现的工作区")
+                        detailRow("会话", "仅限 CloudCodex 已同步的最近会话，或新建会话")
+                        detailRow("权限", model.remotePermissionLabel)
+                        Text("远程任务会按当前权限执行。若选择“完全访问”，小程序发来的任务也拥有同样权限。")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(16)
+                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
+
+                    Label("CloudCodex 主动通过 HTTPS 领取任务，不会在 Mac 上开放公网监听端口。设备密钥存放在系统钥匙串，服务端只保存不可逆摘要。", systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(20)
+            }
+        }
+        .frame(width: 520, height: 510)
+    }
+
+    private var statusColor: Color {
+        if !model.remoteControlEnabled { return .secondary }
+        if model.remoteControlPaired { return .green }
+        return .orange
+    }
+
+    private func detailRow(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .foregroundStyle(.secondary)
+                .frame(width: 55, alignment: .leading)
+            Text(value)
+                .textSelection(.enabled)
+            Spacer()
+        }
+        .font(.caption)
+    }
 }
 
 private struct NewThreadWorkspace: View {
