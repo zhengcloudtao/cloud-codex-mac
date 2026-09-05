@@ -2,6 +2,18 @@ import XCTest
 @testable import CloudCodex
 
 final class RemoteControlAPITests: XCTestCase {
+    func testFilePreviewIsReadOnlyAndStaysInsideWorkspace() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("test.txt")
+        try "  source\n".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try RemoteFilePreview.read(workspace: root.path, path: "test.txt"), "  source\n")
+        XCTAssertThrowsError(try RemoteFilePreview.read(workspace: root.path, path: "/etc/passwd"))
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("outside"), withDestinationURL: URL(fileURLWithPath: "/etc/passwd"))
+        XCTAssertThrowsError(try RemoteFilePreview.read(workspace: root.path, path: "outside"))
+        XCTAssertThrowsError(try RemoteFilePreview.read(workspace: root.path, path: "../missing"))
+    }
     @MainActor func testRemoteImagesAndApprovalSettingsReachTurn() throws {
         let data = Data(#"{"status":0,"msg":"ok","data":{"taskId":"t","deviceId":"d","threadId":"","workspace":"/tmp/project","prompt":"看图","model":"","effort":"","status":"queued","speed":"fast","permissionMode":"auto","imageUrls":["https://example.com/image.png"]}}"#.utf8)
         let task = try RemoteControlAPI.decodeEnvelope(RemoteTask.self, data: data)
