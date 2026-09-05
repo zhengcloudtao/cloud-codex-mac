@@ -394,10 +394,13 @@ struct ContentView: View {
                 }
             )) {
                 ForEach(model.visibleThreads) { thread in
-                    ThreadRow(thread: thread)
+                    ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id)
                         .tag(Optional(thread.id))
+                        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+                        .listRowSeparator(.hidden)
                 }
             }
+            .listStyle(.inset)
             .searchable(text: $model.searchText, prompt: "搜索会话")
             .overlay {
                 if model.isLoading && model.selectedThreadID == nil {
@@ -689,27 +692,26 @@ private struct NewThreadWorkspace: View {
     }
 }
 
-private struct ThreadRow: View {
+struct ThreadRow: View {
     let thread: CodexThread
+    var isSelected = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(spacing: 7) {
                 ThreadStatusLight(isRunning: thread.status == "active")
                 Text(thread.displayName)
-                    .font(.body.weight(.medium))
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
-                Spacer()
-                Text(relativeTimeLabel)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if !thread.visiblePreview.isEmpty {
-                Text(thread.visiblePreview.replacingOccurrences(of: "\n", with: " "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
+            .frame(height: 18)
+            Text(thread.visiblePreview.replacingOccurrences(of: "\n", with: " "))
+                .font(.system(size: 12))
+                .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(height: 32, alignment: .top)
             HStack(spacing: 5) {
                 Image(systemName: "folder")
                 Text(thread.folderName)
@@ -717,11 +719,22 @@ private struct ThreadRow: View {
                     Text("·")
                     Text(model)
                 }
+                Spacer(minLength: 8)
+                Text(relativeTimeLabel)
+                    .fixedSize()
             }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+            .font(.system(size: 10))
+            .lineLimit(1)
+            .foregroundStyle(isSelected ? Color.white.opacity(0.72) : Color.secondary)
+            .frame(height: 14)
         }
-        .padding(.vertical, 5)
+        .foregroundStyle(isSelected ? Color.white : Color.primary)
+        // Keep NSTableView's selection geometry stable while previews/status update.
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity)
+        .frame(height: 96)
+        .contentShape(Rectangle())
+        .help(thread.displayName)
     }
 
     /// `Text(date, style: .relative)` installs an independent timeline for
@@ -810,6 +823,12 @@ private struct MessageList: View {
     private let messageBatchSize = 12
 
     var body: some View {
+        let entries = ConversationTimeline.entries(from: messages)
+        let hiddenEntryCount = max(0, entries.count - visibleMessageLimit)
+        let currentProcessID: String? = {
+            guard isThinking, case .process(let group) = entries.last else { return nil }
+            return group.id
+        }()
         ZStack(alignment: .bottomTrailing) {
             ScrollView {
                 VStack(spacing: 18) {
@@ -820,12 +839,12 @@ private struct MessageList: View {
                             .padding(.top, 80)
                     }
 
-                    if hiddenMessageCount > 0 {
+                    if hiddenEntryCount > 0 {
                         Button {
-                            showEarlierMessages()
+                            visibleMessageLimit = min(entries.count, visibleMessageLimit + messageBatchSize)
                         } label: {
                             Label(
-                                "显示更早的 \(min(messageBatchSize, hiddenMessageCount)) 条消息",
+                                "显示更早的 \(min(messageBatchSize, hiddenEntryCount)) 段内容",
                                 systemImage: "clock.arrow.circlepath"
                             )
                             .font(.caption.weight(.medium))
@@ -835,18 +854,23 @@ private struct MessageList: View {
                         .buttonStyle(.plain)
                         .background(.quaternary.opacity(0.65), in: Capsule())
 
-                        Text("为保持流畅，已隐藏更早的 \(hiddenMessageCount) 条消息")
+                        Text("已折叠更早的 \(hiddenEntryCount) 段对话，执行过程可单独展开")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
 
-                    ForEach(renderedMessages) { message in
-                        MessageBubble(message: message)
-                            .equatable()
-                            .id(message.id)
+                    ForEach(entries.suffix(visibleMessageLimit)) { entry in
+                        switch entry {
+                        case .message(let message):
+                            MessageBubble(message: message)
+                                .equatable()
+                        case .process(let group):
+                            ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
+                                .equatable()
+                        }
                     }
 
-                    if isThinking {
+                    if isThinking && currentProcessID == nil {
                         ThinkingIndicator()
                             .id("persistent-thinking-indicator")
                     }
@@ -904,14 +928,6 @@ private struct MessageList: View {
         }
     }
 
-    private var renderedMessages: ArraySlice<ChatMessage> {
-        messages.suffix(visibleMessageLimit)
-    }
-
-    private var hiddenMessageCount: Int {
-        max(0, messages.count - visibleMessageLimit)
-    }
-
     private func handleNewMessage() {
         guard let last = messages.last else { return }
         if last.role == .user {
@@ -928,7 +944,7 @@ private struct MessageList: View {
     }
 
     private func jumpToBottom() {
-        // Recreate the bounded 12-message viewport with a declarative bottom
+        // Recreate the bounded 12-entry viewport with a declarative bottom
         // anchor. This is an instant jump and deliberately avoids ScrollView
         // position bindings / proxy scrolling, both of which can create a
         // persistent SwiftUI focus-layout feedback loop on very long content.
@@ -936,10 +952,6 @@ private struct MessageList: View {
         hasUnseenUpdates = false
         viewportResetID = UUID()
         hasNewContentBelow = false
-    }
-
-    private func showEarlierMessages() {
-        visibleMessageLimit = min(messages.count, visibleMessageLimit + messageBatchSize)
     }
 
     private var streamingScrollToken: String {
@@ -1446,18 +1458,168 @@ private struct ProcessingBubble: View {
     }
 }
 
+/// One compact, bounded log instead of a full-height card for every tool event.
+struct ConversationProcessView: View, Equatable {
+    let group: ConversationProcessGroup
+    let isCurrent: Bool
+    @State private var isExpanded = false
+    @State private var isAtLatest = true
+    @State private var logViewportID = UUID()
+
+    init(group: ConversationProcessGroup, isCurrent: Bool, initiallyExpanded: Bool = false) {
+        self.group = group
+        self.isCurrent = isCurrent
+        _isExpanded = State(initialValue: initiallyExpanded)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.group == rhs.group && lhs.isCurrent == rhs.isCurrent
+    }
+
+    var body: some View {
+        let steps = group.steps
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12)
+                    if isCurrent {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: group.hasFailure ? "exclamationmark.circle" : "list.bullet.rectangle")
+                            .foregroundStyle(group.hasFailure ? Color.orange : .secondary)
+                    }
+                    Text("执行过程")
+                        .font(.callout.weight(.medium))
+                    Text("\(steps.count) 项")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let start = group.progress?.startedAt {
+                        if let end = group.progress?.completedAt {
+                            Text("\(max(0, Int(end.timeIntervalSince(start)))) 秒")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        } else if isCurrent {
+                            Text(start, style: .timer)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Text(group.status(isCurrent: isCurrent))
+                        .font(.caption)
+                        .foregroundStyle(isCurrent ? Color.blue : group.hasFailure ? .orange : .secondary)
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 13)
+                .padding(.vertical, 11)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("执行过程，\(steps.count) 项，\(group.status(isCurrent: isCurrent))，\(isExpanded ? "收起" : "展开")")
+
+            if isCurrent || group.hasFailure {
+                HStack(spacing: 8) {
+                    if group.failureCount > 0 {
+                        Label("\(group.failureCount) 项失败或被拒绝", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    } else if group.hasFailure {
+                        Text("任务未成功，展开查看原因")
+                            .foregroundStyle(.orange)
+                    }
+                    if isCurrent {
+                        Text(group.latestStep?.isStreaming == true
+                             ? "当前：\(group.latestStep?.activityTitle ?? "正在处理")"
+                             : "正在继续思考，等待下一步…")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
+                .lineLimit(1)
+                .padding(.horizontal, 35)
+                .padding(.bottom, 11)
+            }
+
+            if isExpanded {
+                Divider()
+                if steps.isEmpty {
+                    ScrollView {
+                        Text(group.progress?.text ?? "等待可展示的处理记录…")
+                            .font(.caption)
+                            .foregroundStyle(group.hasFailure ? Color.orange : .secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14)
+                    }
+                    .frame(height: 120)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            if let progress = group.progress, progress.isFailedActivity {
+                                Text(progress.text)
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                    .textSelection(.enabled)
+                                    .padding(.bottom, 10)
+                            }
+                            ForEach(steps) { message in
+                                ActivityBubble(message: message, compact: true)
+                                if message.id != steps.last?.id {
+                                    Divider().padding(.leading, 26)
+                                }
+                            }
+                        }
+                        .padding(10)
+                        .background(ScrollLatestObserver(isAtLatest: $isAtLatest))
+                    }
+                    .defaultScrollAnchor(.bottom)
+                    .frame(height: min(320, max(180, CGFloat(steps.count) * 42 + 20)))
+                    .id(logViewportID)
+                    .accessibilityLabel("可滚动的执行过程")
+
+                    HStack {
+                        Text("在此区域内滚动 · 点击步骤查看详情")
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 6)
+                        if !isAtLatest {
+                            Button("最新步骤 ↓") {
+                                isAtLatest = true
+                                logViewportID = UUID()
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.blue)
+                        }
+                    }
+                    .font(.caption2)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+    }
+}
+
 private struct ActivityBubble: View {
     let message: ChatMessage
-    @State private var isExpanded: Bool
+    let compact: Bool
+    @State private var isExpanded = false
+    @State private var visibleDetailLimit = 8_000
 
-    init(message: ChatMessage) {
+    init(message: ChatMessage, compact: Bool = false) {
         self.message = message
-        _isExpanded = State(initialValue: message.isStreaming)
+        self.compact = compact
     }
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
-            if !message.text.isEmpty {
+            // Do not parse or lay out hidden logs, especially while streaming.
+            if isExpanded && !message.text.isEmpty {
                 if message.activityKind == .reasoning || message.activityKind == .plan {
                     Group {
                         if message.isStreaming {
@@ -1476,12 +1638,21 @@ private struct ActivityBubble: View {
                         .padding(.top, 9)
                 } else {
                     ScrollView(.horizontal, showsIndicators: true) {
-                        Text(message.text)
+                        Text(String(message.text.prefix(visibleDetailLimit)))
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, 9)
+                    }
+                    if message.text.count > visibleDetailLimit {
+                        Button("显示更多输出（还剩 \(message.text.count - visibleDetailLimit) 字符）") {
+                            visibleDetailLimit += 8_000
+                        }
+                        .font(.caption)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.blue)
+                        .padding(.top, 6)
                     }
                 }
             }
@@ -1491,7 +1662,7 @@ private struct ActivityBubble: View {
                     .foregroundStyle(iconColor)
                     .frame(width: 20)
                 Text(message.activityTitle ?? "Codex 处理过程")
-                    .font(.callout.weight(.medium))
+                    .font(compact ? .caption.weight(.medium) : .callout.weight(.medium))
                     .lineLimit(1)
                 Spacer()
                 if message.isStreaming {
@@ -1504,13 +1675,10 @@ private struct ActivityBubble: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
-        .onChange(of: message.isStreaming) { _, streaming in
-            isExpanded = streaming
-        }
+        .padding(.horizontal, compact ? 4 : 12)
+        .padding(.vertical, compact ? 7 : 10)
+        .background(Color.secondary.opacity(compact ? 0 : 0.07), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(compact ? Color.clear : Color.secondary.opacity(0.2)))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
