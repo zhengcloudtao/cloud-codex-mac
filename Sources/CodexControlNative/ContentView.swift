@@ -951,7 +951,10 @@ private struct MessageBubble: View, Equatable {
                 }
                 Group {
                     if message.role == .user {
-                        UserMessageContent(message: message)
+                        VStack(alignment: .trailing, spacing: 8) {
+                            UserMessageContent(message: message)
+                            MessageMetadataFooter(message: message)
+                        }
                     } else {
                         VStack(alignment: .leading, spacing: 9) {
                             if message.isStreaming {
@@ -962,15 +965,7 @@ private struct MessageBubble: View, Equatable {
                                 AssistantMessageContent(text: message.text)
                             }
 
-                            if let modelUsageLabel = message.modelUsageLabel {
-                                Label(modelUsageLabel, systemImage: "cpu")
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(.quaternary, in: Capsule())
-                                    .accessibilityLabel("本轮使用模型 \(modelUsageLabel)")
-                            }
+                            MessageMetadataFooter(message: message)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -995,6 +990,50 @@ private struct MessageBubble: View, Equatable {
         let limit = 6_000
         guard message.text.count > limit else { return message.text }
         return "…正在生成，仅显示最新内容…\n" + String(message.text.suffix(limit))
+    }
+}
+
+private struct MessageMetadataFooter: View {
+    let message: ChatMessage
+
+    var body: some View {
+        if message.modelUsageLabel != nil || message.timestamp != nil {
+            HStack(spacing: 9) {
+                if let modelUsageLabel = message.modelUsageLabel {
+                    Label(modelUsageLabel, systemImage: "cpu")
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.quaternary, in: Capsule())
+                        .accessibilityLabel("本轮使用模型 \(modelUsageLabel)")
+                }
+                if let timestamp = message.timestamp {
+                    Label(MessageTimeFormatter.string(from: timestamp), systemImage: "clock")
+                        .accessibilityLabel("消息时间 \(MessageTimeFormatter.accessibilityString(from: timestamp))")
+                }
+            }
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private enum MessageTimeFormatter {
+    static func string(from date: Date, now: Date = Date()) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return date.formatted(.dateTime.hour().minute())
+        }
+        if calendar.isDateInYesterday(date) {
+            return "昨天 " + date.formatted(.dateTime.hour().minute())
+        }
+        if calendar.component(.year, from: date) == calendar.component(.year, from: now) {
+            return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        }
+        return date.formatted(.dateTime.year().month(.abbreviated).day().hour().minute())
+    }
+
+    static func accessibilityString(from date: Date) -> String {
+        date.formatted(.dateTime.year().month().day().hour().minute())
     }
 }
 

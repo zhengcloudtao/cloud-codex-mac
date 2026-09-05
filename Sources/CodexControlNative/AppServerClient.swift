@@ -394,6 +394,8 @@ final class AppServerClient {
         for turn in turns {
             let turnID = turn["id"] as? String
             let turnMetadata = turnID.flatMap { metadataByTurnID[$0] }
+            let turnStartedAt = Self.unixDate(turn["startedAt"])
+            let turnCompletedAt = Self.unixDate(turn["completedAt"])
             guard let items = turn["items"] as? [JSON] else { continue }
             for item in items {
                 guard let type = item["type"] as? String else { continue }
@@ -424,6 +426,7 @@ final class AppServerClient {
                             role: .user,
                             text: text,
                             attachments: attachments,
+                            timestamp: turnStartedAt,
                             turnID: turnID,
                             model: turnMetadata?.model,
                             reasoningEffort: turnMetadata?.reasoningEffort
@@ -435,6 +438,7 @@ final class AppServerClient {
                             id: id,
                             role: .assistant,
                             text: text,
+                            timestamp: turnCompletedAt,
                             turnID: turnID,
                             model: turnMetadata?.model,
                             reasoningEffort: turnMetadata?.reasoningEffort
@@ -552,6 +556,22 @@ final class AppServerClient {
             }
         }
         return messages
+    }
+
+    private static func unixDate(_ value: Any?) -> Date? {
+        let rawValue: Double?
+        if let number = value as? NSNumber {
+            rawValue = number.doubleValue
+        } else if let number = value as? Double {
+            rawValue = number
+        } else if let number = value as? Int {
+            rawValue = Double(number)
+        } else {
+            rawValue = nil
+        }
+        guard let rawValue, rawValue > 0 else { return nil }
+        let seconds = rawValue > 100_000_000_000 ? rawValue / 1_000 : rawValue
+        return Date(timeIntervalSince1970: seconds)
     }
 
     private static func parseTurnRuntime(_ turn: JSON) -> TurnRuntimeState? {

@@ -68,6 +68,8 @@ final class AppServerDecoderTests: XCTestCase {
         let turns: [[String: Any]] = [
             [
                 "id": "turn-old",
+                "startedAt": 1_725_520_400,
+                "completedAt": 1_725_520_460,
                 "items": [
                     ["id": "user-old", "type": "userMessage", "content": [["type": "text", "text": "旧问题"]]],
                     ["id": "answer-old", "type": "agentMessage", "text": "旧回答"]
@@ -75,6 +77,8 @@ final class AppServerDecoderTests: XCTestCase {
             ],
             [
                 "id": "turn-new",
+                "startedAt": 1_725_524_000,
+                "completedAt": 1_725_524_120,
                 "items": [
                     ["id": "user-new", "type": "userMessage", "content": [["type": "text", "text": "新问题"]]],
                     ["id": "answer-new", "type": "agentMessage", "text": "新回答"]
@@ -93,6 +97,14 @@ final class AppServerDecoderTests: XCTestCase {
         XCTAssertEqual(messages.first { $0.id == "answer-new" }?.modelUsageLabel, "gpt-6-astra · 高")
         XCTAssertEqual(messages.first { $0.id == "answer-old" }?.turnID, "turn-old")
         XCTAssertEqual(messages.first { $0.id == "answer-new" }?.turnID, "turn-new")
+        XCTAssertEqual(
+            messages.first { $0.id == "user-old" }?.timestamp,
+            Date(timeIntervalSince1970: 1_725_520_400)
+        )
+        XCTAssertEqual(
+            messages.first { $0.id == "answer-old" }?.timestamp,
+            Date(timeIntervalSince1970: 1_725_520_460)
+        )
     }
 
 }

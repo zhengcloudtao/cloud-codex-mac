@@ -312,6 +312,36 @@ final class StreamingEventTests: XCTestCase {
         withExtendedLifetime(cancellable) {}
     }
 
+    func testCompletedAssistantMessageUsesTurnCompletionTime() {
+        let model = AppModel()
+        model.selectedThreadID = "thread-1"
+        model.handleEvent("turn/started", [
+            "threadId": "thread-1",
+            "turn": ["id": "turn-1"]
+        ])
+        model.handleEvent("item/agentMessage/delta", [
+            "threadId": "thread-1", "turnId": "turn-1",
+            "itemId": "answer-1", "delta": "已经完成"
+        ])
+        model.flushPendingDeltas()
+        XCTAssertNil(model.messages.first { $0.id == "answer-1" }?.timestamp)
+
+        model.handleEvent("item/completed", [
+            "threadId": "thread-1", "turnId": "turn-1",
+            "item": ["type": "agentMessage", "id": "answer-1", "text": "已经完成"]
+        ])
+        XCTAssertNotNil(model.messages.first { $0.id == "answer-1" }?.timestamp)
+
+        model.handleEvent("turn/completed", [
+            "threadId": "thread-1",
+            "turn": ["id": "turn-1", "status": "completed", "completedAt": 1_725_524_120]
+        ])
+        XCTAssertEqual(
+            model.messages.first { $0.id == "answer-1" }?.timestamp,
+            Date(timeIntervalSince1970: 1_725_524_120)
+        )
+    }
+
     func testExternallyStartedTurnShowsAndClearsProcessingState() throws {
         let model = AppModel()
         model.selectedThreadID = "thread-external"

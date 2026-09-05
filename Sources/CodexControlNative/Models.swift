@@ -412,6 +412,7 @@ struct ChatMessage: Identifiable, Hashable {
     var activityStatus: String? = nil
     var startedAt: Date? = nil
     var completedAt: Date? = nil
+    var timestamp: Date? = nil
     var turnID: String? = nil
     var model: String? = nil
     var reasoningEffort: String? = nil

@@ -479,7 +479,8 @@ final class AppModel: ObservableObject {
             id: localMessageID,
             role: .user,
             text: text,
-            attachments: localAttachments
+            attachments: localAttachments,
+            timestamp: Date()
         ))
         beginTurnProgress()
         do {
@@ -1083,6 +1084,7 @@ final class AppModel: ObservableObject {
                 if let index = messages.firstIndex(where: { $0.id == id }) {
                     messages[index].text = text
                     messages[index].isStreaming = false
+                    messages[index].timestamp = Date()
                     applyLiveTurnMetadata(to: &messages[index], threadID: eventThreadID)
                 } else {
                     let metadata = liveTurnMetadataByThread[eventThreadID]
@@ -1090,6 +1092,7 @@ final class AppModel: ObservableObject {
                         id: id,
                         role: .assistant,
                         text: text,
+                        timestamp: Date(),
                         turnID: params["turnId"] as? String,
                         model: metadata?.model,
                         reasoningEffort: metadata?.reasoningEffort
@@ -1104,6 +1107,7 @@ final class AppModel: ObservableObject {
             completeStreamingActivities()
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String ?? "completed"
+            applyCompletedTurnTimestamp(turn)
             finishTurnProgress(status: localizedTurnStatus(status))
             Task {
                 await refreshThreads()
@@ -1356,6 +1360,28 @@ final class AppModel: ObservableObject {
             }
         }
         if didChange { messages = updatedMessages }
+    }
+
+    private func applyCompletedTurnTimestamp(_ turn: [String: Any]?) {
+        guard let turn,
+              let turnID = turn["id"] as? String,
+              let completedAt = dateFromUnixTimestamp(turn["completedAt"]) else { return }
+        var updatedMessages = messages
+        var didChange = false
+        for index in updatedMessages.indices where
+            updatedMessages[index].role == .assistant && updatedMessages[index].turnID == turnID {
+            if updatedMessages[index].timestamp != completedAt {
+                updatedMessages[index].timestamp = completedAt
+                didChange = true
+            }
+        }
+        if didChange { messages = updatedMessages }
+    }
+
+    private func dateFromUnixTimestamp(_ value: Any?) -> Date? {
+        guard let rawValue = (value as? NSNumber)?.doubleValue, rawValue > 0 else { return nil }
+        let seconds = rawValue > 100_000_000_000 ? rawValue / 1_000 : rawValue
+        return Date(timeIntervalSince1970: seconds)
     }
 
     private func scheduleTurnModelMetadataLoad(
