@@ -43,9 +43,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var remotePairingCode = ""
     @Published private(set) var remoteControlPaired = false
     @Published private(set) var remoteLastSyncAt: Date?
+    @Published private(set) var remoteCredentialIssue: String?
+    @Published private(set) var isLoadingRemoteCredential = false
 
     private let client = AppServerClient()
-    private let remoteControlAPI: RemoteControlAPI?
+    private var remoteControlAPI: RemoteControlAPI?
+    private let remoteAPILoader: @Sendable (Bool) async throws -> RemoteControlAPI
+    private let remoteDefaults: UserDefaults
     private let speech = SpeechInputController()
     private var hasStarted = false
     private var threadRequestGeneration = 0
@@ -139,11 +143,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    init() {
+    init(
+        remoteDefaults: UserDefaults = .standard,
+        remoteAPILoader: @escaping @Sendable (Bool) async throws -> RemoteControlAPI = {
+            try await RemoteControlAPI.connect(allowInteraction: $0)
+        }
+    ) {
+        self.remoteDefaults = remoteDefaults
+        self.remoteAPILoader = remoteAPILoader
         isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
-        remoteControlEnabled = UserDefaults.standard.bool(forKey: remoteControlEnabledKey)
-        remotePairingCode = UserDefaults.standard.string(forKey: remotePairingCodeKey) ?? ""
-        remoteControlAPI = try? RemoteControlAPI()
+        remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
+        remotePairingCode = remoteDefaults.string(forKey: remotePairingCodeKey) ?? ""
         if let data = UserDefaults.standard.data(forKey: workspaceOrganizationKey),
            let saved = try? JSONDecoder().decode(WorkspaceOrganization.self, from: data) {
             workspaceOrganization = saved
@@ -282,7 +292,7 @@ final class AppModel: ObservableObject {
     }
 
     var availableEfforts: [String] {
-        selectedModel?.supportedEfforts ?? []
+        selectedModel?.composerEfforts ?? []
     }
 
     var supportsFastMode: Bool {
@@ -933,12 +943,12 @@ final class AppModel: ObservableObject {
     func selectModel(_ id: String, preferredEffort: String? = nil) {
         guard let option = modelOptions.first(where: { $0.id == id }) else { return }
         selectedModelID = id
-        if let preferredEffort, option.supportedEfforts.contains(preferredEffort) {
+        if let preferredEffort, option.composerEfforts.contains(preferredEffort) {
             selectedEffort = preferredEffort
-        } else if let selectedEffort, option.supportedEfforts.contains(selectedEffort) {
+        } else if let selectedEffort, option.composerEfforts.contains(selectedEffort) {
             self.selectedEffort = selectedEffort
         } else {
-            selectedEffort = option.defaultEffort
+            selectedEffort = option.defaultComposerEffort
         }
     }
 
@@ -1068,7 +1078,7 @@ final class AppModel: ObservableObject {
 
     func setRemoteControlEnabled(_ enabled: Bool) {
         remoteControlEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: remoteControlEnabledKey)
+        remoteDefaults.set(enabled, forKey: remoteControlEnabledKey)
         if enabled {
             startRemoteControlIfNeeded()
         } else {
@@ -1100,7 +1110,11 @@ final class AppModel: ObservableObject {
     private func startRemoteControlIfNeeded() {
         guard remoteControlEnabled, remoteControlLoopTask == nil else { return }
         guard remoteControlAPI != nil else {
-            remoteControlStatus = "无法读取 Mac 钥匙串，远程控制不可用"
+            if let remoteCredentialIssue {
+                remoteControlStatus = remoteCredentialIssue
+            } else {
+                loadRemoteCredential(allowInteraction: false)
+            }
             return
         }
         guard connectionText.hasPrefix("已连接") else {
@@ -1110,6 +1124,38 @@ final class AppModel: ObservableObject {
         remoteControlStatus = "正在连接远程服务…"
         remoteControlLoopTask = Task { [weak self] in
             await self?.runRemoteControlLoop()
+        }
+    }
+
+    /// Only this explicit button action may present a macOS permission prompt.
+    /// Starting the app, reconnecting, toggling remote control, and polling never do.
+    func authorizeRemoteControl() {
+        guard remoteControlEnabled, remoteControlAPI == nil else { return }
+        loadRemoteCredential(allowInteraction: true)
+    }
+
+    private func loadRemoteCredential(allowInteraction: Bool) {
+        guard remoteControlEnabled, !isLoadingRemoteCredential else { return }
+        isLoadingRemoteCredential = true
+        remoteCredentialIssue = nil
+        remoteControlStatus = allowInteraction ? "等待钥匙串授权…" : "正在检查远程设备凭据…"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let api = try await self.remoteAPILoader(allowInteraction)
+                self.remoteControlAPI = api
+                self.isLoadingRemoteCredential = false
+                // If the switch was turned off while macOS was authorizing,
+                // cache the result but do not reconnect or claim another task.
+                self.startRemoteControlIfNeeded()
+            } catch {
+                self.isLoadingRemoteCredential = false
+                // Latch all failures. Do not spin or retry on list refreshes.
+                let message = (error as? RemoteCredentialError)?.localizedDescription
+                    ?? "设备凭据暂时不可用；自动连接已暂停。"
+                self.remoteCredentialIssue = message
+                if self.remoteControlEnabled { self.remoteControlStatus = message }
+            }
         }
     }
 
@@ -1132,7 +1178,7 @@ final class AppModel: ObservableObject {
                     remoteLastSyncAt = Date()
                     if response.paired {
                         remotePairingCode = ""
-                        UserDefaults.standard.removeObject(forKey: remotePairingCodeKey)
+                        remoteDefaults.removeObject(forKey: remotePairingCodeKey)
                         if remoteExecution == nil { remoteControlStatus = "已配对，正在等待远程任务" }
                     } else {
                         remoteControlStatus = remotePairingCode.isEmpty
@@ -1164,11 +1210,11 @@ final class AppModel: ObservableObject {
         remoteControlPaired = registration.paired
         if !registration.pairingCode.isEmpty {
             remotePairingCode = registration.pairingCode
-            UserDefaults.standard.set(registration.pairingCode, forKey: remotePairingCodeKey)
+            remoteDefaults.set(registration.pairingCode, forKey: remotePairingCodeKey)
         }
         if registration.paired {
             remotePairingCode = ""
-            UserDefaults.standard.removeObject(forKey: remotePairingCodeKey)
+            remoteDefaults.removeObject(forKey: remotePairingCodeKey)
             remoteControlStatus = "已配对，正在等待远程任务"
         } else {
             remoteControlStatus = remotePairingCode.isEmpty ? "等待生成配对码…" : "等待小程序输入配对码"

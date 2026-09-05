@@ -534,7 +534,25 @@ private struct RemoteControlSheet: View {
                         Spacer()
                     }
 
-                    if model.remoteControlEnabled && !model.remoteControlPaired {
+                    if model.remoteControlEnabled, model.remoteCredentialIssue != nil {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("远程连接已暂停", systemImage: "lock.shield")
+                                .font(.subheadline.weight(.semibold))
+                            Text("启动和刷新不会反复弹出系统授权。需要远程控制时，点击下方按钮授权；取消后将继续保持暂停。本地会话不受影响。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("授权钥匙串并连接") { model.authorizeRemoteControl() }
+                        }
+                        .padding(16)
+                        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                    } else if model.remoteControlEnabled && model.isLoadingRemoteCredential {
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("正在准备安全连接，可继续使用本地会话。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if model.remoteControlEnabled && !model.remoteControlPaired {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("在 AI 小程序中输入配对码")
                                 .font(.caption)

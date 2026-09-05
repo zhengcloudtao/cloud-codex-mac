@@ -1,6 +1,7 @@
 APP_NAME := CloudCodex
 BUNDLE := dist/$(APP_NAME).app
 EXECUTABLE := CloudCodex
+CODESIGN_IDENTITY ?= -
 
 .PHONY: build app run clean
 
@@ -12,7 +13,7 @@ app: build
 	cp .build/release/$(EXECUTABLE) "$(BUNDLE)/Contents/MacOS/$(EXECUTABLE)"
 	cp Info.plist "$(BUNDLE)/Contents/Info.plist"
 	cp Resources/AppIcon.icns "$(BUNDLE)/Contents/Resources/AppIcon.icns"
-	codesign --force --deep --sign - "$(BUNDLE)"
+	codesign --force --deep --sign "$(CODESIGN_IDENTITY)" "$(BUNDLE)"
 
 run: app
 	open "$(BUNDLE)"

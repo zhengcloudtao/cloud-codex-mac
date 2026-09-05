@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 struct RemoteWorkspaceSnapshot: Codable, Equatable {
     let path: String
@@ -96,18 +95,27 @@ final class RemoteControlAPI: @unchecked Sendable {
     static let defaultBaseURL = URL(string: "https://api.cloudslow.com/ai")!
 
     let deviceID: String
-    let deviceSecret: String
+    private let deviceSecret: String
     let deviceName: String
     private let baseURL: URL
     private let session: URLSession
 
+    static func connect(allowInteraction: Bool) async throws -> RemoteControlAPI {
+        let secret = try await RemoteCredentialStore.shared.load(allowInteraction: allowInteraction)
+        try Task.checkCancellation()
+        return RemoteControlAPI(deviceSecret: secret)
+    }
+
+    // Constructing the HTTP client never performs Keychain I/O.
     init(
+        deviceSecret: String,
         baseURL: URL = RemoteControlAPI.defaultBaseURL,
         session: URLSession = .shared,
         defaults: UserDefaults = .standard
-    ) throws {
+    ) {
         self.baseURL = baseURL
         self.session = session
+        self.deviceSecret = deviceSecret
 
         let deviceKey = "CloudCodex.remoteControl.deviceID.v1"
         if let saved = defaults.string(forKey: deviceKey), !saved.isEmpty {
@@ -116,21 +124,6 @@ final class RemoteControlAPI: @unchecked Sendable {
             let generated = UUID().uuidString.lowercased()
             defaults.set(generated, forKey: deviceKey)
             deviceID = generated
-        }
-
-        let keychainAccount = "remote-control-device-secret-v1"
-        if let saved = Self.readKeychain(account: keychainAccount) {
-            deviceSecret = saved
-        } else {
-            var bytes = [UInt8](repeating: 0, count: 32)
-            guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-                throw RemoteControlError.missingCredential
-            }
-            let generated = Data(bytes).base64EncodedString()
-            guard Self.writeKeychain(generated, account: keychainAccount) else {
-                throw RemoteControlError.missingCredential
-            }
-            deviceSecret = generated
         }
 
         deviceName = Host.current().localizedName ?? "CloudCodex Mac"
@@ -232,29 +225,4 @@ final class RemoteControlAPI: @unchecked Sendable {
         return envelope.data
     }
 
-    private static func readKeychain(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.cloudslow.CloudCodex",
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    private static func writeKeychain(_ value: String, account: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.cloudslow.CloudCodex",
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(query as CFDictionary)
-        var item = query
-        item[kSecValueData as String] = Data(value.utf8)
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
-    }
 }

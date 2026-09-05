@@ -276,6 +276,20 @@ struct CodexModelOption: Identifiable, Hashable {
     let defaultServiceTier: String?
     let serviceTiers: [CodexServiceTier]
 
+    /// Codex's default composer visibility is narrower than model/list support.
+    /// Keep supportedEfforts intact for protocol validation and historical turns.
+    var composerEfforts: [String] {
+        let visible: Set<String> = ["low", "medium", "high", "xhigh", "ultra", "persistent"]
+        return supportedEfforts.filter { visible.contains($0) }
+    }
+
+    var defaultComposerEffort: String? {
+        let visible = composerEfforts
+        if visible.contains(defaultEffort) { return defaultEffort }
+        if visible.contains("medium") { return "medium" }
+        return visible.first
+    }
+
     var fastServiceTierID: String? {
         serviceTiers.first {
             $0.id.caseInsensitiveCompare("fast") == .orderedSame

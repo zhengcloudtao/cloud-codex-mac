@@ -126,7 +126,8 @@ final class ConversationContinuityTests: XCTestCase {
                        ["confirmed", "local-two"])
     }
 
-    func testReasoningNamesMatchInstalledCodexComposer() {
+    // Locale labels do not imply a level is enabled in Codex's actual menu.
+    func testReasoningNamesMatchInstalledCodexLocale() {
         XCTAssertEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"].map(ReasoningEffortLabel.name),
                        ["无", "极低", "轻度", "中", "高", "极高", "最高", "Ultra", "持续"])
     }
