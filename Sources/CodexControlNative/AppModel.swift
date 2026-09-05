@@ -49,6 +49,11 @@ final class AppModel: ObservableObject {
     private var pendingActivityDeltas: [String: PendingActivityDelta] = [:]
     private var pendingAssistantDeltas: [String: [String]] = [:]
     private var pendingDeltaOrder: [PendingDeltaTarget] = []
+    /// Local app-server turns must be tracked by thread. A single global
+    /// `isSending` flag leaks into whichever conversation the user selects
+    /// next and makes an idle task look as if it were still thinking.
+    private var locallyRunningThreadIDs: Set<String> = []
+    private var activeTurnIDsByThread: [String: String] = [:]
     private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
     private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
@@ -226,7 +231,10 @@ final class AppModel: ObservableObject {
     /// both live paths, with the thread status covering the short interval
     /// before the external activity snapshot arrives.
     var isSelectedThreadProcessing: Bool {
-        isSending || isExternalThreadProcessing || selectedThread?.status == "active"
+        guard let selectedThreadID else { return false }
+        return locallyRunningThreadIDs.contains(selectedThreadID)
+            || isExternalThreadProcessing
+            || selectedThread?.status == "active"
     }
 
     var canSend: Bool {
@@ -326,7 +334,7 @@ final class AppModel: ObservableObject {
                   status != updatedThreads[index].status else { continue }
             // Keep the optimistic light on while this app is submitting or
             // streaming a turn; app-server's list snapshot can lag briefly.
-            if isSending, threadID == selectedThreadID { continue }
+            if locallyRunningThreadIDs.contains(threadID) { continue }
             updatedThreads[index].status = status
             didChange = true
         }
@@ -340,6 +348,28 @@ final class AppModel: ObservableObject {
         threads[index].status = running ? "active" : "idle"
     }
 
+    private func setLocalTurnRunning(_ threadID: String, turnID: String? = nil) {
+        locallyRunningThreadIDs.insert(threadID)
+        if let turnID { activeTurnIDsByThread[threadID] = turnID }
+        syncSelectedLocalTurnState()
+    }
+
+    private func clearLocalTurn(_ threadID: String) {
+        locallyRunningThreadIDs.remove(threadID)
+        activeTurnIDsByThread.removeValue(forKey: threadID)
+        syncSelectedLocalTurnState()
+    }
+
+    private func syncSelectedLocalTurnState() {
+        guard let selectedThreadID else {
+            isSending = false
+            activeTurnID = nil
+            return
+        }
+        isSending = locallyRunningThreadIDs.contains(selectedThreadID)
+        activeTurnID = activeTurnIDsByThread[selectedThreadID]
+    }
+
     func selectFolder(_ path: String?) {
         if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
@@ -349,6 +379,7 @@ final class AppModel: ObservableObject {
         threadOwnershipNotice = nil
         selectedFolder = path
         selectedThreadID = nil
+        syncSelectedLocalTurnState()
         threads = []
         messages = []
         hasMoreThreads = false
@@ -367,6 +398,7 @@ final class AppModel: ObservableObject {
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
         selectedThreadID = id
+        syncSelectedLocalTurnState()
         guard let id else {
             messages = []
             return
@@ -416,7 +448,7 @@ final class AppModel: ObservableObject {
         speech.stop()
         composerText = ""
         attachments = []
-        isSending = true
+        setLocalTurnRunning(id)
         isExternalThreadProcessing = false
         setThreadRunning(id, running: true)
         threadOwnershipNotice = nil
@@ -437,7 +469,7 @@ final class AppModel: ObservableObject {
         beginTurnProgress()
         do {
             try await client.resumeThread(id)
-            activeTurnID = try await client.startTurn(
+            let turnID = try await client.startTurn(
                 threadID: id,
                 text: text,
                 attachments: outgoingAttachments,
@@ -446,6 +478,7 @@ final class AppModel: ObservableObject {
                 permissions: selectedPermissionID,
                 serviceTierForTurn: serviceTierForTurn
             )
+            setLocalTurnRunning(id, turnID: turnID)
         } catch {
             handleSendFailure(
                 error,
@@ -484,8 +517,7 @@ final class AppModel: ObservableObject {
         text: String,
         outgoingAttachments: [ComposerAttachment]
     ) {
-        isSending = false
-        activeTurnID = nil
+        clearLocalTurn(threadID)
         setThreadRunning(threadID, running: false)
         turnProgressHintTask?.cancel()
         turnProgressHintTask = nil
@@ -514,7 +546,7 @@ final class AppModel: ObservableObject {
             let thread = try await client.readThreadState(threadID)
             guard selectedThreadID == threadID, !isSending else { return }
             let snapshot: ThreadActivitySnapshot
-            if thread.status == "active" || isExternalThreadProcessing {
+            if thread.status == "active" {
                 snapshot = try await client.readLatestThreadActivity(
                     threadID,
                     knownThread: thread
@@ -792,6 +824,7 @@ final class AppModel: ObservableObject {
         discardPendingDeltas()
         isExternalThreadProcessing = false
         selectedThreadID = nil
+        syncSelectedLocalTurnState()
         messages = []
         showingNewThread = true
         Task { await loadPermissionProfiles(cwd: newThreadFolder) }
@@ -892,16 +925,18 @@ final class AppModel: ObservableObject {
         guard let eventThreadID = params["threadId"] as? String else {
             if method == "error", let error = params["error"] as? [String: Any] {
                 flushPendingDeltas()
-                isSending = false
-                activeTurnID = nil
+                if let selectedThreadID { clearLocalTurn(selectedThreadID) }
                 finishTurnProgress(status: "失败")
                 errorMessage = error["message"] as? String ?? "Codex 发生错误"
             }
             return
         }
         if method == "turn/started" {
+            let turn = params["turn"] as? [String: Any]
+            setLocalTurnRunning(eventThreadID, turnID: turn?["id"] as? String)
             setThreadRunning(eventThreadID, running: true)
         } else if method == "turn/completed" {
+            clearLocalTurn(eventThreadID)
             setThreadRunning(eventThreadID, running: false)
         }
 
@@ -912,9 +947,6 @@ final class AppModel: ObservableObject {
 
         switch method {
         case "turn/started":
-            if let turn = params["turn"] as? [String: Any] {
-                activeTurnID = turn["id"] as? String ?? activeTurnID
-            }
             upsertActivity(
                 id: "turn-progress",
                 kind: .status,
@@ -1036,8 +1068,7 @@ final class AppModel: ObservableObject {
             }
         case "turn/completed":
             flushPendingDeltas()
-            isSending = false
-            activeTurnID = nil
+            isExternalThreadProcessing = false
             completeStreamingActivities()
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String ?? "completed"
@@ -1047,8 +1078,8 @@ final class AppModel: ObservableObject {
             }
         case "error":
             flushPendingDeltas()
-            isSending = false
-            activeTurnID = nil
+            clearLocalTurn(eventThreadID)
+            isExternalThreadProcessing = false
             setThreadRunning(eventThreadID, running: false)
             finishTurnProgress(status: "失败")
             if let error = params["error"] as? [String: Any] {

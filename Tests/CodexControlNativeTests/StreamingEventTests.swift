@@ -390,6 +390,75 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertFalse(model.canSend)
     }
 
+    func testSwitchingAwayFromRunningThreadDoesNotShowThinkingOnIdleThread() throws {
+        let model = AppModel()
+        let runningThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-running",
+            "cwd": "/tmp/project",
+            "preview": "正在执行",
+            "status": ["type": "idle"]
+        ]))
+        let idleThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-idle",
+            "cwd": "/tmp/project",
+            "preview": "已经完成",
+            "status": ["type": "idle"]
+        ]))
+        model.threads = [runningThread, idleThread]
+        model.selectedThreadID = runningThread.id
+
+        model.handleEvent("turn/started", [
+            "threadId": runningThread.id,
+            "turn": ["id": "turn-running"]
+        ])
+        XCTAssertTrue(model.isSelectedThreadProcessing)
+
+        model.selectThread(idleThread.id)
+
+        XCTAssertFalse(model.isSending)
+        XCTAssertFalse(model.isSelectedThreadProcessing)
+        model.applyVisibleThreadStatuses([
+            runningThread.id: "idle",
+            idleThread.id: "idle"
+        ])
+        XCTAssertEqual(model.threads.first?.status, "active")
+        model.composerText = "这是另一个任务"
+        XCTAssertTrue(model.canSend)
+    }
+
+    func testBackgroundTurnCompletionClearsThreadScopedSendingState() throws {
+        let model = AppModel()
+        let runningThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-running",
+            "cwd": "/tmp/project",
+            "preview": "正在执行",
+            "status": ["type": "idle"]
+        ]))
+        let idleThread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-idle",
+            "cwd": "/tmp/project",
+            "preview": "另一个任务",
+            "status": ["type": "idle"]
+        ]))
+        model.threads = [runningThread, idleThread]
+        model.selectedThreadID = runningThread.id
+        model.handleEvent("turn/started", [
+            "threadId": runningThread.id,
+            "turn": ["id": "turn-running"]
+        ])
+        model.selectThread(idleThread.id)
+
+        model.handleEvent("turn/completed", [
+            "threadId": runningThread.id,
+            "turn": ["id": "turn-running", "status": "completed"]
+        ])
+        model.selectThread(runningThread.id)
+
+        XCTAssertFalse(model.isSending)
+        XCTAssertFalse(model.isSelectedThreadProcessing)
+        XCTAssertEqual(model.threads.first?.status, "idle")
+    }
+
     func testActiveWriterFailureRollsBackOptimisticMessagesAndPreservesDraft() {
         let model = AppModel()
         model.selectedThreadID = "thread-external"
