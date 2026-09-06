@@ -62,6 +62,7 @@ struct RemoteTaskStatusBody: Codable, Equatable {
     let result: String
     let error: String
     var fileDiff: String? = nil
+    var progress: RemoteTaskProgress? = nil
 }
 
 private struct RemoteEnvelope<Value: Decodable>: Decodable {

@@ -121,7 +121,10 @@ final class AppModel: ObservableObject {
         let threadID: String
         var turnID: String?
         var responseText: String
+        var responseItemID: String? = nil
         var fileDiff: String = ""
+        var progress = RemoteTaskProgress()
+        var uploadedRevision: Int64 = -1
     }
 
     private struct PendingActivityDelta {
@@ -1209,6 +1212,19 @@ final class AppModel: ObservableObject {
                 }
             }
 
+            if let execution = remoteExecution, execution.progress.revision != execution.uploadedRevision {
+                do {
+                    try await api.updateTask(execution.taskID, body: RemoteTaskStatusBody(
+                        status: "running", threadId: execution.threadID, turnId: execution.turnID ?? "",
+                        result: execution.responseText, error: "", progress: execution.progress
+                    ))
+                    if remoteExecution?.taskID == execution.taskID {
+                        remoteExecution?.uploadedRevision = execution.progress.revision
+                    }
+                } catch {
+                    if !Task.isCancelled { remoteControlStatus = "执行过程同步失败，将自动重试" }
+                }
+            }
             heartbeatCountdown -= 1
             try? await Task.sleep(nanoseconds: 3_000_000_000)
         }
@@ -1424,6 +1440,10 @@ final class AppModel: ObservableObject {
 
     private func handleRemoteEvent(_ method: String, params: [String: Any], threadID: String) {
         guard var execution = remoteExecution, execution.threadID == threadID else { return }
+        let eventTurnID = params["turnId"] as? String ?? (params["turn"] as? [String: Any])?["id"] as? String
+        if let expected = execution.turnID, let eventTurnID, expected != eventTurnID { return }
+        execution.progress.consume(method, params)
+        remoteExecution = execution
         switch method {
         case "turn/diff/updated":
             if let turnID = params["turnId"] as? String, let expected = execution.turnID, turnID != expected { return }
@@ -1437,6 +1457,10 @@ final class AppModel: ObservableObject {
             remoteExecution = execution
         case "item/agentMessage/delta":
             if let delta = params["delta"] as? String {
+                if let id = params["itemId"] as? String, id != execution.responseItemID {
+                    execution.responseItemID = id
+                    execution.responseText = ""
+                }
                 execution.responseText = Self.clippedRemoteResult(execution.responseText + delta)
                 remoteExecution = execution
             }
@@ -1444,6 +1468,7 @@ final class AppModel: ObservableObject {
             if let item = params["item"] as? [String: Any],
                item["type"] as? String == "agentMessage",
                let text = item["text"] as? String {
+                execution.responseItemID = item["id"] as? String
                 execution.responseText = Self.clippedRemoteResult(text)
                 remoteExecution = execution
             }
@@ -1461,7 +1486,7 @@ final class AppModel: ObservableObject {
                         turnId: execution.turnID ?? "",
                         result: execution.responseText,
                         error: errorText,
-                        fileDiff: execution.fileDiff
+                        fileDiff: execution.fileDiff, progress: execution.progress
                 ))
             }
         case "error":
@@ -1475,7 +1500,7 @@ final class AppModel: ObservableObject {
                 await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
                         status: "failed", threadId: execution.threadID,
                         turnId: execution.turnID ?? "", result: execution.responseText, error: message,
-                        fileDiff: execution.fileDiff
+                        fileDiff: execution.fileDiff, progress: execution.progress
                 ))
             }
         default:
