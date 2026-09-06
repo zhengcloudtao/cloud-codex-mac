@@ -106,6 +106,9 @@ final class AppModel: ObservableObject {
     private var activeTurnIDsByThread: [String: String] = [:]
     private var liveTurnMetadataByThread: [String: TurnModelMetadata] = [:]
     private var remoteControlLoopTask: Task<Void, Never>?
+    private var remoteUsageTask: Task<Void, Never>?
+    private var remoteUsageSnapshot: RemoteUsageSnapshot?
+    private var remoteUsageLastAttempt: Date?
     private var remoteExecution: RemoteExecution?
     private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
@@ -1084,6 +1087,10 @@ final class AppModel: ObservableObject {
         } else {
             remoteControlLoopTask?.cancel()
             remoteControlLoopTask = nil
+            remoteUsageTask?.cancel()
+            remoteUsageTask = nil
+            remoteUsageSnapshot = nil
+            remoteUsageLastAttempt = nil
             remoteControlStatus = remoteExecution == nil ? "远程控制已关闭" : "当前远程任务完成后停止"
             guard let api = remoteControlAPI else { return }
             Task { [weak self] in
@@ -1171,6 +1178,7 @@ final class AppModel: ObservableObject {
 
         var heartbeatCountdown = 0
         while !Task.isCancelled, remoteControlEnabled {
+            refreshRemoteUsageIfNeeded()
             if heartbeatCountdown <= 0 {
                 do {
                     let response = try await api.heartbeat(makeRemoteHeartbeat(ready: true))
@@ -1221,6 +1229,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func refreshRemoteUsageIfNeeded() {
+        guard remoteControlPaired, remoteUsageTask == nil,
+              remoteUsageLastAttempt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true else { return }
+        remoteUsageLastAttempt = Date()
+        // Independent request: slow quota reads must not block device heartbeats
+        // or the remote task queue. No reset/consume operation is exposed.
+        remoteUsageTask = Task { [weak self] in
+            guard let self else { return }
+            let snapshot = (try? await self.client.readRemoteUsage()) ?? .unavailable()
+            guard !Task.isCancelled, self.remoteControlEnabled else { return }
+            self.remoteUsageSnapshot = snapshot
+            self.remoteUsageTask = nil
+        }
+    }
+
     private func makeRemoteHeartbeat(ready: Bool) -> RemoteHeartbeatBody {
         let allowedPaths = Set(folderCatalog.map(\.path))
         let workspaces = folderCatalog.prefix(200).map {
@@ -1241,7 +1264,8 @@ final class AppModel: ObservableObject {
             permissionLabel: remotePermissionLabel,
             remoteControlReady: ready,
             workspaces: Array(workspaces),
-            threads: Array(snapshots)
+            threads: Array(snapshots),
+            usage: remoteControlPaired ? remoteUsageSnapshot : nil
         )
     }
 

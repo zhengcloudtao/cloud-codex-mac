@@ -93,6 +93,10 @@ final class AppServerClient {
         connected = true
     }
 
+    func readRemoteUsage() async throws -> RemoteUsageSnapshot {
+        RemoteUsageSnapshot.parse(try await request("account/rateLimits/read", params: [:]))
+    }
+
     func listThreads(limit: Int = 60, cwd: String? = nil) async throws -> ThreadPage {
         var params: JSON = [
             "limit": limit,

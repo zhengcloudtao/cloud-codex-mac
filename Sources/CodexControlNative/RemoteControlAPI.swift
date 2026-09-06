@@ -19,6 +19,7 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     let remoteControlReady: Bool
     let workspaces: [RemoteWorkspaceSnapshot]
     let threads: [RemoteThreadSnapshot]
+    var usage: RemoteUsageSnapshot? = nil
 }
 
 struct RemoteTask: Codable, Equatable {
