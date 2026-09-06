@@ -179,6 +179,48 @@ final class AppServerClient {
         return (thread, messages)
     }
 
+    func readRemoteHistory(_ read: RemoteHistoryRead) async throws -> RemoteHistoryPage {
+        let state = try await readThreadState(read.threadId)
+        guard state.cwd == read.workspace else { throw RemoteControlError.server("会话工作区不匹配") }
+        var params: JSON = ["threadId": read.threadId, "limit": 1, "itemsView": "full", "sortDirection": "desc"]
+        if !read.cursor.isEmpty { params["cursor"] = read.cursor }
+        let response = try await request("thread/turns/list", params: params)
+        let ids = Set((response["data"] as? [JSON] ?? []).compactMap { $0["id"] as? String })
+        let metadata = await readTurnModelMetadata(for: state, turnIDs: ids)
+        return Self.remoteHistoryPage(response, metadata: metadata)
+    }
+
+    nonisolated static func remoteHistoryPage(_ response: JSON, metadata: [String: TurnModelMetadata] = [:]) -> RemoteHistoryPage {
+        let turns = (response["data"] as? [JSON] ?? []).reversed().map { original -> JSON in
+            var turn = original
+            turn["items"] = (original["items"] as? [JSON] ?? []).compactMap { originalItem -> JSON? in
+                var item = originalItem
+                let type = item["type"] as? String ?? ""
+                guard ["userMessage", "agentMessage", "reasoning", "plan", "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch", "imageView"].contains(type) else { return nil }
+                item.removeValue(forKey: "arguments")
+                if type == "userMessage" {
+                    item["content"] = (item["content"] as? [JSON] ?? []).map { part -> JSON in
+                        if ["image", "localImage"].contains(part["type"] as? String ?? "") {
+                            return ["type": "text", "text": "［图片附件，请在 Mac 查看原图］"]
+                        }
+                        return part
+                    }
+                }
+                return item
+            }
+            return turn
+        }
+        let messages = Self.parseMessages(from: turns, metadataByTurnID: metadata).map { message in
+            RemoteHistoryMessage(id: "\(message.turnID ?? ""):\(message.id)",
+                role: message.role == .user ? "user" : (message.role == .assistant ? "assistant" : "activity"),
+                text: message.text, title: message.activityTitle ?? "",
+                timestamp: message.timestamp?.timeIntervalSince1970,
+                model: message.model ?? "", effort: message.reasoningEffort ?? "",
+                attachments: message.attachments.map { $0.name })
+        }
+        return RemoteHistoryPage(messages: messages, nextCursor: response["nextCursor"] as? String)
+    }
+
     func readThreadState(_ id: String) async throws -> CodexThread {
         let result = try await request(
             "thread/read",

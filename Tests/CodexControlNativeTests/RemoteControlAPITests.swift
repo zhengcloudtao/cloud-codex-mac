@@ -7,16 +7,18 @@ final class RemoteControlAPITests: XCTestCase {
         let task = try RemoteControlAPI.decodeEnvelope(RemoteTask.self, data: data)
         XCTAssertEqual(task.speed, "fast")
         XCTAssertEqual(task.permissionMode, "auto")
-        let image = try XCTUnwrap(task.imageUrls?.first)
+        XCTAssertEqual(task.imageUrls?.first, "https://example.com/image.png")
+        let png = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="))
+        let attachment = try RemoteImageLoader.inlineAttachment(png)
         let params = AppServerClient.turnStartParameters(
             threadID: "thread", text: task.prompt,
-            attachments: [ComposerAttachment(url: try XCTUnwrap(URL(string: image)))],
+            attachments: [attachment],
             model: nil, effort: nil, permissions: ":workspace",
             serviceTierForTurn: "priority", approvalPolicy: "on-request", approvalsReviewer: "auto_review"
         )
         let input = try XCTUnwrap(params["input"] as? [[String: Any]])
         XCTAssertEqual(input[1]["type"] as? String, "image")
-        XCTAssertEqual(input[1]["url"] as? String, image)
+        XCTAssertTrue((input[1]["url"] as? String ?? "").hasPrefix("data:image/png;base64,"))
         XCTAssertNil(input[1]["path"])
         XCTAssertEqual(params["serviceTierForTurn"] as? String, "priority")
         XCTAssertEqual(params["approvalPolicy"] as? String, "on-request")

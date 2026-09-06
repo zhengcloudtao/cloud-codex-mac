@@ -106,6 +106,7 @@ final class AppModel: ObservableObject {
     private var activeTurnIDsByThread: [String: String] = [:]
     private var liveTurnMetadataByThread: [String: TurnModelMetadata] = [:]
     private var remoteControlLoopTask: Task<Void, Never>?
+    private var remoteHistoryTask: Task<Void, Never>?
     private var remoteUsageTask: Task<Void, Never>?
     private var remoteUsageSnapshot: RemoteUsageSnapshot?
     private var remoteUsageLastAttempt: Date?
@@ -1202,6 +1203,32 @@ final class AppModel: ObservableObject {
                 heartbeatCountdown = 3
             }
 
+            if remoteControlPaired, remoteHistoryTask == nil {
+                remoteHistoryTask = Task { [weak self] in
+                guard let self else { return }
+                defer { self.remoteHistoryTask = nil }
+                // This is a read-only relay, never a turn/start or thread/resume task.
+                do {
+                    if let read = try await api.nextHistory() {
+                        var response: RemoteHistoryResponse
+                        do {
+                            guard self.remoteControlEnabled, self.makeRemoteHeartbeat(ready: true).workspaces.contains(where: { $0.path == read.workspace }) else {
+                                throw RemoteControlError.server("工作区不在远程授权范围内")
+                            }
+                            let page = try await self.client.readRemoteHistory(read)
+                            guard try JSONEncoder().encode(page).count <= 8 * 1024 * 1024 else {
+                                throw RemoteControlError.server("此轮会话过大，请在 Mac 查看完整内容")
+                            }
+                            response = RemoteHistoryResponse(page: page, error: "")
+                        } catch {
+                            response = RemoteHistoryResponse(page: nil, error: "读取会话失败，请确认工作区授权及 Codex 版本；过大的会话请在 Mac 查看。")
+                        }
+                        guard self.remoteControlEnabled, !Task.isCancelled else { return }
+                        try await api.finishHistory(read.id, body: response)
+                    }
+                } catch { /* Old relay versions do not support history; do not disrupt execution. */ }
+                }
+            }
             if remoteControlPaired, remoteExecution == nil {
                 do {
                     if let task = try await api.nextTask() {
@@ -1348,15 +1375,8 @@ final class AppModel: ObservableObject {
                 tier = fast
             default: throw RemoteControlError.server("不支持的远程速度选项。")
             }
-            guard (task.imageUrls ?? []).count <= 4 else {
-                throw RemoteControlError.server("远程任务最多支持 4 张图片。")
-            }
-            let attachments = try (task.imageUrls ?? []).map { value -> ComposerAttachment in
-                guard let url = URL(string: value), url.scheme == "https", url.host != nil else {
-                    throw RemoteControlError.server("图片地址无效，请重新上传。")
-                }
-                return ComposerAttachment(url: url)
-            }
+            if !(task.imageUrls ?? []).isEmpty { remoteControlStatus = "正在下载并准备任务图片…" }
+            let attachments = try await RemoteImageLoader.attachments(task.imageUrls ?? [])
             if threadID.isEmpty {
                 let thread = try await client.createThread(
                     cwd: task.workspace,
