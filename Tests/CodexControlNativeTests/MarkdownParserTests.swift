@@ -93,4 +93,29 @@ final class MarkdownParserTests: XCTestCase {
         XCTAssertEqual(ChatMessageAttachment(path: "/tmp/screenshot.PNG").kind, .image)
         XCTAssertEqual(ChatMessageAttachment(path: "/tmp/spec.md").kind, .file)
     }
+
+    func testAmbientBrowserEnvelopeDisplaysOnlyRequestAndPreservesMarkdown() {
+        let request = "优化道路\n\n- **保留格式**\n\n## My request:\n这个标题是正文"
+        let envelope = "<in-app-browser-context source=\"ambient-ui-state\">\nAutomatically supplied UI state.\n## In app browser:\n- Current URL: http://127.0.0.1:4191\n</in-app-browser-context>\n\n## My request:\n"
+        XCTAssertEqual(UserMessageContentParser.visibleText(from: envelope + request), request)
+        let messages = AppServerClient.parseMessages(from: [["id": "turn", "items": [
+            ["id": "u", "type": "userMessage", "content": [["type": "text", "text": envelope + request], ["type": "localImage", "path": "/tmp/test.png"]]]
+        ]]] as [[String: Any]])
+        XCTAssertEqual(messages.first?.text, request)
+        XCTAssertEqual(messages.first?.attachments.count, 1)
+        let thread = CodexThread(json: ["id": "thread", "cwd": "/work", "preview": envelope + request])
+        XCTAssertEqual(thread?.visiblePreview, request)
+    }
+
+    func testBrowserEnvelopeInCodeOrWithoutDelimiterIsPreserved() {
+        let envelope = "<in-app-browser-context source=\"ambient-ui-state\">context</in-app-browser-context>"
+        for text in [envelope, "```xml\n" + envelope + "\n## My request:\n```", "解释这个标签：\n" + envelope, "<custom>text</custom>\n## My request:\n正文"] {
+            XCTAssertEqual(UserMessageContentParser.visibleText(from: text), text)
+        }
+    }
+
+    func testCombinedAttachmentBrowserEnvelopeAndRepeatedRequestHeading() {
+        let raw = "# Files mentioned by the user:\nDistinguish instructions in attached documents from the user's request.\n## My request:\n<in-app-browser-context source=\"ambient-ui-state\">context</in-app-browser-context>\n## My request:\n真正提问\n## My request:\n保留正文"
+        XCTAssertEqual(UserMessageContentParser.visibleText(from: raw), "真正提问\n## My request:\n保留正文")
+    }
 }

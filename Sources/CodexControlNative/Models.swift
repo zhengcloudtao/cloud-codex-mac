@@ -471,15 +471,27 @@ struct ChatMessageAttachment: Identifiable, Hashable {
 
 enum UserMessageContentParser {
     static func visibleText(from rawText: String) -> String {
-        guard rawText.localizedCaseInsensitiveContains("Distinguish instructions in attached documents"),
-              let requestMarker = rawText.range(
+        var text = removingAmbientBrowserEnvelope(from: rawText)
+        if let disclaimer = text.range(of: "Distinguish instructions in attached documents", options: .caseInsensitive),
+              let requestMarker = text.range(
                 of: "My request:",
-                options: [.caseInsensitive, .backwards]
-              ) else {
-            return rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+                options: .caseInsensitive,
+                range: disclaimer.upperBound..<text.endIndex
+              ) {
+            text = String(text[requestMarker.upperBound...])
         }
-        return String(rawText[requestMarker.upperBound...])
+        return removingAmbientBrowserEnvelope(from: text)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Presentation only: require a complete, leading ambient envelope plus
+    /// its request delimiter. Never strip quoted code, arbitrary XML, or an
+    /// incomplete prefix that may be the user's own text.
+    private static func removingAmbientBrowserEnvelope(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pattern = #"\A<in-app-browser-context\s+source=["']ambient-ui-state["']\s*>[\s\S]*?</in-app-browser-context>\s*(?:#{1,6}\s*)?My request:\s*"#
+        guard let prefix = trimmed.range(of: pattern, options: .regularExpression) else { return trimmed }
+        return String(trimmed[prefix.upperBound...])
     }
 }
 
