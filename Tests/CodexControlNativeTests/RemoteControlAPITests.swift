@@ -49,4 +49,11 @@ final class RemoteControlAPITests: XCTestCase {
         XCTAssertNil(value.permissionMode)
         XCTAssertNil(value.imageUrls)
     }
+
+    @MainActor func testActiveWriterAndRunningConversationAreDeferred() {
+        XCTAssertTrue(AppModel.shouldDeferRemoteTask(RemoteControlError.server("thread abc already has an active writer")))
+        XCTAssertTrue(AppModel.shouldDeferRemoteTask(RemoteControlError.server("这个会话正在 Codex 中运行，请稍后重试。")))
+        XCTAssertTrue(AppModel.shouldDeferRemoteTask(RemoteControlError.server("这个会话正在执行其他任务，请稍后重试。")))
+        XCTAssertFalse(AppModel.shouldDeferRemoteTask(RemoteControlError.server("会话与工作区不匹配。")))
+    }
 }

@@ -1438,8 +1438,26 @@ final class AppModel: ObservableObject {
             clearLocalTurn(threadID)
             setThreadRunning(threadID, running: false)
             remoteExecutions.removeValue(forKey: threadID)
+            if Self.shouldDeferRemoteTask(error) {
+                await deferRemoteTask(task, threadID: threadID)
+                return
+            }
             await failRemoteTask(task, threadID: threadID, message: error.localizedDescription)
         }
+    }
+
+    static func shouldDeferRemoteTask(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("active writer")
+            || message.contains("这个会话正在 codex 中运行")
+            || message.contains("这个会话正在执行其他任务")
+    }
+
+    private func deferRemoteTask(_ task: RemoteTask, threadID: String) async {
+        remoteControlStatus = "同一会话正在执行，远程任务将继续等待"
+        await reportRemoteTaskStatus(task.taskId, body: RemoteTaskStatusBody(
+            status: "queued", threadId: threadID, turnId: "", result: "", error: ""
+        ))
     }
 
     private func failRemoteTask(_ task: RemoteTask, threadID: String = "", message: String) async {

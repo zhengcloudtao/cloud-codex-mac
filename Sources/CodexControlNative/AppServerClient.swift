@@ -163,6 +163,10 @@ final class AppServerClient {
               let thread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
+        // thread/read loads the persistent thread into this app-server process.
+        // Remember that ownership so a later send does not issue a redundant
+        // thread/resume and collide with this process's own active writer.
+        loadedThreadIDs.insert(thread.id)
         let turnsResult = try await request(
             "thread/turns/list",
             params: [
@@ -230,6 +234,7 @@ final class AppServerClient {
               let thread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
+        loadedThreadIDs.insert(thread.id)
         return thread
     }
 
