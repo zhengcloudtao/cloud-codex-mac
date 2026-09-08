@@ -579,7 +579,7 @@ private struct RemoteControlSheet: View {
                                 }
                             }
                             HStack {
-                                Text("配对码 10 分钟内有效")
+								Text("配对码仅 20 秒内有效")
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                                 Spacer()
