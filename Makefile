@@ -9,6 +9,10 @@ build:
 	swift build -c release
 
 app: build
+	# Keep one stable, user-facing app bundle. Older local builds used a
+	# version suffix (for example CloudCodex-48.app), which creates duplicate
+	# Dock entries and must not be carried forward.
+	find dist -maxdepth 1 -type d -name 'CloudCodex-*.app' -exec rm -rf {} +
 	mkdir -p "$(BUNDLE)/Contents/MacOS" "$(BUNDLE)/Contents/Resources"
 	cp .build/release/$(EXECUTABLE) "$(BUNDLE)/Contents/MacOS/$(EXECUTABLE)"
 	cp Info.plist "$(BUNDLE)/Contents/Info.plist"
