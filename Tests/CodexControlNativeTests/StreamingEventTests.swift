@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class StreamingEventTests: XCTestCase {
+    func testUnsupportedOptionalActivityEventDoesNotShowErrorDialog() {
+        let model = AppModel()
+
+        model.handleEvent("error", [
+            "error": ["message": "thread/items/list is not supported yet"]
+        ])
+
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testOtherGlobalErrorStillShowsErrorDialog() {
+        let model = AppModel()
+
+        model.handleEvent("error", [
+            "error": ["message": "连接已断开"]
+        ])
+
+        XCTAssertEqual(model.errorMessage, "连接已断开")
+    }
+
     func testModelParsesAdvertisedFastServiceTier() throws {
         let option = try XCTUnwrap(CodexModelOption(json: [
             "id": "gpt-test",

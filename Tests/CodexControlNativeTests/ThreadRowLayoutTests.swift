@@ -31,10 +31,9 @@ final class ThreadRowLayoutTests: XCTestCase {
                     thread("3", preview: "检查报名流程和页面信息展示，保留现有功能。")]
         let preview = VStack(alignment: .leading, spacing: 0) {
             Text("school").font(.headline).padding(12)
-            List(selection: Binding<String?>.constant("1")) {
+            List {
                 ForEach(rows) { row in
                     ThreadRow(thread: row, isSelected: row.id == "1")
-                        .tag(Optional(row.id))
                         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                         .listRowSeparator(.hidden)
                 }

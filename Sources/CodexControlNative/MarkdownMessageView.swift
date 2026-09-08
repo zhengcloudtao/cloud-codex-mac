@@ -4,13 +4,19 @@ import SwiftUI
 
 struct MarkdownMessageView: View, Equatable {
     let markdown: String
+    let expandsHorizontally: Bool
+
+    init(markdown: String, expandsHorizontally: Bool = true) {
+        self.markdown = markdown
+        self.expandsHorizontally = expandsHorizontally
+    }
 
     private var blocks: [MarkdownBlock] {
         MarkdownBlockParser.parse(markdown)
     }
 
     var body: some View {
-        MarkdownBlocksView(blocks: blocks)
+        MarkdownBlocksView(blocks: blocks, expandsHorizontally: expandsHorizontally)
     }
 }
 
@@ -27,7 +33,7 @@ struct StreamingMarkdownContent: View {
                 Text("正在生成，仅预览最新内容；完整内容在完成后可查看")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            MarkdownBlocksView(blocks: blocks).equatable()
+            MarkdownBlocksView(blocks: blocks, expandsHorizontally: true).equatable()
         }
         .task(id: text) {
             let input = text
@@ -64,15 +70,22 @@ enum StreamingMarkdownWindow {
 
 private struct MarkdownBlocksView: View, Equatable {
     let blocks: [MarkdownBlock]
+    let expandsHorizontally: Bool
 
+    @ViewBuilder
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let content = VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .textSelection(.enabled)
+
+        if expandsHorizontally {
+            content.frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            content.fixedSize(horizontal: true, vertical: false)
+        }
     }
 
     @ViewBuilder

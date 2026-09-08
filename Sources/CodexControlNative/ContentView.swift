@@ -4,6 +4,8 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var threadListScrollID: String?
+    @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
     private let categoryDragPrefix = "cloudcodex-category://"
 
     var body: some View {
@@ -16,7 +18,12 @@ struct ContentView: View {
         } detail: {
             conversation
         }
+        // A selected conversation can contain a wide code block or attachment.
+        // Keep all three columns balanced instead of letting that detail content
+        // compress the workspace/sidebar columns during selection.
+        .navigationSplitViewStyle(.balanced)
         .toolbar { toolbar }
+        .sheet(isPresented: $model.showingAppearanceSettings) { appearanceSettingsSheet }
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
         .alert("操作未完成", isPresented: Binding(
@@ -26,6 +33,46 @@ struct ContentView: View {
             Button("好") { model.errorMessage = nil }
         } message: {
             Text(model.errorMessage ?? "未知错误")
+        }
+        .onAppear(perform: applyAppearancePreference)
+        .onChange(of: appearancePreference) { _, _ in
+            applyAppearancePreference()
+        }
+        // CloudCodex is intentionally a three-column workspace. macOS can
+        // opportunistically collapse the workspace column while the detail
+        // view is replaced for a newly selected conversation; restore the
+        // complete workspace immediately instead of leaving a narrow strip.
+        .onChange(of: model.selectedThreadID) { _, _ in
+            restoreThreeColumnLayout()
+        }
+        .onChange(of: columnVisibility) { _, _ in
+            restoreThreeColumnLayout()
+        }
+    }
+
+    private func restoreThreeColumnLayout() {
+        guard columnVisibility != .all else { return }
+        DispatchQueue.main.async {
+            columnVisibility = .all
+        }
+    }
+
+    private func applyAppearancePreference() {
+        switch appearancePreference {
+        case .system:
+            NSApp.appearance = nil
+        case .light:
+            NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+
+        // AppKit closes an active sheet while it recomputes a window's appearance.
+        // The presentation state lives on AppModel, so restoring it after that
+        // short native transition keeps this settings sheet open for another choice.
+        guard model.showingAppearanceSettings else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            model.showingAppearanceSettings = true
         }
     }
 
@@ -43,7 +90,7 @@ struct ContentView: View {
         )) {
             Section {
                 Label("最近会话", systemImage: "tray.full")
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 3)
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
                     .tag("__all__")
             } header: {
@@ -62,11 +109,8 @@ struct ContentView: View {
                 .padding(.bottom, 4)
             }
 
-            sidebarSectionSpacer
-
             ForEach(model.workspaceCategories) { category in
                 workspaceCategorySection(category)
-                sidebarSectionSpacer
             }
 
             Section {
@@ -82,6 +126,7 @@ struct ContentView: View {
             }
         }
         .listStyle(.sidebar)
+        .environment(\.defaultMinListRowHeight, 0)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 8) {
                 Circle()
@@ -95,15 +140,6 @@ struct ContentView: View {
             .padding(12)
             .background(.bar)
         }
-    }
-
-    private var sidebarSectionSpacer: some View {
-        Color.clear
-            .frame(height: 8)
-            .listRowInsets(EdgeInsets())
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
-            .accessibilityHidden(true)
     }
 
     private func workspaceCategorySection(_ category: WorkspaceCategory) -> some View {
@@ -145,8 +181,8 @@ struct ContentView: View {
                 .foregroundStyle(.blue)
         }
         .padding(.leading, 14)
-        .padding(.vertical, 6)
-        .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+        .padding(.vertical, 4)
+        .listRowInsets(EdgeInsets(top: 1, leading: 10, bottom: 1, trailing: 10))
         .tag(folder.path)
         .help(folder.path)
         .draggable(folder.path) {
@@ -190,8 +226,8 @@ struct ContentView: View {
     private func categoryDropHeader(_ title: String, systemImage: String, categoryID: String?) -> some View {
         let header = Label(title, systemImage: systemImage)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 7)
-            .padding(.bottom, 5)
+            .padding(.top, 2)
+            .padding(.bottom, 1)
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { paths, location in
                 handleCategoryDrop(paths, targetCategoryID: categoryID, location: location)
@@ -380,27 +416,34 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.top, 12)
 
-            List(selection: Binding(
-                get: { model.selectedThreadID },
-                set: { selection in
-                    // List sends transient nil during row replacement/filtering.
-                    // It is not an explicit request to close the conversation.
-                    guard let selection else { return }
-                    let previous = model.selectedThreadID
-                    DispatchQueue.main.async {
-                        guard model.selectedThreadID == previous else { return }
-                        model.selectThread(selection)
+            // NSTableView (used by SwiftUI List) scrolls selected rows into
+            // view and can also reset its position while a row is refreshed.
+            // This is a plain, identity-stable ScrollView instead: opening a
+            // conversation only changes its highlight and the detail pane, so
+            // the place the user is browsing in the recent list stays put.
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(model.visibleThreads) { thread in
+                        Button {
+                            selectThreadPreservingListPosition(thread.id)
+                        } label: {
+                            ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id)
+                                .background(
+                                    model.selectedThreadID == thread.id ? Color.accentColor : .clear,
+                                    in: RoundedRectangle(cornerRadius: 10)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(thread.displayName)
+                        .accessibilityValue(model.selectedThreadID == thread.id ? "当前会话" : "")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-            )) {
-                ForEach(model.visibleThreads) { thread in
-                    ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id)
-                        .tag(Optional(thread.id))
-                        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
-                        .listRowSeparator(.hidden)
-                }
+                .scrollTargetLayout()
             }
-            .listStyle(.inset)
+            .contentMargins(.horizontal, 8, for: .scrollContent)
+            .contentMargins(.vertical, 3, for: .scrollContent)
+            .scrollPosition(id: $threadListScrollID)
             .searchable(text: $model.searchText, prompt: "搜索会话")
             .overlay {
                 if model.isLoading && model.selectedThreadID == nil {
@@ -422,6 +465,21 @@ struct ContentView: View {
                         .padding(.vertical, 7)
                         .background(.bar)
                 }
+            }
+        }
+    }
+
+    private func selectThreadPreservingListPosition(_ id: String) {
+        let visibleAnchor = threadListScrollID
+        model.selectThread(id)
+        // Conversation loading replaces the detail subtree asynchronously. Give
+        // SwiftUI that update a layout pass, then restore the same top-visible
+        // row instead of accepting a reset-to-top from the scroll container.
+        guard let visibleAnchor else { return }
+        DispatchQueue.main.async {
+            threadListScrollID = nil
+            DispatchQueue.main.async {
+                threadListScrollID = visibleAnchor
             }
         }
     }
@@ -475,7 +533,53 @@ struct ContentView: View {
                 Label("远程控制", systemImage: "antenna.radiowaves.left.and.right")
             }
             .help("用 AI 小程序远程发送任务")
+
+            Button {
+                model.showingAppearanceSettings = true
+            } label: {
+                Label("个性设置", systemImage: "paintpalette")
+            }
+            .help("个性设置：选择外观模式")
         }
+    }
+
+    private var appearanceSettingsSheet: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                Image(systemName: "paintpalette.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(.purple.gradient, in: RoundedRectangle(cornerRadius: 11))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("个性设置")
+                        .font(.headline)
+                    Text("选择 CloudCodex 的显示外观")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("完成") { model.showingAppearanceSettings = false }
+                    .keyboardShortcut(.defaultAction)
+            }
+
+            Picker("外观模式", selection: $appearancePreference) {
+                ForEach(AppearancePreference.allCases) { preference in
+                    Label(preference.title, systemImage: preference.symbolName)
+                        .tag(preference)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+
+            Text(appearancePreference == .system
+                 ? "将跟随 macOS 当前的明亮或暗黑外观。"
+                 : "此选择会立即应用，并保留到下次启动。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .frame(width: 360)
     }
 
 }
@@ -1135,16 +1239,31 @@ private struct MessageBubble: View, Equatable {
                 }
                 Group {
                     if message.role == .user {
-                        VStack(alignment: .trailing, spacing: 8) {
-                            UserMessageContent(message: message)
-                            MessageMetadataFooter(message: message)
+                        // Keep the user's messages on the familiar right side
+                        // and give them a calm blue surface distinct from AI replies.
+                        VStack(alignment: .trailing, spacing: 6) {
+                            bubbleSurface {
+                                UserMessageContent(message: message)
+                            }
+                            .fixedSize(horizontal: usesCompactUserBubble, vertical: false)
+
+                            HStack {
+                                Spacer(minLength: 0)
+                                MessageMetadataFooter(message: message)
+                            }
                         }
+                        .fixedSize(horizontal: usesCompactUserBubble, vertical: false)
                     } else {
-                        VStack(alignment: .leading, spacing: 9) {
-                            if message.isStreaming {
-                                StreamingMarkdownContent(text: message.text)
-                            } else {
-                                AssistantMessageContent(text: message.text)
+                        VStack(alignment: .leading, spacing: 6) {
+                            bubbleSurface {
+                                Group {
+                                    if message.isStreaming {
+                                        StreamingMarkdownContent(text: message.text)
+                                    } else {
+                                        AssistantMessageContent(text: message.text)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
 
                             MessageMetadataFooter(message: message)
@@ -1152,20 +1271,42 @@ private struct MessageBubble: View, Equatable {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .foregroundStyle(.primary)
-                    .background(background, in: RoundedRectangle(cornerRadius: 13))
-                    .frame(maxWidth: 720, alignment: .leading)
-                if message.role != .user { Spacer(minLength: 30) }
+                    .fixedSize(horizontal: message.role == .user && usesCompactUserBubble, vertical: false)
+                    .frame(maxWidth: usesCompactUserBubble && message.role == .user ? nil : 720, alignment: .leading)
+                if message.role == .user {
+                    Image(systemName: "person.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .background(.quaternary.opacity(0.75), in: Circle())
+                } else {
+                    Spacer(minLength: 30)
+                }
             }
             .frame(maxWidth: .infinity)
         }
     }
 
     private var background: some ShapeStyle {
-        if message.role == .user { return AnyShapeStyle(Color.accentColor.opacity(0.14)) }
-        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+        if message.role == .user {
+            return AnyShapeStyle(Color.accentColor.opacity(0.18))
+        }
+        return AnyShapeStyle(Color.gray.opacity(0.18))
+    }
+
+    private func bubbleSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .foregroundStyle(.primary)
+            .background(background, in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private var usesCompactUserBubble: Bool {
+        message.role == .user
+            && message.attachments.isEmpty
+            && !message.text.contains("\n")
+            && message.text.count <= 80
     }
 
 }
@@ -1306,8 +1447,15 @@ private struct LongAssistantMessageView: View {
 private struct UserMessageContent: View {
     let message: ChatMessage
 
+    private var usesCompactWidth: Bool {
+        message.attachments.isEmpty
+            && !message.text.contains("\n")
+            && message.text.count <= 80
+    }
+
+    @ViewBuilder
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let content = VStack(alignment: .leading, spacing: 10) {
             if !message.attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 9) {
@@ -1320,10 +1468,15 @@ private struct UserMessageContent: View {
             }
 
             if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownMessageView(markdown: message.text)
+                MarkdownMessageView(markdown: message.text, expandsHorizontally: !usesCompactWidth)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+
+        if usesCompactWidth {
+            content.fixedSize(horizontal: true, vertical: false)
+        } else {
+            content.frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

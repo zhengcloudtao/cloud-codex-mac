@@ -26,6 +26,11 @@ final class AppServerClient {
         var updatedAt: Date?
     }
     private var activityHistoryByThread: [String: ActivityHistory] = [:]
+    // `thread/items/list` was introduced after some app-server versions that
+    // still support the regular thread and turn reads. Remember an unsupported
+    // response for this process so selecting every subsequent conversation does
+    // not keep asking for an optional endpoint the server cannot provide.
+    private var threadItemsListAvailability: Bool? = nil
     private(set) var connected = false
     var onEvent: EventHandler?
     var onDisconnect: ((String) -> Void)?
@@ -277,6 +282,9 @@ final class AppServerClient {
         var history = activityHistoryByThread[id].flatMap { $0.turnID == runtime.id ? $0 : nil }
             ?? ActivityHistory(turnID: runtime.id)
         if history.updatedAt != thread.updatedAt { history.isComplete = false }
+        if threadItemsListAvailability == false {
+            return ThreadActivitySnapshot(thread: thread, turn: runtime, messages: history.messages)
+        }
         if !history.isComplete {
             // Summary contains only user/final messages. Read actual activities
             // in small pages, retaining the last page cursor for the next poll
@@ -286,7 +294,21 @@ final class AppServerClient {
                 var params: JSON = ["threadId": id, "turnId": runtime.id,
                                     "limit": 24, "sortDirection": "asc"]
                 if let cursor = history.tailCursor { params["cursor"] = cursor }
-                let page = try await request("thread/items/list", params: params)
+                let page: JSON
+                do {
+                    page = try await request("thread/items/list", params: params)
+                    threadItemsListAvailability = true
+                } catch {
+                    guard Self.isUnsupportedThreadItemsListError(error) else { throw error }
+                    threadItemsListAvailability = false
+                    // The normal thread read already supplied the user and final
+                    // messages. Keep that usable view and stop retrying this
+                    // optional activity stream for this app-server connection.
+                    history.isComplete = true
+                    history.updatedAt = thread.updatedAt
+                    activityHistoryByThread[id] = history
+                    return ThreadActivitySnapshot(thread: thread, turn: runtime, messages: history.messages)
+                }
                 let entries = page["data"] as? [JSON] ?? []
                 let decoded = await Task.detached(priority: .userInitiated) {
                     var turn = latestTurn
@@ -311,6 +333,17 @@ final class AppServerClient {
 
     func hasMoreActivityHistory(_ threadID: String) -> Bool {
         activityHistoryByThread[threadID]?.isComplete == false
+    }
+
+    nonisolated static func isUnsupportedThreadItemsListError(_ error: Error) -> Bool {
+        let message: String
+        if case let CodexClientError.server(serverMessage) = error {
+            message = serverMessage
+        } else {
+            message = error.localizedDescription
+        }
+        return message.localizedCaseInsensitiveContains("thread/items/list")
+            && message.localizedCaseInsensitiveContains("not supported")
     }
 
     func shouldRefreshActivity(_ thread: CodexThread) -> Bool {

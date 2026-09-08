@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
     @Published var editingCategoryID: String?
     @Published var categoryNameDraft = ""
     @Published var categoryEditorError: String?
+    @Published var showingAppearanceSettings = false
     @Published var showingRemoteControl = false
     @Published private(set) var remoteControlEnabled: Bool
     @Published private(set) var remoteControlStatus = "远程控制已关闭"
@@ -563,13 +564,20 @@ final class AppModel: ObservableObject {
                 }
                 await loadPermissionProfiles(cwd: updated.cwd)
                 guard !Task.isCancelled, generation == selectionGeneration else { return }
-                let activity = try await client.readLatestThreadActivity(id, knownThread: updated)
-                guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }
-                flushPendingDeltas()
-                if locallyRunningThreadIDs.contains(id) {
-                    storeMessages(ConversationHistory.merge(snapshot: activity.messages, cached: messages), for: id)
-                } else {
-                    applyExternalActivitySnapshot(activity, threadID: id)
+                do {
+                    let activity = try await client.readLatestThreadActivity(id, knownThread: updated)
+                    guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }
+                    flushPendingDeltas()
+                    if locallyRunningThreadIDs.contains(id) {
+                        storeMessages(ConversationHistory.merge(snapshot: activity.messages, cached: messages), for: id)
+                    } else {
+                        applyExternalActivitySnapshot(activity, threadID: id)
+                    }
+                } catch {
+                    // Some installed Codex app-server versions do not provide
+                    // thread/items/list. The complete thread read above still
+                    // gives a usable conversation, so keep it visible rather
+                    // than showing an error dialog during every selection.
                 }
             }
         } catch {
@@ -1564,7 +1572,10 @@ final class AppModel: ObservableObject {
                 flushPendingDeltas()
                 if let selectedThreadID { clearLocalTurn(selectedThreadID) }
                 finishTurnProgress(status: "失败")
-                errorMessage = error["message"] as? String ?? "Codex 发生错误"
+                let message = error["message"] as? String ?? "Codex 发生错误"
+                if !Self.isOptionalActivityCapabilityError(message) {
+                    errorMessage = message
+                }
             }
             return
         }
@@ -1754,11 +1765,19 @@ final class AppModel: ObservableObject {
             setThreadRunning(eventThreadID, running: false)
             finishTurnProgress(status: "失败")
             if let error = params["error"] as? [String: Any] {
-                errorMessage = error["message"] as? String ?? "Codex 发生错误"
+                let message = error["message"] as? String ?? "Codex 发生错误"
+                if !Self.isOptionalActivityCapabilityError(message) {
+                    errorMessage = message
+                }
             }
         default:
             break
         }
+    }
+
+    private static func isOptionalActivityCapabilityError(_ message: String) -> Bool {
+        message.localizedCaseInsensitiveContains("thread/items/list")
+            && message.localizedCaseInsensitiveContains("not supported")
     }
 
     private func updateActivityItem(_ item: [String: Any], completed: Bool) {
