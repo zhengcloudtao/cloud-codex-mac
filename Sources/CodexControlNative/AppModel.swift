@@ -110,7 +110,8 @@ final class AppModel: ObservableObject {
     private var remoteUsageTask: Task<Void, Never>?
     private var remoteUsageSnapshot: RemoteUsageSnapshot?
     private var remoteUsageLastAttempt: Date?
-    private var remoteExecution: RemoteExecution?
+    private var remoteExecutions: [String: RemoteExecution] = [:]
+    private let maxConcurrentRemoteExecutions = 4
     private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
     private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
@@ -1095,7 +1096,7 @@ final class AppModel: ObservableObject {
             remoteUsageTask = nil
             remoteUsageSnapshot = nil
             remoteUsageLastAttempt = nil
-            remoteControlStatus = remoteExecution == nil ? "远程控制已关闭" : "当前远程任务完成后停止"
+            remoteControlStatus = remoteExecutions.isEmpty ? "远程控制已关闭" : "当前远程任务完成后停止"
             guard let api = remoteControlAPI else { return }
             Task { [weak self] in
                 guard let self else { return }
@@ -1191,7 +1192,7 @@ final class AppModel: ObservableObject {
                     if response.paired {
                         remotePairingCode = ""
                         remoteDefaults.removeObject(forKey: remotePairingCodeKey)
-                        if remoteExecution == nil { remoteControlStatus = "已配对，正在等待远程任务" }
+                        if remoteExecutions.isEmpty { remoteControlStatus = "已配对，正在等待远程任务" }
                     } else {
                         remoteControlStatus = remotePairingCode.isEmpty
                             ? "等待生成配对码…"
@@ -1229,7 +1230,7 @@ final class AppModel: ObservableObject {
                 } catch { /* Old relay versions do not support history; do not disrupt execution. */ }
                 }
             }
-            if remoteControlPaired, remoteExecution == nil {
+            if remoteControlPaired, remoteExecutions.count < maxConcurrentRemoteExecutions {
                 do {
                     if let task = try await api.nextTask() {
                         await executeRemoteTask(task)
@@ -1239,14 +1240,15 @@ final class AppModel: ObservableObject {
                 }
             }
 
-            if let execution = remoteExecution, execution.progress.revision != execution.uploadedRevision {
+            let pendingProgressUploads = remoteExecutions.filter { $0.value.progress.revision != $0.value.uploadedRevision }
+            for (threadID, execution) in pendingProgressUploads {
                 do {
                     try await api.updateTask(execution.taskID, body: RemoteTaskStatusBody(
                         status: "running", threadId: execution.threadID, turnId: execution.turnID ?? "",
                         result: execution.responseText, error: "", progress: execution.progress
                     ))
-                    if remoteExecution?.taskID == execution.taskID {
-                        remoteExecution?.uploadedRevision = execution.progress.revision
+                    if remoteExecutions[threadID]?.taskID == execution.taskID {
+                        remoteExecutions[threadID]?.uploadedRevision = execution.progress.revision
                     }
                 } catch {
                     if !Task.isCancelled { remoteControlStatus = "执行过程同步失败，将自动重试" }
@@ -1399,8 +1401,8 @@ final class AppModel: ObservableObject {
                 try await client.resumeThread(threadID)
             }
 
-            remoteExecution = RemoteExecution(taskID: task.taskId, threadID: threadID, turnID: nil, responseText: "")
-            remoteControlStatus = "正在执行远程任务"
+            remoteExecutions[threadID] = RemoteExecution(taskID: task.taskId, threadID: threadID, turnID: nil, responseText: "")
+            remoteControlStatus = "正在执行 \(remoteExecutions.count) 个远程任务"
             setLocalTurnRunning(threadID)
             setThreadRunning(threadID, running: true)
             let turnID = try await client.startTurn(
@@ -1414,7 +1416,9 @@ final class AppModel: ObservableObject {
                 approvalPolicy: approval,
                 approvalsReviewer: reviewer
             )
-            remoteExecution?.turnID = turnID
+            if remoteExecutions[threadID]?.taskID == task.taskId {
+                remoteExecutions[threadID]?.turnID = turnID
+            }
             do {
                 try await api.updateTask(task.taskId, body: RemoteTaskStatusBody(
                     status: "running",
@@ -1433,13 +1437,13 @@ final class AppModel: ObservableObject {
         } catch {
             clearLocalTurn(threadID)
             setThreadRunning(threadID, running: false)
-            remoteExecution = nil
+            remoteExecutions.removeValue(forKey: threadID)
             await failRemoteTask(task, threadID: threadID, message: error.localizedDescription)
         }
     }
 
     private func failRemoteTask(_ task: RemoteTask, threadID: String = "", message: String) async {
-        remoteControlStatus = "远程任务失败：\(message)"
+        remoteControlStatus = remoteExecutions.isEmpty ? "远程任务失败：\(message)" : "正在执行 \(remoteExecutions.count) 个远程任务"
         await reportRemoteTaskStatus(task.taskId, body: RemoteTaskStatusBody(
             status: "failed", threadId: threadID, turnId: "", result: "", error: message
         ))
@@ -1459,22 +1463,22 @@ final class AppModel: ObservableObject {
     }
 
     private func handleRemoteEvent(_ method: String, params: [String: Any], threadID: String) {
-        guard var execution = remoteExecution, execution.threadID == threadID else { return }
+        guard var execution = remoteExecutions[threadID] else { return }
         let eventTurnID = params["turnId"] as? String ?? (params["turn"] as? [String: Any])?["id"] as? String
         if let expected = execution.turnID, let eventTurnID, expected != eventTurnID { return }
         execution.progress.consume(method, params)
-        remoteExecution = execution
+        remoteExecutions[threadID] = execution
         switch method {
         case "turn/diff/updated":
             if let turnID = params["turnId"] as? String, let expected = execution.turnID, turnID != expected { return }
             if let diff = params["diff"] as? String {
                 execution.fileDiff = String(diff.prefix(200_000)) + (diff.count > 200_000 ? "\n[差异过长，已截断，请在 Mac 查看完整内容]" : "")
-                remoteExecution = execution
+                remoteExecutions[threadID] = execution
             }
         case "turn/started":
             let turn = params["turn"] as? [String: Any]
             execution.turnID = turn?["id"] as? String ?? execution.turnID
-            remoteExecution = execution
+            remoteExecutions[threadID] = execution
         case "item/agentMessage/delta":
             if let delta = params["delta"] as? String {
                 if let id = params["itemId"] as? String, id != execution.responseItemID {
@@ -1482,7 +1486,7 @@ final class AppModel: ObservableObject {
                     execution.responseText = ""
                 }
                 execution.responseText = Self.clippedRemoteResult(execution.responseText + delta)
-                remoteExecution = execution
+                remoteExecutions[threadID] = execution
             }
         case "item/completed":
             if let item = params["item"] as? [String: Any],
@@ -1490,15 +1494,17 @@ final class AppModel: ObservableObject {
                let text = item["text"] as? String {
                 execution.responseItemID = item["id"] as? String
                 execution.responseText = Self.clippedRemoteResult(text)
-                remoteExecution = execution
+                remoteExecutions[threadID] = execution
             }
         case "turn/completed":
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String ?? "completed"
             let errorObject = turn?["error"] as? [String: Any]
             let errorText = errorObject?["message"] as? String ?? ""
-            remoteExecution = nil
-            remoteControlStatus = status == "completed" ? "远程任务已完成" : "远程任务执行失败"
+            remoteExecutions.removeValue(forKey: threadID)
+            remoteControlStatus = remoteExecutions.isEmpty
+                ? (status == "completed" ? "远程任务已完成" : "远程任务执行失败")
+                : "正在执行 \(remoteExecutions.count) 个远程任务"
             Task { [weak self] in
                 await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
                         status: status == "completed" ? "completed" : "failed",
@@ -1512,10 +1518,10 @@ final class AppModel: ObservableObject {
         case "error":
             let errorObject = params["error"] as? [String: Any]
             let message = errorObject?["message"] as? String ?? "Codex 执行远程任务失败。"
-            remoteExecution = nil
+            remoteExecutions.removeValue(forKey: threadID)
             clearLocalTurn(execution.threadID)
             setThreadRunning(execution.threadID, running: false)
-            remoteControlStatus = "远程任务失败：\(message)"
+            remoteControlStatus = remoteExecutions.isEmpty ? "远程任务失败：\(message)" : "正在执行 \(remoteExecutions.count) 个远程任务"
             Task { [weak self] in
                 await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
                         status: "failed", threadId: execution.threadID,
