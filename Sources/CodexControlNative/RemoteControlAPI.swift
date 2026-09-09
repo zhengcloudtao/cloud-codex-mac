@@ -20,6 +20,8 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     let workspaces: [RemoteWorkspaceSnapshot]
     let threads: [RemoteThreadSnapshot]
     var usage: RemoteUsageSnapshot? = nil
+    var defaultModel: String? = nil
+    var defaultEffort: String? = nil
 }
 
 struct RemoteTask: Codable, Equatable {
@@ -48,6 +50,31 @@ struct RemoteRegistration: Codable, Equatable {
 
 struct RemoteHeartbeatResponse: Codable, Equatable {
     let paired: Bool
+    var runningTasks: [RemoteRecoveryTask]? = nil
+    var queueSummary: RemoteQueueSummary? = nil
+}
+
+/// Only identifiers are returned by the relay. Never replay a prompt during recovery.
+struct RemoteRecoveryTask: Codable, Equatable {
+    let taskId: String
+    let threadId: String
+    let turnId: String
+    let workspace: String
+
+    func terminalUpdate(from turn: [String: Any]) -> RemoteTaskStatusBody? {
+        guard !turnId.isEmpty, !threadId.isEmpty, turn["id"] as? String == turnId,
+              let status = turn["status"] as? String,
+              ["completed", "interrupted", "failed"].contains(status) else { return nil }
+        let items = turn["items"] as? [[String: Any]] ?? []
+        let result = items.last(where: { $0["type"] as? String == "agentMessage" })?["text"] as? String ?? ""
+        let message = (turn["error"] as? [String: Any])?["message"] as? String
+        return RemoteTaskStatusBody(
+            status: status == "completed" ? "completed" : "failed",
+            threadId: threadId, turnId: turnId, result: String(result.suffix(60_000)),
+            error: message ?? (status == "interrupted" ? "Codex 此轮已中止，Mac 重连后已同步状态。" : status == "failed" ? "Codex 此轮执行失败，Mac 重连后已同步状态。" : ""),
+            recovery: true
+        )
+    }
 }
 
 private struct RemoteRegistrationBody: Codable {
@@ -63,6 +90,18 @@ struct RemoteTaskStatusBody: Codable, Equatable {
     let error: String
     var fileDiff: String? = nil
     var progress: RemoteTaskProgress? = nil
+    var recovery: Bool? = nil
+    var waitReason: String? = nil
+    var actualModel: String? = nil
+    var actualEffort: String? = nil
+
+    func withActualSettings(_ metadata: TurnModelMetadata?) -> Self {
+        var copy = self
+        guard !turnId.isEmpty, let metadata else { return copy }
+        copy.actualModel = metadata.model
+        copy.actualEffort = metadata.reasoningEffort
+        return copy
+    }
 }
 
 private struct RemoteEnvelope<Value: Decodable>: Decodable {

@@ -9,6 +9,103 @@ final class AppModel: ObservableObject {
     @Published var selectedThreadID: String?
     @Published var messages: [ChatMessage] = []
     @Published var composerText = ""
+    @Published private(set) var threadOutcomes: [String: ConversationOutcome] = [:]
+
+    func conversationOutcome(for thread: CodexThread) -> ConversationOutcome? {
+        if thread.status == "active" || locallyRunningThreadIDs.contains(thread.id) { return .running }
+        return threadOutcomes[thread.id]
+    }
+    struct WaitingMessage: Identifiable {
+        let id = UUID()
+        let threadID: String
+        let text: String
+        let attachments: [ComposerAttachment]
+        let model: String?
+        let effort: String?
+        let permissions: String?
+        let serviceTier: String?
+        var error: String?
+    }
+    @Published var waitingMessages: [WaitingMessage] = []
+    @Published private(set) var deliveringWaitingMessages: Set<UUID> = []
+    private var waitingMonitor: Task<Void, Never>?
+
+    var selectedWaitingMessages: [WaitingMessage] {
+        waitingMessages.filter { $0.threadID == selectedThreadID }
+    }
+
+    func removeWaitingMessage(_ id: UUID) {
+        guard !deliveringWaitingMessages.contains(id) else { return }
+        waitingMessages.removeAll { $0.id == id }
+    }
+
+    private func enqueueComposerMessage(threadID: String) {
+        waitingMessages.append(WaitingMessage(threadID: threadID,
+            text: composerText.trimmingCharacters(in: .whitespacesAndNewlines),
+            attachments: attachments, model: selectedModel?.model, effort: selectedEffort,
+            permissions: selectedPermissionID, serviceTier: serviceTierForTurn))
+        composerText = ""
+        attachments = []
+        speech.stop()
+        guard waitingMonitor == nil else { return }
+        waitingMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.waitingMessages.isEmpty else { break }
+                for threadID in Set(self.waitingMessages.map(\.threadID)) {
+                    guard !self.locallyRunningThreadIDs.contains(threadID),
+                          let first = self.waitingMessages.first(where: { $0.threadID == threadID }),
+                          first.error == nil else { continue }
+                    do {
+                        let state = try await self.client.readThreadState(threadID)
+                        if state.status == "idle" { await self.deliverWaitingMessage(first.id, steer: false) }
+                    } catch { /* Retry read-only status checks after a temporary disconnect. */ }
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            self?.waitingMonitor = nil
+        }
+    }
+
+    func deliverWaitingMessage(_ messageID: UUID, steer: Bool) async {
+        guard let item = waitingMessages.first(where: { $0.id == messageID }),
+              !waitingMessages.contains(where: { $0.threadID == item.threadID && deliveringWaitingMessages.contains($0.id) }) else { return }
+        deliveringWaitingMessages.insert(messageID)
+        defer { deliveringWaitingMessages.remove(messageID) }
+        do {
+            if steer {
+                let runtime = try await client.readLatestThreadActivity(item.threadID)
+                guard let turn = runtime.turn, turn.isActive else {
+                    throw CodexClientError.server("当前任务已经结束，请点击重试作为下一条消息发送。")
+                }
+                try await client.steerTurn(threadID: item.threadID, turnID: turn.id,
+                                           text: item.text, attachments: item.attachments)
+            } else {
+                let state = try await client.readThreadState(item.threadID)
+                guard state.status == "idle", !locallyRunningThreadIDs.contains(item.threadID) else { return }
+                guard waitingMessages.first(where: { $0.threadID == item.threadID })?.id == messageID else { return }
+                liveTurnMetadataByThread[item.threadID] = TurnModelMetadata(model: item.model, reasoningEffort: item.effort)
+                setLocalTurnRunning(item.threadID)
+                do {
+                    try await client.resumeThread(item.threadID)
+                    let turnID = try await client.startTurn(threadID: item.threadID,
+                        text: item.text, attachments: item.attachments, model: item.model,
+                        effort: item.effort, permissions: item.permissions, serviceTierForTurn: item.serviceTier)
+                    setLocalTurnRunning(item.threadID, turnID: turnID)
+                    setThreadRunning(item.threadID, running: true)
+                } catch {
+                    clearLocalTurn(item.threadID)
+                    throw error
+                }
+            }
+            waitingMessages.removeAll { $0.id == messageID }
+            // Reload confirmed server messages, including attachment identities.
+            if selectedThreadID == item.threadID { await loadSelectedThread() }
+        } catch {
+            if let index = waitingMessages.firstIndex(where: { $0.id == messageID }) {
+                waitingMessages[index].error = error.localizedDescription
+            }
+        }
+    }
     @Published var searchText = ""
     @Published var connectionText = "正在连接…"
     @Published var isLoading = false
@@ -109,6 +206,16 @@ final class AppModel: ObservableObject {
     private var remoteControlLoopTask: Task<Void, Never>?
     private var remoteHistoryTask: Task<Void, Never>?
     private var remoteUsageTask: Task<Void, Never>?
+    private var remoteRecoveryTask: Task<Void, Never>?
+    private var remoteRecoveryLastAttempt: Date?
+    private var remoteStatusUploadTask: Task<Void, Never>?
+    private var remoteSchedulingTask: Task<Void, Never>?
+    private var remoteSchedulingLastAttempt: Date?
+    private var remoteSchedulingGeneration = 0
+    private var remoteSchedulingState = RemoteSchedulingState()
+    private var remoteClaimTask: Task<Void, Never>?
+    private var remoteProgressUploadTask: Task<Void, Never>?
+    private let remoteStatusOutbox: RemoteStatusOutbox
     private var remoteUsageSnapshot: RemoteUsageSnapshot?
     private var remoteUsageLastAttempt: Date?
     private var remoteExecutions: [String: RemoteExecution] = [:]
@@ -159,6 +266,7 @@ final class AppModel: ObservableObject {
         }
     ) {
         self.remoteDefaults = remoteDefaults
+        self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
         isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
         remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
@@ -332,7 +440,7 @@ final class AppModel: ObservableObject {
 
     var canSend: Bool {
         (!composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
-            && !isSelectedThreadProcessing
+            && selectedThreadID != nil
     }
 
     var canCreateThread: Bool {
@@ -400,6 +508,9 @@ final class AppModel: ObservableObject {
         let merged = (retained + snapshot).map { thread -> CodexThread in
             var updated = thread
             if locallyRunningThreadIDs.contains(thread.id) { updated.status = "active" }
+            if updated.status == "active", threadOutcomes[thread.id] != nil {
+                threadOutcomes.removeValue(forKey: thread.id)
+            }
             threadSummaries[thread.id] = updated
             return updated
         }
@@ -443,6 +554,9 @@ final class AppModel: ObservableObject {
             // Keep the optimistic light on while this app is submitting or
             // streaming a turn; app-server's list snapshot can lag briefly.
             if locallyRunningThreadIDs.contains(threadID) { continue }
+            if status == "active", threadOutcomes[threadID] != nil {
+                threadOutcomes.removeValue(forKey: threadID)
+            }
             updatedThreads[index].status = status
             didChange = true
         }
@@ -462,6 +576,7 @@ final class AppModel: ObservableObject {
     }
 
     private func setLocalTurnRunning(_ threadID: String, turnID: String? = nil) {
+        threadOutcomes.removeValue(forKey: threadID)
         locallyRunningThreadIDs.insert(threadID)
         if let turnID { activeTurnIDsByThread[threadID] = turnID }
         syncSelectedLocalTurnState()
@@ -588,6 +703,11 @@ final class AppModel: ObservableObject {
     }
 
     func sendMessage() async {
+        if let id = selectedThreadID, canSend,
+           isSelectedThreadProcessing || !selectedWaitingMessages.isEmpty {
+            enqueueComposerMessage(threadID: id)
+            return
+        }
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         let outgoingAttachments = attachments
         let outgoingModel = selectedModel?.model
@@ -731,6 +851,11 @@ final class AppModel: ObservableObject {
     func applyExternalActivitySnapshot(_ snapshot: ThreadActivitySnapshot, threadID: String) {
         guard selectedThreadID == threadID, !isSending else { return }
         let isActive = snapshot.turn?.isActive == true || snapshot.thread.status == "active"
+        if isActive {
+            threadOutcomes.removeValue(forKey: threadID)
+        } else if let status = snapshot.turn?.status, let outcome = ConversationOutcome(rawValue: status) {
+            threadOutcomes[threadID] = outcome
+        }
         if let index = threads.firstIndex(where: { $0.id == threadID }) {
             if isActive {
                 // `updatedAt` and preview can change on every active snapshot.
@@ -1104,6 +1229,10 @@ final class AppModel: ObservableObject {
             remoteUsageTask = nil
             remoteUsageSnapshot = nil
             remoteUsageLastAttempt = nil
+            remoteSchedulingTask?.cancel()
+            // Keep its handle until the canceled worker exits. Its defer must
+            // not clear a replacement worker after a quick off/on toggle.
+            remoteSchedulingLastAttempt = nil
             remoteControlStatus = remoteExecutions.isEmpty ? "远程控制已关闭" : "当前远程任务完成后停止"
             guard let api = remoteControlAPI else { return }
             Task { [weak self] in
@@ -1190,17 +1319,29 @@ final class AppModel: ObservableObject {
         }
 
         var heartbeatCountdown = 0
+        // Initial global read also avoids briefly clearing the relay's history
+        // with whichever workspace happens to be selected at launch.
+        await refreshRemoteSchedulingSnapshot()
         while !Task.isCancelled, remoteControlEnabled {
             refreshRemoteUsageIfNeeded()
+            refreshRemoteSchedulingIfNeeded()
             if heartbeatCountdown <= 0 {
                 do {
                     let response = try await api.heartbeat(makeRemoteHeartbeat(ready: true))
                     remoteControlPaired = response.paired
                     remoteLastSyncAt = Date()
+                    if response.paired, let running = response.runningTasks {
+                        reconcileRemoteTasks(running, api: api)
+                    }
                     if response.paired {
                         remotePairingCode = ""
                         remoteDefaults.removeObject(forKey: remotePairingCodeKey)
-                        if remoteExecutions.isEmpty { remoteControlStatus = "已配对，正在等待远程任务" }
+                        if remoteExecutions.isEmpty {
+                            remoteControlStatus = remoteStatusOutbox.pending(deviceID: api.deviceID).isEmpty
+                                ? (response.queueSummary?.waitingDescription
+                                   ?? ((response.runningTasks?.isEmpty ?? true) ? "已配对，正在等待远程任务" : "已连接，正在核对未结束任务"))
+                                : "任务状态待补传，正在自动重试"
+                        }
                     } else {
                         remoteControlStatus = remotePairingCode.isEmpty
                             ? "等待生成配对码…"
@@ -1212,6 +1353,9 @@ final class AppModel: ObservableObject {
                 heartbeatCountdown = 3
             }
 
+            // Disabling remote control can happen while heartbeat is in flight.
+            // Do not dispatch a new unstructured claim worker after that await.
+            guard !Task.isCancelled, remoteControlEnabled else { break }
             if remoteControlPaired, remoteHistoryTask == nil {
                 remoteHistoryTask = Task { [weak self] in
                 guard let self else { return }
@@ -1238,32 +1382,67 @@ final class AppModel: ObservableObject {
                 } catch { /* Old relay versions do not support history; do not disrupt execution. */ }
                 }
             }
-            if remoteControlPaired, remoteExecutions.count < maxConcurrentRemoteExecutions {
-                do {
-                    if let task = try await api.nextTask() {
-                        await executeRemoteTask(task)
+            if remoteControlPaired, remoteClaimTask == nil,
+               remoteExecutions.count < maxConcurrentRemoteExecutions {
+                // A slow image download / writer check must not pause heartbeat,
+                // history reads or status recovery. Keep claiming single-flight.
+                remoteClaimTask = Task { [weak self] in
+                    guard let self else { return }
+                    defer { self.remoteClaimTask = nil }
+                    guard self.remoteControlEnabled, !Task.isCancelled else { return }
+                    do {
+                        if let task = try await api.nextTask() {
+                            // Finish a claim even if the switch changed while the
+                            // HTTP response was in flight; never orphan that row.
+                            await self.executeRemoteTask(task)
+                        }
+                    } catch {
+                        if !Task.isCancelled { self.remoteControlStatus = "任务领取失败：\(error.localizedDescription)" }
                     }
-                } catch {
-                    if !Task.isCancelled { remoteControlStatus = "任务领取失败：\(error.localizedDescription)" }
                 }
             }
 
-            let pendingProgressUploads = remoteExecutions.filter { $0.value.progress.revision != $0.value.uploadedRevision }
-            for (threadID, execution) in pendingProgressUploads {
-                do {
-                    try await api.updateTask(execution.taskID, body: RemoteTaskStatusBody(
-                        status: "running", threadId: execution.threadID, turnId: execution.turnID ?? "",
-                        result: execution.responseText, error: "", progress: execution.progress
-                    ))
-                    if remoteExecutions[threadID]?.taskID == execution.taskID {
-                        remoteExecutions[threadID]?.uploadedRevision = execution.progress.revision
+            // Independent worker: status retries must not delay heartbeats or task claiming.
+            if remoteControlPaired, remoteStatusUploadTask == nil,
+               !remoteStatusOutbox.pending(deviceID: api.deviceID).isEmpty {
+                remoteStatusUploadTask = Task { [weak self] in
+                    guard let self else { return }
+                    defer { self.remoteStatusUploadTask = nil }
+                    for (id, body) in self.remoteStatusOutbox.pending(deviceID: api.deviceID) {
+                        guard !Task.isCancelled else { return }
+                        await self.uploadRemoteStatus(id, body: body, api: api)
                     }
-                } catch {
-                    if !Task.isCancelled { remoteControlStatus = "执行过程同步失败，将自动重试" }
+                }
+            }
+
+            if remoteProgressUploadTask == nil {
+                remoteProgressUploadTask = Task { [weak self] in
+                    guard let self else { return }
+                    defer { self.remoteProgressUploadTask = nil }
+                    await self.uploadRemoteProgress(api: api)
                 }
             }
             heartbeatCountdown -= 1
             try? await Task.sleep(nanoseconds: 3_000_000_000)
+        }
+    }
+
+    private func uploadRemoteProgress(api: RemoteControlAPI) async {
+        let pendingProgressUploads = remoteExecutions.filter { $0.value.progress.revision != $0.value.uploadedRevision }
+        for (threadID, execution) in pendingProgressUploads {
+            do {
+                let body = await client.withActualTurnSettings(RemoteTaskStatusBody(
+                    status: "running", threadId: execution.threadID, turnId: execution.turnID ?? "",
+                    result: execution.responseText, error: "", progress: execution.progress
+                ))
+                applyVerifiedRemoteSettings(body)
+                try await api.updateTask(execution.taskID, body: body)
+                if remoteExecutions[threadID]?.taskID == execution.taskID {
+                    remoteExecutions[threadID]?.uploadedRevision = execution.progress.revision
+                }
+            } catch {
+                if !Task.isCancelled { remoteControlStatus = "执行过程同步失败，将自动重试" }
+            }
         }
     }
 
@@ -1297,28 +1476,51 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func makeRemoteHeartbeat(ready: Bool) -> RemoteHeartbeatBody {
-        let allowedPaths = Set(folderCatalog.map(\.path))
+    private func refreshRemoteSchedulingIfNeeded() {
+        guard remoteSchedulingTask == nil,
+              remoteSchedulingLastAttempt.map({ Date().timeIntervalSince($0) >= 9 }) ?? true else { return }
+        remoteSchedulingTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.remoteSchedulingTask = nil }
+            await self.refreshRemoteSchedulingSnapshot()
+        }
+    }
+
+    func refreshRemoteSchedulingSnapshot(fetch: (() async throws -> [CodexThread])? = nil) async {
+        remoteSchedulingGeneration += 1
+        let generation = remoteSchedulingGeneration
+        remoteSchedulingLastAttempt = Date()
+        // No cwd filter and no mutation of the sidebar or current selection.
+        let snapshot: [CodexThread]
+        do {
+            if let fetch { snapshot = try await fetch() }
+            else { snapshot = try await client.listThreads(limit: 300).threads }
+        } catch { return }
+        guard !Task.isCancelled, generation == remoteSchedulingGeneration else { return }
+        applyRemoteSchedulingSnapshot(snapshot)
+    }
+
+    func applyRemoteSchedulingSnapshot(_ snapshot: [CodexThread]) {
+        remoteSchedulingState.replace(with: snapshot)
+    }
+
+    func makeRemoteHeartbeat(ready: Bool) -> RemoteHeartbeatBody {
         let workspaces = folderCatalog.prefix(200).map {
             RemoteWorkspaceSnapshot(path: $0.path, name: $0.name)
         }
-        let snapshots = threads.prefix(300).compactMap { thread -> RemoteThreadSnapshot? in
-            guard allowedPaths.contains(thread.cwd) else { return nil }
-            return RemoteThreadSnapshot(
-                id: thread.id,
-                title: thread.displayName,
-                workspace: thread.cwd,
-                model: thread.model ?? "",
-                status: thread.status
-            )
-        }
+        let snapshots = remoteSchedulingState.snapshots(
+            allowedPaths: Set(workspaces.map(\.path)),
+            locallyRunning: locallyRunningThreadIDs.compactMap { threadSummaries[$0] }
+        )
         return RemoteHeartbeatBody(
             name: remoteControlAPI?.deviceName ?? "CloudCodex Mac",
             permissionLabel: remotePermissionLabel,
             remoteControlReady: ready,
             workspaces: Array(workspaces),
             threads: Array(snapshots),
-            usage: remoteControlPaired ? remoteUsageSnapshot : nil
+            usage: remoteControlPaired ? remoteUsageSnapshot : nil,
+            defaultModel: selectedModel?.model,
+            defaultEffort: selectedEffort
         )
     }
 
@@ -1413,6 +1615,10 @@ final class AppModel: ObservableObject {
             remoteControlStatus = "正在执行 \(remoteExecutions.count) 个远程任务"
             setLocalTurnRunning(threadID)
             setThreadRunning(threadID, running: true)
+            // Capture this remote request, never the visible composer's model.
+            liveTurnMetadataByThread[threadID] = TurnModelMetadata(
+                model: modelOption?.model, reasoningEffort: effort
+            )
             let turnID = try await client.startTurn(
                 threadID: threadID,
                 text: task.prompt,
@@ -1428,13 +1634,15 @@ final class AppModel: ObservableObject {
                 remoteExecutions[threadID]?.turnID = turnID
             }
             do {
-                try await api.updateTask(task.taskId, body: RemoteTaskStatusBody(
+                let body = await client.withActualTurnSettings(RemoteTaskStatusBody(
                     status: "running",
                     threadId: threadID,
                     turnId: turnID ?? "",
                     result: "",
                     error: ""
                 ))
+                applyVerifiedRemoteSettings(body)
+                try await api.updateTask(task.taskId, body: body)
             } catch {
                 // The server already marked the task running when it was claimed.
                 // Keep tracking the real Codex turn so its completion can retry
@@ -1443,11 +1651,16 @@ final class AppModel: ObservableObject {
             }
             await refreshThreads()
         } catch {
-            clearLocalTurn(threadID)
-            setThreadRunning(threadID, running: false)
-            remoteExecutions.removeValue(forKey: threadID)
+            // A busy check can fail before this task owns any turn. Never erase
+            // another task's local execution or mark an external writer idle.
+            if remoteExecutions[threadID]?.taskID == task.taskId {
+                clearLocalTurn(threadID)
+                liveTurnMetadataByThread.removeValue(forKey: threadID)
+                setThreadRunning(threadID, running: false)
+                remoteExecutions.removeValue(forKey: threadID)
+            }
             if Self.shouldDeferRemoteTask(error) {
-                await deferRemoteTask(task, threadID: threadID)
+                await deferRemoteTask(task, threadID: threadID, reason: Self.remoteWaitReason(error))
                 return
             }
             await failRemoteTask(task, threadID: threadID, message: error.localizedDescription)
@@ -1461,10 +1674,17 @@ final class AppModel: ObservableObject {
             || message.contains("这个会话正在执行其他任务")
     }
 
-    private func deferRemoteTask(_ task: RemoteTask, threadID: String) async {
-        remoteControlStatus = "同一会话正在执行，远程任务将继续等待"
+    static func remoteWaitReason(_ error: Error) -> String {
+        error.localizedDescription.lowercased().contains("active writer") ? "writer_busy" : "thread_busy"
+    }
+
+    private func deferRemoteTask(_ task: RemoteTask, threadID: String, reason: String) async {
+        remoteSchedulingState.deferBusyThread(task)
+        remoteControlStatus = reason == "writer_busy"
+            ? "该会话被另一 Codex 进程占用，等待释放；其他会话继续领取"
+            : "该会话正在执行，任务已排队；其他会话继续领取"
         await reportRemoteTaskStatus(task.taskId, body: RemoteTaskStatusBody(
-            status: "queued", threadId: threadID, turnId: "", result: "", error: ""
+            status: "queued", threadId: threadID, turnId: "", result: "", error: "", waitReason: reason
         ))
     }
 
@@ -1475,21 +1695,79 @@ final class AppModel: ObservableObject {
         ))
     }
 
+    private func reconcileRemoteTasks(_ tasks: [RemoteRecoveryTask], api: RemoteControlAPI) {
+        guard remoteRecoveryTask == nil, !tasks.isEmpty,
+              remoteRecoveryLastAttempt.map({ Date().timeIntervalSince($0) >= 30 }) ?? true else { return }
+        remoteRecoveryLastAttempt = Date()
+        let authorized = Set(makeRemoteHeartbeat(ready: true).workspaces.map(\.path))
+        let candidates = tasks.filter { authorized.contains($0.workspace) && remoteStatusOutbox.pending(deviceID: api.deviceID)[$0.taskId] == nil }
+        remoteRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.remoteRecoveryTask = nil }
+            for group in Dictionary(grouping: candidates, by: \.threadId).values {
+                guard self.remoteControlEnabled, !Task.isCancelled else { return }
+                do {
+                    let updates = try await self.client.readRemoteRecovery(group)
+                    for (id, body) in updates {
+                        guard self.remoteControlEnabled, !Task.isCancelled else { return }
+                        // The live completion callback may have queued a richer final report while we read history.
+                        if self.remoteStatusOutbox.pending(deviceID: api.deviceID)[id] != nil { continue }
+                        if let local = self.remoteExecutions[body.threadId], local.taskID == id, local.turnID == body.turnId {
+                            self.remoteExecutions.removeValue(forKey: body.threadId)
+                            if self.activeTurnIDsByThread[body.threadId] == body.turnId {
+                                self.clearLocalTurn(body.threadId)
+                                self.setThreadRunning(body.threadId, running: false)
+                            }
+                        }
+                        await self.reportRemoteTaskStatus(id, body: body)
+                    }
+                } catch {
+                    // A read failure is not evidence that a turn ended. Try again next heartbeat.
+                    if !Task.isCancelled { self.remoteControlStatus = "未结束任务核对失败，将自动重试；正常任务不受影响" }
+                }
+            }
+        }
+    }
+
     private func reportRemoteTaskStatus(_ taskID: String, body: RemoteTaskStatusBody) async {
         guard let api = remoteControlAPI else { return }
-        for delay: UInt64 in [0, 2, 5] {
-            if delay > 0 { try? await Task.sleep(nanoseconds: delay * 1_000_000_000) }
-            do {
-                try await api.updateTask(taskID, body: body)
-                return
-            } catch {
-                if Task.isCancelled { return }
+        let body = await client.withActualTurnSettings(body)
+        applyVerifiedRemoteSettings(body)
+        remoteStatusOutbox.enqueue(deviceID: api.deviceID, taskID: taskID, body: body)
+        await uploadRemoteStatus(taskID, body: body, api: api)
+    }
+
+    func applyVerifiedRemoteSettings(_ body: RemoteTaskStatusBody) {
+        guard !body.turnId.isEmpty, let model = body.actualModel, !model.isEmpty else { return }
+        let metadata = TurnModelMetadata(model: model, reasoningEffort: body.actualEffort)
+        if activeTurnIDsByThread[body.threadId] == body.turnId {
+            liveTurnMetadataByThread[body.threadId] = metadata
+        }
+        var updated = conversationMessages(for: body.threadId)
+        var changed = false
+        for index in updated.indices where updated[index].turnID == body.turnId {
+            if updated[index].model != metadata.model || updated[index].reasoningEffort != metadata.reasoningEffort {
+                updated[index].model = metadata.model
+                updated[index].reasoningEffort = metadata.reasoningEffort
+                changed = true
             }
+        }
+        if changed { storeMessages(updated, for: body.threadId) }
+    }
+
+    private func uploadRemoteStatus(_ taskID: String, body: RemoteTaskStatusBody, api: RemoteControlAPI) async {
+        guard remoteStatusOutbox.pending(deviceID: api.deviceID)[taskID] == body else { return }
+        do {
+            try await api.updateTask(taskID, body: body)
+            remoteStatusOutbox.acknowledge(deviceID: api.deviceID, taskID: taskID, body: body)
+        } catch {
+            if !Task.isCancelled { remoteControlStatus = "任务状态待补传，网络恢复后自动重试" }
         }
     }
 
     private func handleRemoteEvent(_ method: String, params: [String: Any], threadID: String) {
         guard var execution = remoteExecutions[threadID] else { return }
+        if method == "error", params["willRetry"] as? Bool == true { return }
         let eventTurnID = params["turnId"] as? String ?? (params["turn"] as? [String: Any])?["id"] as? String
         if let expected = execution.turnID, let eventTurnID, expected != eventTurnID { return }
         execution.progress.consume(method, params)
@@ -1585,18 +1863,19 @@ final class AppModel: ObservableObject {
         if method == "turn/completed" { flushPendingDeltas() }
         if method == "turn/started" {
             let turn = params["turn"] as? [String: Any]
-            if liveTurnMetadataByThread[eventThreadID] == nil,
-               eventThreadID == selectedThreadID {
-                liveTurnMetadataByThread[eventThreadID] = TurnModelMetadata(
-                    model: selectedModel?.model ?? selectedThread?.model,
-                    reasoningEffort: selectedEffort ?? selectedThread?.reasoningEffort
-                )
-            }
+            // External turns have no trustworthy composer settings. Leave the
+            // badge unknown until this exact turn's persisted context is read.
             setLocalTurnRunning(eventThreadID, turnID: turn?["id"] as? String)
             setThreadRunning(eventThreadID, running: true)
         } else if method == "turn/completed" {
+            let turn = params["turn"] as? [String: Any]
+            if let incomingID = turn?["id"] as? String,
+               let activeID = activeTurnIDsByThread[eventThreadID], incomingID != activeID { return }
             clearLocalTurn(eventThreadID)
             setThreadRunning(eventThreadID, running: false)
+            if let status = turn?["status"] as? String {
+                threadOutcomes[eventThreadID] = ConversationOutcome(rawValue: status)
+            }
         }
 
         handleRemoteEvent(method, params: params, threadID: eventThreadID)
@@ -1608,6 +1887,9 @@ final class AppModel: ObservableObject {
             self.eventThreadID = nil
             self.eventBuffer = nil
             storeMessages(updated, for: eventThreadID)
+            if method == "turn/completed" || (method == "error" && params["willRetry"] as? Bool != true) {
+                liveTurnMetadataByThread.removeValue(forKey: eventThreadID)
+            }
         }
 
         switch method {

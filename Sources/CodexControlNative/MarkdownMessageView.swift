@@ -84,7 +84,8 @@ private struct MarkdownBlocksView: View, Equatable {
         if expandsHorizontally {
             content.frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            content.fixedSize(horizontal: true, vertical: false)
+            // Keep short text compact, but still honor the available width.
+            content.fixedSize(horizontal: false, vertical: true)
         }
     }
 

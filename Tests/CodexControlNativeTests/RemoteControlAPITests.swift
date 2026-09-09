@@ -55,5 +55,7 @@ final class RemoteControlAPITests: XCTestCase {
         XCTAssertTrue(AppModel.shouldDeferRemoteTask(RemoteControlError.server("这个会话正在 Codex 中运行，请稍后重试。")))
         XCTAssertTrue(AppModel.shouldDeferRemoteTask(RemoteControlError.server("这个会话正在执行其他任务，请稍后重试。")))
         XCTAssertFalse(AppModel.shouldDeferRemoteTask(RemoteControlError.server("会话与工作区不匹配。")))
+        XCTAssertEqual(AppModel.remoteWaitReason(RemoteControlError.server("thread already has an active writer")), "writer_busy")
+        XCTAssertEqual(AppModel.remoteWaitReason(RemoteControlError.server("这个会话正在执行其他任务")), "thread_busy")
     }
 }

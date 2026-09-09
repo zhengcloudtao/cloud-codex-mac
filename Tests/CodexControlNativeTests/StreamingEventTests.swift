@@ -436,8 +436,8 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isExternalThreadProcessing)
         XCTAssertTrue(model.isSelectedThreadProcessing)
-        model.composerText = "不应重复发送"
-        XCTAssertFalse(model.canSend)
+        model.composerText = "执行中可提交到等待队列"
+        XCTAssertTrue(model.canSend)
     }
 
     func testSwitchingAwayFromRunningThreadDoesNotShowThinkingOnIdleThread() throws {

@@ -168,10 +168,8 @@ final class AppServerClient {
               let thread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
-        // thread/read loads the persistent thread into this app-server process.
-        // Remember that ownership so a later send does not issue a redundant
-        // thread/resume and collide with this process's own active writer.
-        loadedThreadIDs.insert(thread.id)
+        // thread/read is read-only and does not acquire a writer. Only successful
+        // thread/start or thread/resume may populate loadedThreadIDs.
         let turnsResult = try await request(
             "thread/turns/list",
             params: [
@@ -188,6 +186,35 @@ final class AppServerClient {
         return (thread, messages)
     }
 
+    /// Read-only reconciliation of exact persisted turns, never resume/start/interrupt.
+    func readRemoteRecovery(_ tasks: [RemoteRecoveryTask]) async throws -> [String: RemoteTaskStatusBody] {
+        guard let first = tasks.first else { return [:] }
+        let state = try await readThreadState(first.threadId)
+        guard tasks.allSatisfy({ $0.threadId == first.threadId && $0.workspace == state.cwd }) else {
+            throw RemoteControlError.server("待核对任务的会话工作区不匹配")
+        }
+        var pending = tasks.filter { !$0.turnId.isEmpty }
+        var updates: [String: RemoteTaskStatusBody] = [:]
+        var cursor: String?
+        var seen: Set<String> = []
+        // Bounded requests. Missing/unsupported/active turns remain running, never guessed failed.
+        for _ in 0..<20 where !pending.isEmpty {
+            try Task.checkCancellation()
+            var params: JSON = ["threadId": first.threadId, "limit": 50, "itemsView": "summary", "sortDirection": "desc"]
+            if let cursor { params["cursor"] = cursor }
+            let page = try await request("thread/turns/list", params: params)
+            guard let turns = page["data"] as? [JSON] else { throw CodexClientError.invalidResponse }
+            for turn in turns {
+                let matched = pending.filter { $0.turnId == turn["id"] as? String }
+                for task in matched { updates[task.taskId] = task.terminalUpdate(from: turn) }
+                pending.removeAll { $0.turnId == turn["id"] as? String }
+            }
+            guard let next = page["nextCursor"] as? String, !next.isEmpty, seen.insert(next).inserted else { break }
+            cursor = next
+        }
+        return updates
+    }
+
     func readRemoteHistory(_ read: RemoteHistoryRead) async throws -> RemoteHistoryPage {
         let state = try await readThreadState(read.threadId)
         guard state.cwd == read.workspace else { throw RemoteControlError.server("会话工作区不匹配") }
@@ -197,6 +224,15 @@ final class AppServerClient {
         let ids = Set((response["data"] as? [JSON] ?? []).compactMap { $0["id"] as? String })
         let metadata = await readTurnModelMetadata(for: state, turnIDs: ids)
         return Self.remoteHistoryPage(response, metadata: metadata)
+    }
+
+    /// The relay's actual model is sourced only from the exact persisted turn,
+    /// never from a request, thread summary, or the currently selected composer.
+    func withActualTurnSettings(_ body: RemoteTaskStatusBody) async -> RemoteTaskStatusBody {
+        guard !body.threadId.isEmpty, !body.turnId.isEmpty,
+              let thread = try? await readThreadState(body.threadId) else { return body }
+        let metadata = await readTurnModelMetadata(for: thread, turnIDs: [body.turnId])
+        return body.withActualSettings(metadata[body.turnId])
     }
 
     nonisolated static func remoteHistoryPage(_ response: JSON, metadata: [String: TurnModelMetadata] = [:]) -> RemoteHistoryPage {
@@ -239,7 +275,6 @@ final class AppServerClient {
               let thread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
-        loadedThreadIDs.insert(thread.id)
         return thread
     }
 
@@ -432,6 +467,14 @@ final class AppServerClient {
         )
     }
 
+    func steerTurn(threadID: String, turnID: String, text: String, attachments: [ComposerAttachment]) async throws {
+        var input: [JSON] = text.isEmpty ? [] : [["type": "text", "text": text]]
+        input.append(contentsOf: attachments.map(\.userInput))
+        _ = try await request("turn/steer", params: [
+            "threadId": threadID, "expectedTurnId": turnID, "input": input
+        ])
+    }
+
     private func request(_ method: String, params: JSON) async throws -> JSON {
         guard process?.isRunning == true, input != nil else {
             throw CodexClientError.notRunning
@@ -492,6 +535,7 @@ final class AppServerClient {
 
     private func handleTermination(_ status: Int32) {
         connected = false
+        loadedThreadIDs.removeAll()
         let error = CodexClientError.process("Codex 本地服务已退出（状态码 \(status)）")
         let callbacks = pending.values
         pending.removeAll()

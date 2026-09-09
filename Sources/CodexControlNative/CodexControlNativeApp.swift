@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct CloudCodexApp: App {
     @StateObject private var model = AppModel()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup("CloudCodex") {
@@ -16,6 +17,9 @@ struct CloudCodexApp: App {
         }
         .defaultSize(width: 1220, height: 780)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("关于 CloudCodex") { openWindow(id: "about-cloudcodex") }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("新建会话", action: model.prepareNewThread)
                     .keyboardShortcut("n")
@@ -25,5 +29,10 @@ struct CloudCodexApp: App {
                     .keyboardShortcut("r")
             }
         }
+        Window("关于 CloudCodex", id: "about-cloudcodex") {
+            AboutCloudCodexView()
+        }
+        .defaultSize(width: 620, height: 700)
+        .windowResizability(.contentMinSize)
     }
 }

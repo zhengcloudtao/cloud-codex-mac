@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.openWindow) private var openWindow
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var threadListScrollID: String?
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
@@ -16,7 +17,12 @@ struct ContentView: View {
             threadList
                 .navigationSplitViewColumnWidth(min: 280, ideal: 330, max: 430)
         } detail: {
-            conversation
+            // Detail content accepts the column's width, never the other way
+            // around. Long prompts/code must not renegotiate the split view.
+            GeometryReader { viewport in
+                conversation
+                    .frame(width: viewport.size.width, height: viewport.size.height)
+            }
         }
         // A selected conversation can contain a wide code block or attachment.
         // Keep all three columns balanced instead of letting that detail content
@@ -37,23 +43,6 @@ struct ContentView: View {
         .onAppear(perform: applyAppearancePreference)
         .onChange(of: appearancePreference) { _, _ in
             applyAppearancePreference()
-        }
-        // CloudCodex is intentionally a three-column workspace. macOS can
-        // opportunistically collapse the workspace column while the detail
-        // view is replaced for a newly selected conversation; restore the
-        // complete workspace immediately instead of leaving a narrow strip.
-        .onChange(of: model.selectedThreadID) { _, _ in
-            restoreThreeColumnLayout()
-        }
-        .onChange(of: columnVisibility) { _, _ in
-            restoreThreeColumnLayout()
-        }
-    }
-
-    private func restoreThreeColumnLayout() {
-        guard columnVisibility != .all else { return }
-        DispatchQueue.main.async {
-            columnVisibility = .all
         }
     }
 
@@ -425,9 +414,10 @@ struct ContentView: View {
                 LazyVStack(spacing: 6) {
                     ForEach(model.visibleThreads) { thread in
                         Button {
-                            selectThreadPreservingListPosition(thread.id)
+                            model.selectThread(thread.id)
                         } label: {
-                            ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id)
+                            ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id,
+                                      outcome: model.conversationOutcome(for: thread))
                                 .background(
                                     model.selectedThreadID == thread.id ? Color.accentColor : .clear,
                                     in: RoundedRectangle(cornerRadius: 10)
@@ -465,21 +455,6 @@ struct ContentView: View {
                         .padding(.vertical, 7)
                         .background(.bar)
                 }
-            }
-        }
-    }
-
-    private func selectThreadPreservingListPosition(_ id: String) {
-        let visibleAnchor = threadListScrollID
-        model.selectThread(id)
-        // Conversation loading replaces the detail subtree asynchronously. Give
-        // SwiftUI that update a layout pass, then restore the same top-visible
-        // row instead of accepting a reset-to-top from the scroll container.
-        guard let visibleAnchor else { return }
-        DispatchQueue.main.async {
-            threadListScrollID = nil
-            DispatchQueue.main.async {
-                threadListScrollID = visibleAnchor
             }
         }
     }
@@ -540,6 +515,12 @@ struct ContentView: View {
                 Label("个性设置", systemImage: "paintpalette")
             }
             .help("个性设置：选择外观模式")
+            Button {
+                openWindow(id: "about-cloudcodex")
+            } label: {
+                Label("关于 CloudCodex", systemImage: "info.circle")
+            }
+            .help("关于 CloudCodex：功能与工作原理")
         }
     }
 
@@ -799,6 +780,7 @@ private struct NewThreadWorkspace: View {
 struct ThreadRow: View {
     let thread: CodexThread
     var isSelected = false
+    var outcome: ConversationOutcome? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -808,6 +790,16 @@ struct ThreadRow: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                ZStack(alignment: .trailing) {
+                    Color.clear
+                    if let outcome {
+                        Label(outcome.title, systemImage: outcome.symbol)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.white : outcomeColor)
+                            .help("最近一轮：\(outcome.title)")
+                    }
+                }
+                .frame(width: 64, alignment: .trailing)
             }
             .frame(height: 18)
             Text(thread.visiblePreview.replacingOccurrences(of: "\n", with: " "))
@@ -858,6 +850,16 @@ struct ThreadRow: View {
             return "\(elapsed / 86_400)天前"
         }
     }
+
+    private var outcomeColor: Color {
+        switch outcome {
+        case .completed: return .green
+        case .failed: return .red
+        case .interrupted: return .orange
+        case .running: return .blue
+        case nil: return .secondary
+        }
+    }
 }
 
 private struct ThreadStatusLight: View {
@@ -892,21 +894,24 @@ private struct ConversationHeader: View {
                 .frame(width: 36, height: 36)
                 .background(.black, in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 2) {
-                Text(thread.displayName).font(.headline).lineLimit(1)
+                Text(thread.displayName).font(.headline).lineLimit(1).truncationMode(.tail)
                 Text(thread.cwd)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Spacer()
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             if let model = thread.model {
                 Text(TurnModelMetadata(model: model, reasoningEffort: thread.reasoningEffort).displayLabel ?? model)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(.quaternary, in: Capsule())
+                    .frame(maxWidth: 190, alignment: .trailing)
             }
         }
         .padding(.horizontal, 18)
@@ -1245,14 +1250,8 @@ private struct MessageBubble: View, Equatable {
                             bubbleSurface {
                                 UserMessageContent(message: message)
                             }
-                            .fixedSize(horizontal: usesCompactUserBubble, vertical: false)
-
-                            HStack {
-                                Spacer(minLength: 0)
-                                MessageMetadataFooter(message: message)
-                            }
+                            MessageMetadataFooter(message: message)
                         }
-                        .fixedSize(horizontal: usesCompactUserBubble, vertical: false)
                     } else {
                         VStack(alignment: .leading, spacing: 6) {
                             bubbleSurface {
@@ -1271,8 +1270,7 @@ private struct MessageBubble: View, Equatable {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                    .fixedSize(horizontal: message.role == .user && usesCompactUserBubble, vertical: false)
-                    .frame(maxWidth: usesCompactUserBubble && message.role == .user ? nil : 720, alignment: .leading)
+                    .frame(maxWidth: 720, alignment: message.role == .user ? .trailing : .leading)
                 if message.role == .user {
                     Image(systemName: "person.fill")
                         .font(.caption.weight(.semibold))
@@ -1300,13 +1298,6 @@ private struct MessageBubble: View, Equatable {
             .padding(.vertical, 10)
             .foregroundStyle(.primary)
             .background(background, in: RoundedRectangle(cornerRadius: 13))
-    }
-
-    private var usesCompactUserBubble: Bool {
-        message.role == .user
-            && message.attachments.isEmpty
-            && !message.text.contains("\n")
-            && message.text.count <= 80
     }
 
 }
@@ -1473,7 +1464,9 @@ private struct UserMessageContent: View {
         }
 
         if usesCompactWidth {
-            content.fixedSize(horizontal: true, vertical: false)
+            // Compact does not mean unbounded: even 80 Chinese characters can
+            // be wider than the detail pane. Accept its proposal and wrap.
+            content.fixedSize(horizontal: false, vertical: true)
         } else {
             content.frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1618,11 +1611,14 @@ struct ConversationProcessView: View, Equatable {
     @State private var isExpanded = false
     @State private var isAtLatest = true
     @State private var logViewportID = UUID()
+    @State private var logContentHeight: CGFloat = 44
+    @State private var requestedLatest = false
 
     init(group: ConversationProcessGroup, isCurrent: Bool, initiallyExpanded: Bool = false) {
         self.group = group
         self.isCurrent = isCurrent
         _isExpanded = State(initialValue: initiallyExpanded)
+        _logContentHeight = State(initialValue: min(320, CGFloat(group.steps.count) * 34 + 20))
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -1707,10 +1703,10 @@ struct ConversationProcessView: View, Equatable {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(14)
                     }
-                    .frame(height: 120)
+                    .frame(height: 64)
                 } else {
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 2) {
                             if let progress = group.progress, progress.isFailedActivity {
                                 Text(progress.text)
                                     .font(.caption)
@@ -1726,10 +1722,18 @@ struct ConversationProcessView: View, Equatable {
                             }
                         }
                         .padding(10)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: ProcessContentHeightKey.self, value: geometry.size.height)
+                        })
                         .background(ScrollLatestObserver(isAtLatest: $isAtLatest))
                     }
-                    .defaultScrollAnchor(.bottom)
-                    .frame(height: min(320, max(180, CGFloat(steps.count) * 42 + 20)))
+                    .defaultScrollAnchor(requestedLatest ? .bottom : .top)
+                    .frame(height: min(320, max(1, logContentHeight)), alignment: .top)
+                    .clipped()
+                    .onPreferenceChange(ProcessContentHeightKey.self) { height in
+                        if height > 0, abs(logContentHeight - height) > 0.5 { logContentHeight = height }
+                    }
                     .id(logViewportID)
                     .accessibilityLabel("可滚动的执行过程")
 
@@ -1740,6 +1744,7 @@ struct ConversationProcessView: View, Equatable {
                         if !isAtLatest {
                             Button("最新步骤 ↓") {
                                 isAtLatest = true
+                                requestedLatest = true
                                 logViewportID = UUID()
                             }
                             .buttonStyle(.plain)
@@ -1755,6 +1760,13 @@ struct ConversationProcessView: View, Equatable {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+    }
+}
+
+private struct ProcessContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -1790,14 +1802,13 @@ private struct ActivityBubble: View {
                         .lineLimit(12)
                         .padding(.top, 9)
                 } else {
-                    ScrollView(.horizontal, showsIndicators: true) {
-                        Text(String(message.text.prefix(visibleDetailLimit)))
+                    Text(String(message.text.prefix(visibleDetailLimit)))
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, 9)
-                    }
                     if message.text.count > visibleDetailLimit {
                         Button("显示更多输出（还剩 \(message.text.count - visibleDetailLimit) 字符）") {
                             visibleDetailLimit += 8_000
@@ -1833,6 +1844,8 @@ private struct ActivityBubble: View {
         .background(Color.secondary.opacity(compact ? 0 : 0.07), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(compact ? Color.clear : Color.secondary.opacity(0.2)))
         .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .clipped()
     }
 
     private var liveDetail: String {
@@ -1913,6 +1926,47 @@ private struct Composer: View {
                     .frame(height: 82)
                 }
 
+                if mode == .conversation, !model.selectedWaitingMessages.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("等待发送 · \(model.selectedWaitingMessages.count)").font(.caption.weight(.semibold))
+                                .help("当前任务结束后按顺序发送。等待消息仅保留在本次应用运行期间，退出应用前请先处理。")
+                            ForEach(model.selectedWaitingMessages) { item in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(item.text.isEmpty ? "附件消息" : item.text).lineLimit(2)
+                                        if !item.attachments.isEmpty {
+                                            Text("\(item.attachments.count) 个附件").foregroundStyle(.secondary)
+                                        }
+                                        if let error = item.error {
+                                            Text(error).foregroundStyle(.orange).lineLimit(3)
+                                        }
+                                    }
+                                    Spacer()
+                                    if model.isSelectedThreadProcessing {
+                                        Button("立即引导") {
+                                            Task { await model.deliverWaitingMessage(item.id, steer: true) }
+                                        }
+                                        .help("将这条消息补充给正在执行的任务，沿用当前任务的模型。")
+                                    } else if item.error != nil {
+                                        Button("重试") {
+                                            Task { await model.deliverWaitingMessage(item.id, steer: false) }
+                                        }
+                                    }
+                                    Button { model.removeWaitingMessage(item.id) } label: {
+                                        Image(systemName: "xmark")
+                                    }.help("删除等待消息")
+                                }
+                                .font(.caption)
+                                .padding(8)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                                .disabled(model.deliveringWaitingMessages.contains(item.id))
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 150)
+                }
+
                 ComposerTextEditor(
                     text: composerText,
                     pasteImages: pasteImages,
@@ -1922,6 +1976,12 @@ private struct Composer: View {
                         minHeight: mode == .newThread ? 110 : 54,
                         maxHeight: mode == .newThread ? 200 : 120
                     )
+
+                if mode == .conversation, model.isExternalThreadProcessing {
+                    Label("Codex 中处理中", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 HStack(spacing: 12) {
                     Button(action: chooseAttachments) {
@@ -1943,12 +2003,6 @@ private struct Composer: View {
 
                     permissionMenu
 
-                    if mode == .conversation, model.isExternalThreadProcessing {
-                        Label("Codex 中处理中", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
                     Spacer(minLength: 18)
 
                     modelMenu
@@ -1962,12 +2016,23 @@ private struct Composer: View {
                     .buttonStyle(.plain)
                     .help(model.isRecording ? "停止语音输入" : "语音输入")
 
+                    if mode == .conversation, model.isSending, canSubmit {
+                        Button { Task { await model.cancelTurn() } } label: {
+                            Image(systemName: "stop.fill")
+                        }
+                        .help("停止当前任务")
+                        .disabled(model.activeTurnID == nil)
+                    }
+
                     Button {
                         submitOrCancel()
                     } label: {
                         Group {
                             if mode == .newThread, model.isCreatingThread {
                                 ProgressView().controlSize(.small)
+                            } else if mode == .conversation, canSubmit {
+                                Image(systemName: model.isSelectedThreadProcessing ? "text.badge.plus" : "arrow.up")
+                                    .font(.system(size: 17, weight: .semibold))
                             } else if mode == .conversation, model.isExternalThreadProcessing {
                                 ProgressView().controlSize(.small)
                             } else if mode == .conversation, model.isSending && model.activeTurnID == nil {
@@ -2034,6 +2099,8 @@ private struct Composer: View {
         if mode == .newThread {
             return model.isCreatingThread ? "正在创建会话" : "创建会话并发送（Return）"
         }
+        if canSubmit, model.isSelectedThreadProcessing { return "加入等待队列（Return），当前任务结束后发送" }
+        if canSubmit { return "发送（Return）" }
         if model.isExternalThreadProcessing { return "此任务正在 Codex 主应用中处理" }
         return model.isSending ? "停止当前任务" : "发送（Return）"
     }
@@ -2078,7 +2145,7 @@ private struct Composer: View {
     }
 
     private func submitOrCancel() {
-        if mode == .conversation, model.isSending {
+        if mode == .conversation, model.isSending, !canSubmit {
             Task { await model.cancelTurn() }
         } else {
             submit()
@@ -2176,7 +2243,7 @@ private struct Composer: View {
                 .layoutPriority(1)
         }
         .menuStyle(.borderlessButton)
-        .fixedSize(horizontal: true, vertical: false)
+        .frame(minWidth: 0, maxWidth: 240, alignment: .trailing)
         .accessibilityLabel(modelAndEffortAccessibilityLabel)
         .help("选择模型、推理强度和响应速度")
     }

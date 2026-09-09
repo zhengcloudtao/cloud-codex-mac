@@ -104,6 +104,10 @@ final class ConversationTimelineTests: XCTestCase {
         XCTAssertLessThan(collapsed.fittingSize.height, 80)
         XCTAssertGreaterThan(expanded.fittingSize.height, 320)
         XCTAssertLessThan(expanded.fittingSize.height, 430, "300 steps must scroll inside a bounded container")
+        let short = NSHostingView(rootView: ConversationProcessView(
+            group: .init(messages: [activity("single")]), isCurrent: false,
+            initiallyExpanded: true).frame(width: 600))
+        XCTAssertLessThan(short.fittingSize.height, 180, "A single collapsed step must not reserve a tall empty viewport")
         let failure = ChatMessage(id: "turn-progress", role: .activity, text: String(repeating: "错误详情\n", count: 1_000), activityStatus: "失败")
         let failed = NSHostingView(rootView: ConversationProcessView(group: .init(messages: [failure]), isCurrent: false, initiallyExpanded: true).frame(width: 600))
         XCTAssertLessThan(failed.fittingSize.height, 260, "long connection errors also need a bounded viewport")
