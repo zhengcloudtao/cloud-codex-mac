@@ -62,7 +62,7 @@ enum ConversationTimeline {
         }
 
         for message in messages {
-            if message.role != .activity {
+            if message.role != .activity || message.id.hasPrefix("connection-notice-") {
                 flush()
                 entries.append(.message(message))
             } else {

@@ -18,7 +18,10 @@ final class ComposerFocusTests: XCTestCase {
         container.addSubview(editor)
         container.addSubview(other)
         window.contentView = container
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        let deadline = Date().addingTimeInterval(1)
+        while window.firstResponder !== editor && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
         XCTAssertTrue(window.firstResponder === editor)
         XCTAssertTrue(window.makeFirstResponder(other))
         editor.requestFocus(request)

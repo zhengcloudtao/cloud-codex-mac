@@ -3,6 +3,9 @@ import Foundation
 
 @MainActor
 final class AppModel: ObservableObject {
+    let connectionHealth = ConnectionHealth()
+    @Published private(set) var accountOverview: AccountOverview?
+    @Published private(set) var accountOverviewError: String?
     @Published var threads: [CodexThread] = []
     @Published var folderCatalog: [WorkspaceFolder] = []
     @Published var selectedFolder: String?
@@ -10,6 +13,25 @@ final class AppModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var composerText = ""
     @Published private(set) var threadOutcomes: [String: ConversationOutcome] = [:]
+    @Published private(set) var unreadCompletions = UnreadCompletions()
+    private let unreadCompletionsKey = "cloudcodex.unreadCompletions.v1"
+
+    func markConversationRead(_ threadID: String) {
+        guard unreadCompletions.unread.contains(threadID) else { return }
+        unreadCompletions.markRead(threadID)
+        saveUnreadCompletions()
+    }
+
+    func recordCompletedConversation(_ threadID: String, turnID: String, viewed: Bool) {
+        unreadCompletions.complete(threadID: threadID, turnID: turnID, viewed: viewed)
+        saveUnreadCompletions()
+    }
+
+    private func saveUnreadCompletions() {
+        if let data = try? JSONEncoder().encode(unreadCompletions) {
+            remoteDefaults.set(data, forKey: unreadCompletionsKey)
+        }
+    }
 
     func conversationOutcome(for thread: CodexThread) -> ConversationOutcome? {
         if thread.status == "active" || locallyRunningThreadIDs.contains(thread.id) { return .running }
@@ -39,6 +61,7 @@ final class AppModel: ObservableObject {
     func beginEditingWaitingMessage(_ id: UUID) {
         guard editingWaitingMessageID == nil, !deliveringWaitingMessages.contains(id),
               let item = waitingMessages.first(where: { $0.id == id }) else { return }
+        speech.stop()
         waitingMessageEditText = item.text
         editingWaitingMessageID = id
     }
@@ -168,6 +191,7 @@ final class AppModel: ObservableObject {
     @Published var selectedPermissionID: String? = ":danger-full-access"
     @Published var attachments: [ComposerAttachment] = []
     @Published var isRecording = false
+    @Published var speechStatus = ""
     @Published var activeTurnID: String?
     @Published private(set) var workspaceOrganization = WorkspaceOrganization()
     @Published var showingCategoryManager = false
@@ -309,6 +333,10 @@ final class AppModel: ObservableObject {
         self.remoteDefaults = remoteDefaults
         self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
+        if let data = remoteDefaults.data(forKey: unreadCompletionsKey),
+           let saved = try? JSONDecoder().decode(UnreadCompletions.self, from: data) {
+            unreadCompletions = saved
+        }
         isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
         remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
         remotePairingCode = remoteDefaults.string(forKey: remotePairingCodeKey) ?? ""
@@ -325,6 +353,11 @@ final class AppModel: ObservableObject {
             }
         }
         speech.onRecordingChanged = { [weak self] recording in self?.isRecording = recording }
+        speech.onStatus = { [weak self] status in self?.speechStatus = status }
+        speech.currentDraft = { [weak self] in
+            guard let self else { return "" }
+            return self.speechTargetsNewThread ? self.newThreadPrompt : self.composerText
+        }
         speech.onError = { [weak self] message in self?.errorMessage = message }
     }
 
@@ -494,6 +527,16 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        connectionHealth.start { [weak self] in
+            guard let self else { throw CodexClientError.notRunning }
+            do {
+                self.accountOverview = try await self.client.readAccountOverview()
+                self.accountOverviewError = nil
+            } catch {
+                self.accountOverviewError = error.localizedDescription
+                throw error
+            }
+        }
         client.onEvent = { [weak self] method, params in self?.handleEvent(method, params) }
         client.onDisconnect = { [weak self] message in
             self?.connectionText = "未连接"
@@ -502,6 +545,7 @@ final class AppModel: ObservableObject {
         do {
             try await client.start()
             connectionText = "已连接本机 Codex"
+            Task { await connectionHealth.check() }
             await loadComposerOptions(cwd: nil)
             await loadFolderCatalog()
             await refreshThreads()
@@ -555,7 +599,15 @@ final class AppModel: ObservableObject {
             threadSummaries[thread.id] = updated
             return updated
         }
-        if threads != merged { threads = merged }
+        // Retained selected/running rows must follow the same recency rule;
+        // retaining a row does not pin it above a newer user request.
+        let ordered = merged.enumerated().sorted {
+            if $0.element.updatedAt != $1.element.updatedAt {
+                return $0.element.updatedAt > $1.element.updatedAt
+            }
+            return $0.offset < $1.offset
+        }.map(\.element)
+        if threads != ordered { threads = ordered }
     }
 
     private func startThreadStatusMonitor() {
@@ -575,7 +627,17 @@ final class AppModel: ObservableObject {
         do {
             let page = try await client.listThreads(limit: 60, cwd: requestedFolder)
             guard requestedFolder == selectedFolder else { return }
+            let ended = page.threads.filter { incoming in
+                incoming.status != "active" && threads.contains { $0.id == incoming.id && $0.status == "active" }
+            }
             applyThreadListSnapshot(page.threads)
+            for thread in ended {
+                guard let snapshot = try? await client.readLatestThreadActivity(thread.id, knownThread: thread),
+                      let turn = snapshot.turn, turn.status == "completed" else { continue }
+                threadOutcomes[thread.id] = .completed
+                recordCompletedConversation(thread.id, turnID: turn.id,
+                    viewed: selectedThreadID == thread.id && NSApp?.isActive == true)
+            }
         } catch {
             // Status lights are best-effort and must never interrupt the task.
         }
@@ -640,6 +702,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectFolder(_ path: String?) {
+        if path != selectedFolder { speech.stop() }
         if path != selectedFolder { cancelWaitingMessageEdit() }
         guard path != selectedFolder else { return }
         preserveSelectedConversation()
@@ -664,6 +727,8 @@ final class AppModel: ObservableObject {
     }
 
     func selectThread(_ id: String?) {
+        if let id { markConversationRead(id) }
+        if id != selectedThreadID { speech.stop() }
         if id != selectedThreadID { cancelWaitingMessageEdit() }
         guard id != selectedThreadID else { return }
         preserveSelectedConversation()
@@ -1143,6 +1208,7 @@ final class AppModel: ObservableObject {
     }
 
     func prepareNewThread() {
+        speech.stop()
         cancelWaitingMessageEdit()
         newThreadFocusRequest = UUID()
         if showingNewThread { return }
@@ -1901,6 +1967,10 @@ final class AppModel: ObservableObject {
     func handleEvent(_ method: String, _ params: [String: Any]) {
         guard let eventThreadID = params["threadId"] as? String else {
             if method == "error", let error = params["error"] as? [String: Any] {
+                if params["willRetry"] as? Bool == true {
+                    connectionText = error["message"] as? String ?? "正在重新连接 Codex"
+                    return
+                }
                 flushPendingDeltas()
                 if let selectedThreadID { clearLocalTurn(selectedThreadID) }
                 finishTurnProgress(status: "失败")
@@ -1929,6 +1999,10 @@ final class AppModel: ObservableObject {
             setThreadRunning(eventThreadID, running: false)
             if let status = turn?["status"] as? String {
                 threadOutcomes[eventThreadID] = ConversationOutcome(rawValue: status)
+                if status == "completed", let turnID = turn?["id"] as? String {
+                    recordCompletedConversation(eventThreadID, turnID: turnID,
+                        viewed: selectedThreadID == eventThreadID && NSApp?.isActive == true)
+                }
             }
         }
 
@@ -1943,6 +2017,16 @@ final class AppModel: ObservableObject {
             storeMessages(updated, for: eventThreadID)
             if method == "turn/completed" || (method == "error" && params["willRetry"] as? Bool != true) {
                 liveTurnMetadataByThread.removeValue(forKey: eventThreadID)
+            }
+        }
+
+        if method.hasPrefix("item/") || method == "turn/completed" {
+            for index in eventMessages.indices where eventMessages[index].id.hasPrefix("connection-notice-")
+                && eventMessages[index].activityStatus == "重连中" {
+                eventMessages[index].activityStatus = "已恢复"
+                eventMessages[index].activityTitle = "连接已恢复"
+                eventMessages[index].text = "已继续收到 Codex 的任务进度。"
+                eventMessages[index].isStreaming = false
             }
         }
 
@@ -2096,16 +2180,21 @@ final class AppModel: ObservableObject {
             }
         case "error":
             flushPendingDeltas()
+            let error = params["error"] as? [String: Any]
+            let message = error?["message"] as? String ?? "Codex 发生错误"
+            guard !Self.isOptionalActivityCapabilityError(message) else { break }
+            let retrying = params["willRetry"] as? Bool == true
+            let turnID = params["turnId"] as? String ?? activeTurnIDsByThread[eventThreadID] ?? "current"
+            upsertActivity(id: "connection-notice-\(turnID)", kind: .warning,
+                           title: retrying ? "连接中断，正在重试" : "任务发生错误",
+                           text: message, status: retrying ? "重连中" : "失败",
+                           isStreaming: retrying)
+            if retrying { break }
             clearLocalTurn(eventThreadID)
             if selectedThreadID == eventThreadID { isExternalThreadProcessing = false }
             setThreadRunning(eventThreadID, running: false)
             finishTurnProgress(status: "失败")
-            if let error = params["error"] as? [String: Any] {
-                let message = error["message"] as? String ?? "Codex 发生错误"
-                if !Self.isOptionalActivityCapabilityError(message) {
-                    errorMessage = message
-                }
-            }
+            threadOutcomes[eventThreadID] = .failed
         default:
             break
         }
@@ -2182,8 +2271,12 @@ final class AppModel: ObservableObject {
                            isStreaming: !completed)
         case "imageGeneration":
             upsertActivity(id: id, kind: .tool, title: "生成图片",
-                           text: "正在生成图像资源…", status: runningStatus,
+                           text: completed ? "图像生成已结束" : "正在生成图像资源…", status: runningStatus,
                            isStreaming: !completed)
+            if completed, let image = GeneratedImageMessage.fromItem(item),
+               !eventMessages.contains(where: { $0.id == image.id }) {
+                eventMessages.append(image)
+            }
         case "collabAgentToolCall":
             let tool = item["tool"] as? String ?? "协作任务"
             let prompt = item["prompt"] as? String ?? ""

@@ -234,13 +234,18 @@ private struct MarkdownTableCell: View {
 private struct MarkdownImage: View {
     let alt: String
     let target: String
+    private var localURL: URL? { ImagePreviewLink.localURL(target) }
 
     var body: some View {
         Group {
-            if target.hasPrefix("/"), let image = NSImage(contentsOfFile: target) {
+            if let url = localURL, let image = NSImage(contentsOf: url) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
+                    .onTapGesture { NSWorkspace.shared.open(url) }
+                    .accessibilityLabel(alt.isEmpty ? "图片预览" : alt)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { NSWorkspace.shared.open(url) }
             } else if let url = URL(string: target), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
                 AsyncImage(url: url) { phase in
                     if let image = phase.image {
@@ -262,7 +267,7 @@ private struct MarkdownImage: View {
     }
 
     private var imageFallback: some View {
-        Label(alt.isEmpty ? target : alt, systemImage: "photo")
+        Label("\(alt.isEmpty ? "图片" : alt) · 图片无法读取，请检查原文件是否仍在", systemImage: "photo")
             .font(.caption)
             .foregroundStyle(.secondary)
             .padding(12)
@@ -364,7 +369,21 @@ enum MarkdownBlockParser {
             index += 1
         }
         flushParagraph()
-        return blocks
+        var seen: Set<String> = []
+        return blocks.flatMap { block -> [MarkdownBlock] in
+            switch block {
+            case .image(_, let target):
+                seen.insert(ImagePreviewLink.localURL(target)?.path ?? target)
+                return [block]
+            case .paragraph(let text), .bullet(let text), .numbered(_, let text):
+                let previews = ImagePreviewLink.previews(in: text).filter { preview in
+                    guard case .image(_, let target) = preview else { return false }
+                    return seen.insert(target).inserted
+                }
+                return [block] + previews
+            default: return [block]
+            }
+        }
     }
 
     private static func parseHeading(_ line: String) -> MarkdownBlock? {
@@ -409,5 +428,30 @@ enum MarkdownBlockParser {
         if cells.first?.isEmpty == true { cells.removeFirst() }
         if cells.last?.isEmpty == true { cells.removeLast() }
         return cells
+    }
+}
+
+/// Preview only explicit local image links. Ordinary web links must not trigger
+/// background downloads, and paths in fenced code are not image instructions.
+enum ImagePreviewLink {
+    static func localURL(_ target: String) -> URL? {
+        var path = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.hasPrefix("<"), path.hasSuffix(">") { path = String(path.dropFirst().dropLast()) }
+        if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+        if let url = URL(string: path), url.isFileURL,
+           url.host == nil || url.host == "" || url.host == "localhost" { return url }
+        return nil
+    }
+
+    static func previews(in text: String) -> [MarkdownBlock] {
+        guard let regex = try? NSRegularExpression(pattern: #"(?<!!)\[([^\]]*)\]\((<[^>]+>|[^\n]+?)\)"#) else { return [] }
+        let ns = text as NSString
+        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            let label = ns.substring(with: match.range(at: 1))
+            let target = ns.substring(with: match.range(at: 2))
+            guard let url = localURL(target),
+                  ["png", "jpg", "jpeg", "webp", "gif", "heic", "tif", "tiff", "bmp", "icns"].contains(url.pathExtension.lowercased()) else { return nil }
+            return .image(alt: label, target: url.path)
+        }
     }
 }

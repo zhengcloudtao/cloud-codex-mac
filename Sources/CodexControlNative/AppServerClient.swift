@@ -101,6 +101,9 @@ final class AppServerClient {
     func readRemoteUsage() async throws -> RemoteUsageSnapshot {
         RemoteUsageSnapshot.parse(try await request("account/rateLimits/read", params: [:]))
     }
+    func readAccountOverview() async throws -> AccountOverview {
+        AccountOverview.parse(try await request("account/rateLimits/read", params: [:]))
+    }
 
     func consumeRemoteReset(_ attempt: RemoteResetAttempt) async throws -> String {
         let snapshot = try await request("account/rateLimits/read", params: [:])
@@ -120,19 +123,24 @@ final class AppServerClient {
     }
 
     func listThreads(limit: Int = 60, cwd: String? = nil) async throws -> ThreadPage {
-        var params: JSON = [
-            "limit": limit,
-            "sortKey": "updated_at",
-            "sortDirection": "desc",
-            "useStateDbOnly": true
-        ]
-        if let cwd { params["cwd"] = cwd }
-        let result = try await request("thread/list", params: params)
+        let result = try await request("thread/list", params: Self.threadListParameters(limit: limit, cwd: cwd))
         let rows = result["data"] as? [JSON] ?? []
         return ThreadPage(
             threads: rows.compactMap(CodexThread.init(json:)),
             hasMore: result["nextCursor"] is String
         )
+    }
+
+    static func threadListParameters(limit: Int = 60, cwd: String? = nil) -> JSON {
+        var params: JSON = [
+            "limit": limit,
+            // User-message recency, not assistant output or completion time.
+            "sortKey": "recency_at",
+            "sortDirection": "desc",
+            "useStateDbOnly": true
+        ]
+        if let cwd { params["cwd"] = cwd }
+        return params
     }
 
     func listWorkspaceFolders(limit: Int = 200) async throws -> [WorkspaceFolder] {
@@ -736,6 +744,8 @@ final class AppServerClient {
                         activityTitle: "搜索网页",
                         activityStatus: "已完成"
                     ))
+                case "imageGeneration":
+                    if let image = GeneratedImageMessage.fromItem(item) { messages.append(image) }
                 case "imageView":
                     messages.append(.init(
                         id: id,

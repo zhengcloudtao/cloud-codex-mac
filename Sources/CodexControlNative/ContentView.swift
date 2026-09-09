@@ -6,8 +6,11 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var threadListScrollID: String?
+    @State private var filePreview: LocalFilePreviewTarget?
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
     @AppStorage("cloudcodex.showConversationPreview") private var showConversationPreview = true
+    @AppStorage("cloudcodex.showUnreadCompletionDot") private var showUnreadCompletionDot = true
+    @AppStorage("cloudcodex.showUnreadDockBadge") private var showUnreadDockBadge = true
     private let categoryDragPrefix = "cloudcodex-category://"
 
     var body: some View {
@@ -30,6 +33,14 @@ struct ContentView: View {
         // compress the workspace/sidebar columns during selection.
         .navigationSplitViewStyle(.balanced)
         .toolbar { toolbar }
+        .environment(\.openURL, OpenURLAction { url in
+            guard let target = LocalFilePreviewTarget.resolve(url, cwd: model.selectedThread?.cwd ?? model.selectedFolder) else {
+                return .systemAction
+            }
+            filePreview = target
+            return .handled
+        })
+        .sheet(item: $filePreview) { LocalFilePreviewSheet(target: $0) }
         .sheet(isPresented: $model.showingAppearanceSettings) { appearanceSettingsSheet }
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
@@ -42,6 +53,9 @@ struct ContentView: View {
             Text(model.errorMessage ?? "未知错误")
         }
         .onAppear(perform: applyAppearancePreference)
+        .onAppear(perform: updateUnreadDockBadge)
+        .onChange(of: model.unreadCompletions.unread) { _, _ in updateUnreadDockBadge() }
+        .onChange(of: showUnreadDockBadge) { _, _ in updateUnreadDockBadge() }
         .onChange(of: appearancePreference) { _, _ in
             applyAppearancePreference()
         }
@@ -64,6 +78,11 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             model.showingAppearanceSettings = true
         }
+    }
+
+    private func updateUnreadDockBadge() {
+        let count = model.unreadCompletions.unread.count
+        NSApp.dockTile.badgeLabel = showUnreadDockBadge && count > 0 ? String(count) : nil
     }
 
     private var folderSidebar: some View {
@@ -118,15 +137,7 @@ struct ContentView: View {
         .listStyle(.sidebar)
         .environment(\.defaultMinListRowHeight, 0)
         .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(model.connectionText.hasPrefix("已连接") ? .green : .orange)
-                    .frame(width: 7, height: 7)
-                Text(model.connectionText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
+            ConnectionHealthView(health: model.connectionHealth, localStatus: model.connectionText)
             .padding(12)
             .background(.bar)
         }
@@ -422,7 +433,8 @@ struct ContentView: View {
                         } label: {
                             ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id,
                                       outcome: model.conversationOutcome(for: thread),
-                                      showPreview: showConversationPreview)
+                                      showPreview: showConversationPreview,
+                                      hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id))
                                 .background(
                                     model.selectedThreadID == thread.id ? Color.accentColor : .clear,
                                     in: RoundedRectangle(cornerRadius: 10)
@@ -494,6 +506,10 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            AccountOverviewView()
+                .frame(maxWidth: 420)
+        }
         ToolbarItemGroup {
             Button {
                 Task { await model.refreshThreads() }
@@ -567,6 +583,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("显示会话摘要", isOn: $showConversationPreview)
                     .toggleStyle(.switch)
+                Toggle("显示已完成未查看红点", isOn: $showUnreadCompletionDot)
+                    .toggleStyle(.switch)
+                Toggle("Dock 显示未查看会话数量", isOn: $showUnreadDockBadge)
+                    .toggleStyle(.switch)
                 Text("控制会话列表中标题下方的内容预览。关闭后列表更紧凑，不影响会话正文与搜索。设置自动保存。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -576,6 +596,59 @@ struct ContentView: View {
         .frame(width: 360)
     }
 
+}
+
+private struct ConnectionHealthView: View {
+    @ObservedObject var health: ConnectionHealth
+    let localStatus: String
+    @State private var expanded = false
+    var body: some View {
+        statusButton
+            .popover(isPresented: $expanded) { connectionDetails }
+    }
+
+    private var statusButton: some View {
+        Button { expanded.toggle() } label: {
+            HStack(spacing: 12) {
+                indicator("本机", available: localStatus.hasPrefix("已连接"))
+                indicator("网络", available: health.networkAvailable == true)
+                indicator("GPT", available: health.serviceReachable)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up").font(.system(size: 8, weight: .semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(localStatus) · \(health.networkText) · \(health.serviceText)\n点击查看连接详情")
+        .font(.caption2)
+    }
+
+    private var connectionDetails: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("连接状态").font(.headline)
+                Label(localStatus, systemImage: "desktopcomputer")
+                Label(health.networkText, systemImage: "network")
+                Label(health.serviceText, systemImage: "checkmark.shield")
+                Divider()
+                Text(health.detail).font(.caption).foregroundStyle(.secondary)
+                if let date = health.checkedAt {
+                    Text("检测时间：" + date.formatted(date: .omitted, time: .standard))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button(health.isChecking ? "正在检测…" : "重新检测") { Task { await health.check() } }
+                    .disabled(health.isChecking || health.networkAvailable != true)
+            }
+            .padding(18).frame(width: 310)
+    }
+
+    private func indicator(_ title: String, available: Bool) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(available ? Color.green : Color.orange).frame(width: 6, height: 6)
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+        }
+        .accessibilityLabel(title + (available ? "已连接或接口可访问" : "待检测或不可用，查看详情"))
+    }
 }
 
 private struct RemoteControlSheet: View {
@@ -795,11 +868,19 @@ struct ThreadRow: View {
     var isSelected = false
     var outcome: ConversationOutcome? = nil
     var showPreview = true
+    var hasUnreadCompletion = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
-                ThreadStatusLight(isRunning: thread.status == "active")
+                ZStack {
+                    ThreadStatusLight(isRunning: thread.status == "active")
+                    if hasUnreadCompletion {
+                        Circle().fill(.red).frame(width: 7, height: 7)
+                            .accessibilityLabel("已完成，尚未查看")
+                            .help("已完成，尚未查看；点击会话清除")
+                    }
+                }
                 Text(thread.displayName)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
@@ -1795,6 +1876,7 @@ private struct ActivityBubble: View {
     init(message: ChatMessage, compact: Bool = false) {
         self.message = message
         self.compact = compact
+        _isExpanded = State(initialValue: message.id.hasPrefix("connection-notice-"))
     }
 
     var body: some View {
@@ -2002,6 +2084,12 @@ private struct Composer: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if !model.speechStatus.isEmpty {
+                    Label(model.speechStatus, systemImage: model.isRecording ? "waveform" : "mic")
+                        .font(.caption)
+                        .foregroundStyle(model.isRecording ? Color.blue : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if isEditingWaiting {
                     HStack {
                         Text("正在编辑待发送消息 · 已暂停发送")
