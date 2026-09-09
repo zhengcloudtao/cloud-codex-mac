@@ -636,7 +636,7 @@ final class AppModel: ObservableObject {
                       let turn = snapshot.turn, turn.status == "completed" else { continue }
                 threadOutcomes[thread.id] = .completed
                 recordCompletedConversation(thread.id, turnID: turn.id,
-                    viewed: selectedThreadID == thread.id && NSApp?.isActive == true)
+                    viewed: selectedThreadID == thread.id)
             }
         } catch {
             // Status lights are best-effort and must never interrupt the task.
@@ -2001,7 +2001,7 @@ final class AppModel: ObservableObject {
                 threadOutcomes[eventThreadID] = ConversationOutcome(rawValue: status)
                 if status == "completed", let turnID = turn?["id"] as? String {
                     recordCompletedConversation(eventThreadID, turnID: turnID,
-                        viewed: selectedThreadID == eventThreadID && NSApp?.isActive == true)
+                        viewed: selectedThreadID == eventThreadID)
                 }
             }
         }

@@ -39,4 +39,30 @@ final class UnreadCompletionTests: XCTestCase {
         restored.recordCompletedConversation("one", turnID: "a", viewed: false)
         XCTAssertTrue(restored.unreadCompletions.unread.isEmpty)
     }
+
+    @MainActor
+    func testSelectedConversationCompletionIsAlreadyViewed() {
+        let model = AppModel()
+        model.selectedThreadID = "one"
+        model.handleEvent("turn/started", [
+            "threadId": "one", "turn": ["id": "turn-one"]
+        ])
+        model.handleEvent("turn/completed", [
+            "threadId": "one", "turn": ["id": "turn-one", "status": "completed"]
+        ])
+        XCTAssertFalse(model.unreadCompletions.unread.contains("one"))
+    }
+
+    @MainActor
+    func testUnselectedConversationCompletionRemainsUnread() {
+        let model = AppModel()
+        model.selectedThreadID = "one"
+        model.handleEvent("turn/started", [
+            "threadId": "two", "turn": ["id": "turn-two"]
+        ])
+        model.handleEvent("turn/completed", [
+            "threadId": "two", "turn": ["id": "turn-two", "status": "completed"]
+        ])
+        XCTAssertTrue(model.unreadCompletions.unread.contains("two"))
+    }
 }
