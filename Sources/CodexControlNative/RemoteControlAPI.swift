@@ -191,6 +191,15 @@ final class RemoteControlAPI: @unchecked Sendable {
         let data = try await perform(path: "/api/cloud-codex/agent/history/next", method: "GET", bodyData: nil)
         return try Self.decodeOptionalEnvelope(RemoteHistoryRead.self, data: data)
     }
+    func nextReset() async throws -> RemoteResetAttempt? {
+        let data = try await perform(path: "/api/cloud-codex/agent/resets/next", method: "GET", bodyData: nil)
+        return try Self.decodeOptionalEnvelope(RemoteResetAttempt.self, data: data)
+    }
+    func finishReset(_ id: String, status: String) async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/resets/\(id)", method: "POST", bodyData: JSONEncoder().encode(["status": status]))
+        let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
+    }
     func finishHistory(_ id: String, body: RemoteHistoryResponse) async throws {
         let data = try await perform(path: "/api/cloud-codex/agent/history/\(id)", method: "POST", bodyData: JSONEncoder().encode(body))
         let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)

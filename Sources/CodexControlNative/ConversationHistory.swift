@@ -6,13 +6,26 @@ enum ConversationHistory {
     static func merge(snapshot: [ChatMessage], cached: [ChatMessage]) -> [ChatMessage] {
         // A local user bubble becomes the server item, not a second question.
         let confirmedUsers = snapshot.filter { $0.role == .user && $0.turnID != nil }
+        var matchedSteerIDs: Set<String> = []
         var result = cached.map { old in
+            if old.id.hasPrefix("local-steer-") {
+                if let confirmed = confirmedUsers.first(where: {
+                    $0.turnID == old.turnID && $0.text == old.text && $0.attachments == old.attachments
+                        && !matchedSteerIDs.contains($0.id)
+                }) {
+                    matchedSteerIDs.insert(confirmed.id)
+                    return confirmed
+                }
+                return old
+            }
             if old.id.hasPrefix("local-"), let turnID = old.turnID,
                let confirmed = confirmedUsers.first(where: { $0.turnID == turnID }) {
                 return confirmed
             }
             return old
         }
+        var seen: Set<String> = []
+        result = result.filter { seen.insert($0.id).inserted }
         for (offset, incoming) in snapshot.enumerated() {
             if let index = result.firstIndex(where: { $0.id == incoming.id }) {
                 let old = result[index]

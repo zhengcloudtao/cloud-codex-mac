@@ -102,6 +102,23 @@ final class AppServerClient {
         RemoteUsageSnapshot.parse(try await request("account/rateLimits/read", params: [:]))
     }
 
+    func consumeRemoteReset(_ attempt: RemoteResetAttempt) async throws -> String {
+        let snapshot = try await request("account/rateLimits/read", params: [:])
+        let summary = snapshot["rateLimitResetCredits"] as? JSON
+        let credits = summary?["credits"] as? [JSON] ?? []
+        guard let credit = credits.first(where: { row in
+            guard let id = row["id"] as? String else { return false }
+            return RemoteUsageSnapshot.creditReference(id) == attempt.creditRef
+        }), let id = credit["id"] as? String else { return "unavailable" }
+        if credit["status"] as? String == "redeemed" { return "alreadyRedeemed" }
+        if let expiry = (credit["expiresAt"] as? NSNumber)?.doubleValue, expiry <= Date().timeIntervalSince1970 { return "expired" }
+        guard credit["resetType"] as? String == "codexRateLimits" else { return "unavailable" }
+        let response = try await request("account/rateLimitResetCredit/consume", params: ["creditId": id, "idempotencyKey": attempt.id])
+        guard let outcome = response["outcome"] as? String,
+              ["reset", "alreadyRedeemed", "nothingToReset", "noCredit"].contains(outcome) else { throw CodexClientError.invalidResponse }
+        return outcome
+    }
+
     func listThreads(limit: Int = 60, cwd: String? = nil) async throws -> ThreadPage {
         var params: JSON = [
             "limit": limit,

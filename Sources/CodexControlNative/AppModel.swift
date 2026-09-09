@@ -18,7 +18,7 @@ final class AppModel: ObservableObject {
     struct WaitingMessage: Identifiable {
         let id = UUID()
         let threadID: String
-        let text: String
+        var text: String
         let attachments: [ComposerAttachment]
         let model: String?
         let effort: String?
@@ -28,6 +28,33 @@ final class AppModel: ObservableObject {
     }
     @Published var waitingMessages: [WaitingMessage] = []
     @Published private(set) var deliveringWaitingMessages: Set<UUID> = []
+    @Published private(set) var editingWaitingMessageID: UUID?
+    @Published var waitingMessageEditText = ""
+
+    var canSaveWaitingMessageEdit: Bool {
+        guard let item = waitingMessages.first(where: { $0.id == editingWaitingMessageID }) else { return false }
+        return !waitingMessageEditText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !item.attachments.isEmpty
+    }
+
+    func beginEditingWaitingMessage(_ id: UUID) {
+        guard editingWaitingMessageID == nil, !deliveringWaitingMessages.contains(id),
+              let item = waitingMessages.first(where: { $0.id == id }) else { return }
+        waitingMessageEditText = item.text
+        editingWaitingMessageID = id
+    }
+
+    func cancelWaitingMessageEdit() {
+        editingWaitingMessageID = nil
+        waitingMessageEditText = ""
+    }
+
+    func saveWaitingMessageEdit() {
+        guard canSaveWaitingMessageEdit,
+              let index = waitingMessages.firstIndex(where: { $0.id == editingWaitingMessageID }) else { return }
+        waitingMessages[index].text = waitingMessageEditText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Preserve any delivery error: editing alone must not silently retry a failed request.
+        cancelWaitingMessageEdit()
+    }
     private var waitingMonitor: Task<Void, Never>?
 
     var selectedWaitingMessages: [WaitingMessage] {
@@ -36,6 +63,7 @@ final class AppModel: ObservableObject {
 
     func removeWaitingMessage(_ id: UUID) {
         guard !deliveringWaitingMessages.contains(id) else { return }
+        if editingWaitingMessageID == id { cancelWaitingMessageEdit() }
         waitingMessages.removeAll { $0.id == id }
     }
 
@@ -54,7 +82,7 @@ final class AppModel: ObservableObject {
                 for threadID in Set(self.waitingMessages.map(\.threadID)) {
                     guard !self.locallyRunningThreadIDs.contains(threadID),
                           let first = self.waitingMessages.first(where: { $0.threadID == threadID }),
-                          first.error == nil else { continue }
+                          first.error == nil, first.id != self.editingWaitingMessageID else { continue }
                     do {
                         let state = try await self.client.readThreadState(threadID)
                         if state.status == "idle" { await self.deliverWaitingMessage(first.id, steer: false) }
@@ -67,7 +95,8 @@ final class AppModel: ObservableObject {
     }
 
     func deliverWaitingMessage(_ messageID: UUID, steer: Bool) async {
-        guard let item = waitingMessages.first(where: { $0.id == messageID }),
+        guard messageID != editingWaitingMessageID,
+              let item = waitingMessages.first(where: { $0.id == messageID }),
               !waitingMessages.contains(where: { $0.threadID == item.threadID && deliveringWaitingMessages.contains($0.id) }) else { return }
         deliveringWaitingMessages.insert(messageID)
         defer { deliveringWaitingMessages.remove(messageID) }
@@ -79,6 +108,7 @@ final class AppModel: ObservableObject {
                 }
                 try await client.steerTurn(threadID: item.threadID, turnID: turn.id,
                                            text: item.text, attachments: item.attachments)
+                recordSteeredMessage(item, turnID: turn.id)
             } else {
                 let state = try await client.readThreadState(item.threadID)
                 guard state.status == "idle", !locallyRunningThreadIDs.contains(item.threadID) else { return }
@@ -106,6 +136,16 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    func recordSteeredMessage(_ item: WaitingMessage, turnID: String) {
+        let message = ChatMessage(id: "local-steer-\(item.id)", role: .user, text: item.text,
+            attachments: item.attachments.map {
+                ChatMessageAttachment(path: $0.url.path, name: $0.url.lastPathComponent, kind: $0.isImage ? .image : .file)
+            }, timestamp: Date(), turnID: turnID)
+        var history = conversationMessages(for: item.threadID)
+        guard !history.contains(where: { $0.id == message.id }) else { return }
+        history.append(message)
+        storeMessages(history, for: item.threadID)
+    }
     @Published var searchText = ""
     @Published var connectionText = "正在连接…"
     @Published var isLoading = false
@@ -115,6 +155,7 @@ final class AppModel: ObservableObject {
     @Published var hasMoreThreads = false
     @Published var errorMessage: String?
     @Published var showingNewThread = false
+    @Published private(set) var newThreadFocusRequest = UUID()
     @Published var newThreadFolder = ""
     @Published var newThreadPrompt = ""
     @Published var newThreadAttachments: [ComposerAttachment] = []
@@ -599,6 +640,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectFolder(_ path: String?) {
+        if path != selectedFolder { cancelWaitingMessageEdit() }
         guard path != selectedFolder else { return }
         preserveSelectedConversation()
         if showingNewThread { cancelNewThread() }
@@ -622,6 +664,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectThread(_ id: String?) {
+        if id != selectedThreadID { cancelWaitingMessageEdit() }
         guard id != selectedThreadID else { return }
         preserveSelectedConversation()
         if showingNewThread { cancelNewThread() }
@@ -1100,6 +1143,8 @@ final class AppModel: ObservableObject {
     }
 
     func prepareNewThread() {
+        cancelWaitingMessageEdit()
+        newThreadFocusRequest = UUID()
         if showingNewThread { return }
         newThreadFolder = selectedFolder
             ?? selectedThread?.cwd
@@ -1360,7 +1405,16 @@ final class AppModel: ObservableObject {
                 remoteHistoryTask = Task { [weak self] in
                 guard let self else { return }
                 defer { self.remoteHistoryTask = nil }
-                // This is a read-only relay, never a turn/start or thread/resume task.
+                // Account resets are explicit confirmed commands, separate from development turns.
+                do {
+                    if let attempt = try await api.nextReset(), self.remoteControlEnabled, !Task.isCancelled {
+                        let outcome = try await self.client.consumeRemoteReset(attempt)
+                        try await api.finishReset(attempt.id, status: outcome)
+                        self.remoteUsageSnapshot = (try? await self.client.readRemoteUsage()) ?? .unavailable()
+                        self.remoteUsageLastAttempt = Date()
+                    }
+                } catch { /* Keep the durable attempt for retry with the same idempotency key. */ }
+                // History remains read-only, never a turn/start or thread/resume task.
                 do {
                     if let read = try await api.nextHistory() {
                         var response: RemoteHistoryResponse

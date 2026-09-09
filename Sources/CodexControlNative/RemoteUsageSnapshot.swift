@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Whitelisted account quota data only. Never forward account IDs, tokens,
 /// credit redemption IDs, or raw backend responses to the relay.
@@ -19,9 +20,18 @@ struct RemoteUsageSnapshot: Codable, Equatable {
         let windows: [Window]
     }
     struct ResetCredits: Codable, Equatable {
+        var credits: [ResetCredit]? = nil
         let availableCount: Int?
         // nil = details unavailable; [] = fetched but no available detail rows.
         let expirations: [Double?]?
+    }
+    struct ResetCredit: Codable, Equatable {
+        let ref: String
+        let expiresAt: Double?
+        let resetType: String
+    }
+    static func creditReference(_ id: String) -> String {
+        SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     static func unavailable() -> Self {
@@ -51,6 +61,12 @@ struct RemoteUsageSnapshot: Codable, Equatable {
                                   expirations: credits.map { rows in
                 Array(rows.filter { $0["status"] as? String == "available" }.prefix(100)).map { ($0["expiresAt"] as? NSNumber)?.doubleValue }
             })
+            resets?.credits = credits.map { rows in
+                rows.filter { $0["status"] as? String == "available" }.prefix(100).compactMap { row in
+                    guard let id = row["id"] as? String, !id.isEmpty else { return nil }
+                    return ResetCredit(ref: creditReference(id), expiresAt: (row["expiresAt"] as? NSNumber)?.doubleValue, resetType: row["resetType"] as? String ?? "unknown")
+                }
+            }
         }
         return .init(capturedAt: now.timeIntervalSince1970, available: true, buckets: buckets, resetCredits: resets)
     }

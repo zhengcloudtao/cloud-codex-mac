@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var threadListScrollID: String?
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
+    @AppStorage("cloudcodex.showConversationPreview") private var showConversationPreview = true
     private let categoryDragPrefix = "cloudcodex-category://"
 
     var body: some View {
@@ -397,11 +398,14 @@ struct ContentView: View {
                 Text(model.selectedFolder.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "最近会话")
                     .font(.headline)
                 Spacer()
-                Button(action: model.prepareNewThread) {
-                    Image(systemName: "square.and.pencil")
+                if model.selectedFolder != nil {
+                    Button(action: model.prepareNewThread) {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .help("新建会话")
                 }
-                .help("新建会话")
             }
+            .frame(minHeight: 28)
             .padding(.horizontal, 12)
             .padding(.top, 12)
 
@@ -417,7 +421,8 @@ struct ContentView: View {
                             model.selectThread(thread.id)
                         } label: {
                             ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id,
-                                      outcome: model.conversationOutcome(for: thread))
+                                      outcome: model.conversationOutcome(for: thread),
+                                      showPreview: showConversationPreview)
                                 .background(
                                     model.selectedThreadID == thread.id ? Color.accentColor : .clear,
                                     in: RoundedRectangle(cornerRadius: 10)
@@ -558,6 +563,14 @@ struct ContentView: View {
                  : "此选择会立即应用，并保留到下次启动。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("显示会话摘要", isOn: $showConversationPreview)
+                    .toggleStyle(.switch)
+                Text("控制会话列表中标题下方的内容预览。关闭后列表更紧凑，不影响会话正文与搜索。设置自动保存。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(24)
         .frame(width: 360)
@@ -781,6 +794,7 @@ struct ThreadRow: View {
     let thread: CodexThread
     var isSelected = false
     var outcome: ConversationOutcome? = nil
+    var showPreview = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -802,12 +816,14 @@ struct ThreadRow: View {
                 .frame(width: 64, alignment: .trailing)
             }
             .frame(height: 18)
-            Text(thread.visiblePreview.replacingOccurrences(of: "\n", with: " "))
+            if showPreview {
+                Text(thread.visiblePreview.replacingOccurrences(of: "\n", with: " "))
                 .font(.system(size: 12))
                 .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .frame(height: 32, alignment: .top)
+            }
             HStack(spacing: 5) {
                 Image(systemName: "folder")
                 Text(thread.folderName)
@@ -828,7 +844,7 @@ struct ThreadRow: View {
         // Keep NSTableView's selection geometry stable while previews/status update.
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity)
-        .frame(height: 96)
+        .frame(height: showPreview ? 96 : 58)
         .contentShape(Rectangle())
         .help(thread.displayName)
     }
@@ -1943,6 +1959,8 @@ private struct Composer: View {
                                         }
                                     }
                                     Spacer()
+                                    Button("编辑") { model.beginEditingWaitingMessage(item.id) }
+                                        .help("修改待发送文字，保留附件和排队位置")
                                     if model.isSelectedThreadProcessing {
                                         Button("立即引导") {
                                             Task { await model.deliverWaitingMessage(item.id, steer: true) }
@@ -1970,7 +1988,8 @@ private struct Composer: View {
                 ComposerTextEditor(
                     text: composerText,
                     pasteImages: pasteImages,
-                    submit: submit
+                    submit: submit,
+                    focusRequest: mode == .newThread ? model.newThreadFocusRequest : model.editingWaitingMessageID
                 )
                     .frame(
                         minHeight: mode == .newThread ? 110 : 54,
@@ -1983,6 +2002,17 @@ private struct Composer: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if isEditingWaiting {
+                    HStack {
+                        Text("正在编辑待发送消息 · 已暂停发送")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("取消", action: model.cancelWaitingMessageEdit)
+                        Button("保存修改", action: model.saveWaitingMessageEdit)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!model.canSaveWaitingMessageEdit)
+                    }
+                } else {
                 HStack(spacing: 12) {
                     Button(action: chooseAttachments) {
                         Image(systemName: "plus")
@@ -2052,6 +2082,7 @@ private struct Composer: View {
                     .disabled(!canSubmit && !canCancel)
                     .help(sendButtonHelp)
                 }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
@@ -2065,11 +2096,17 @@ private struct Composer: View {
         .background(.bar)
     }
 
+    private var isEditingWaiting: Bool {
+        mode == .conversation && model.editingWaitingMessageID != nil
+    }
+
     private var composerText: Binding<String> {
         Binding(
-            get: { mode == .newThread ? model.newThreadPrompt : model.composerText },
+            get: { isEditingWaiting ? model.waitingMessageEditText : mode == .newThread ? model.newThreadPrompt : model.composerText },
             set: { value in
-                if mode == .newThread {
+                if isEditingWaiting {
+                    model.waitingMessageEditText = value
+                } else if mode == .newThread {
                     model.newThreadPrompt = value
                 } else {
                     model.composerText = value
@@ -2079,7 +2116,10 @@ private struct Composer: View {
     }
 
     private var currentAttachments: [ComposerAttachment] {
-        mode == .newThread ? model.newThreadAttachments : model.attachments
+        if isEditingWaiting {
+            return model.waitingMessages.first(where: { $0.id == model.editingWaitingMessageID })?.attachments ?? []
+        }
+        return mode == .newThread ? model.newThreadAttachments : model.attachments
     }
 
     private var newThreadFolderName: String {
@@ -2114,6 +2154,7 @@ private struct Composer: View {
     }
 
     private func removeAttachment(_ id: UUID) {
+        guard !isEditingWaiting else { return }
         if mode == .newThread {
             model.removeNewThreadAttachment(id)
         } else {
@@ -2122,7 +2163,8 @@ private struct Composer: View {
     }
 
     private func pasteImages() -> Bool {
-        mode == .newThread ? model.pasteNewThreadImages() : model.pasteImages()
+        if isEditingWaiting { return false }
+        return mode == .newThread ? model.pasteNewThreadImages() : model.pasteImages()
     }
 
     private func toggleDictation() {
@@ -2134,6 +2176,7 @@ private struct Composer: View {
     }
 
     private func submit() {
+        if isEditingWaiting { model.saveWaitingMessageEdit(); return }
         guard canSubmit else { return }
         Task {
             if mode == .newThread {
@@ -2277,6 +2320,7 @@ private struct ComposerTextEditor: NSViewRepresentable {
     @Binding var text: String
     let pasteImages: () -> Bool
     let submit: () -> Void
+    var focusRequest: UUID? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -2305,6 +2349,7 @@ private struct ComposerTextEditor: NSViewRepresentable {
         textView.pasteImages = pasteImages
         textView.submit = submit
         scrollView.documentView = textView
+        textView.requestFocus(focusRequest)
         return scrollView
     }
 
@@ -2313,10 +2358,8 @@ private struct ComposerTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         textView.pasteImages = pasteImages
         textView.submit = submit
-        guard textView.string != text else { return }
-        let selectionLocation = min(textView.selectedRange().location, text.utf16.count)
-        textView.string = text
-        textView.setSelectedRange(NSRange(location: selectionLocation, length: 0))
+        textView.requestFocus(focusRequest)
+        textView.synchronizeBoundText(text)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -2338,6 +2381,38 @@ private struct ComposerTextEditor: NSViewRepresentable {
 final class ComposerNSTextView: NSTextView {
     var pasteImages: (() -> Bool)?
     var submit: (() -> Void)?
+    private var pendingFocusRequest: UUID?
+    private var appliedFocusRequest: UUID?
+
+    func requestFocus(_ request: UUID?) {
+        pendingFocusRequest = request
+        scheduleRequestedFocus()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        scheduleRequestedFocus()
+    }
+
+    private func scheduleRequestedFocus() {
+        guard let request = pendingFocusRequest, request != appliedFocusRequest, window != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.pendingFocusRequest == request,
+                  self.appliedFocusRequest != request, let window = self.window else { return }
+            if window.makeFirstResponder(self) { self.appliedFocusRequest = request }
+        }
+    }
+
+    /// Streaming progress can redraw the SwiftUI wrapper while the input method
+    /// owns an uncommitted marked range. Never replace its text or selection.
+    func synchronizeBoundText(_ text: String) {
+        guard !hasMarkedText(), string != text else { return }
+        let selection = selectedRange()
+        let location = min(selection.location, text.utf16.count)
+        let length = min(selection.length, text.utf16.count - location)
+        string = text
+        setSelectedRange(NSRange(location: location, length: length))
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
