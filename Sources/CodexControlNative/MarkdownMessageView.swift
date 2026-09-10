@@ -80,6 +80,11 @@ private struct MarkdownBlocksView: View, Equatable {
             }
         }
         .textSelection(.enabled)
+        // SwiftUI otherwise inherits the surrounding bubble's subdued tint,
+        // which can make a selected range nearly invisible in dark mode.
+        // Keep the normal text unchanged and use AppKit's adaptive selection
+        // color only for the native text-selection affordance.
+        .tint(Color(nsColor: .selectedTextBackgroundColor))
 
         if expandsHorizontally {
             content.frame(maxWidth: .infinity, alignment: .leading)
@@ -238,16 +243,43 @@ private struct MarkdownImage: View {
     private var localURL: URL? { ImagePreviewLink.localURL(target) }
 
     var body: some View {
-        Group {
-            if let url = localURL, let image = NSImage(contentsOf: url) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .onTapGesture { openURL(url) }
-                    .accessibilityLabel(alt.isEmpty ? "图片预览" : alt)
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityAction { openURL(url) }
-            } else if let url = URL(string: target), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+        if let url = localURL, let image = NSImage(contentsOf: url) {
+            VStack(alignment: .leading, spacing: 0) {
+                Button { openURL(url) } label: {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 520, maxHeight: 360, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(alt.isEmpty ? "在 CloudCodex 中预览图片" : "在 CloudCodex 中预览\(alt)")
+
+                Divider()
+                HStack(spacing: 8) {
+                    Label(url.lastPathComponent, systemImage: "photo")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    } label: {
+                        Label("在 Finder 中显示", systemImage: "folder")
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+            .help(alt.isEmpty ? target : alt)
+        } else {
+            Group {
+                if let url = URL(string: target), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
                 AsyncImage(url: url) { phase in
                     if let image = phase.image {
                         image.resizable().scaledToFit()
@@ -257,14 +289,15 @@ private struct MarkdownImage: View {
                         ProgressView().frame(height: 100)
                     }
                 }
-            } else {
-                imageFallback
+                } else {
+                    imageFallback
+                }
             }
+            .frame(maxWidth: 520, maxHeight: 360, alignment: .leading)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+            .help(alt.isEmpty ? target : alt)
         }
-        .frame(maxWidth: 520, maxHeight: 360, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
-        .help(alt.isEmpty ? target : alt)
     }
 
     private var imageFallback: some View {

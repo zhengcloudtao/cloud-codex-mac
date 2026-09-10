@@ -8,6 +8,7 @@ struct RemoteUsageSnapshot: Codable, Equatable {
     let available: Bool
     let buckets: [Bucket]
     let resetCredits: ResetCredits?
+    var plan: String? = nil
 
     struct Window: Codable, Equatable {
         let usedPercent: Double?
@@ -43,6 +44,10 @@ struct RemoteUsageSnapshot: Codable, Equatable {
         if snapshots.isEmpty, let legacy = json["rateLimits"] as? [String: Any] {
             snapshots[legacy["limitId"] as? String ?? "codex"] = legacy
         }
+        let legacy = json["rateLimits"] as? [String: Any]
+        let plan = legacy?["planType"] as? String
+            ?? snapshots["codex"]?["planType"] as? String
+            ?? snapshots.keys.sorted().compactMap { snapshots[$0]?["planType"] as? String }.first
         let buckets = snapshots.keys.sorted().prefix(20).compactMap { id -> Bucket? in
             guard let bucket = snapshots[id] else { return nil }
             let windows = ["primary", "secondary"].compactMap { key -> Window? in
@@ -68,6 +73,7 @@ struct RemoteUsageSnapshot: Codable, Equatable {
                 }
             }
         }
-        return .init(capturedAt: now.timeIntervalSince1970, available: true, buckets: buckets, resetCredits: resets)
+        return .init(capturedAt: now.timeIntervalSince1970, available: true, buckets: buckets,
+                     resetCredits: resets, plan: plan)
     }
 }

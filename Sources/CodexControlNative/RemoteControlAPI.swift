@@ -22,6 +22,7 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     var usage: RemoteUsageSnapshot? = nil
     var defaultModel: String? = nil
     var defaultEffort: String? = nil
+    var systemMetrics: SystemMetricsSnapshot? = nil
 }
 
 struct RemoteTask: Codable, Equatable {

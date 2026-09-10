@@ -4,6 +4,7 @@ import Foundation
 @MainActor
 final class AppModel: ObservableObject {
     let connectionHealth = ConnectionHealth()
+    let systemMetrics = SystemMetricsMonitor()
     @Published private(set) var accountOverview: AccountOverview?
     @Published private(set) var accountOverviewError: String?
     @Published var threads: [CodexThread] = []
@@ -14,10 +15,12 @@ final class AppModel: ObservableObject {
     @Published var composerText = ""
     @Published private(set) var threadOutcomes: [String: ConversationOutcome] = [:]
     @Published private(set) var unreadCompletions = UnreadCompletions()
+    @Published private(set) var favoriteConversations = FavoriteConversations()
     @Published private(set) var userInputRequests: [UserInputRequest] = []
     private var userInputTimeoutTasks: [String: Task<Void, Never>] = [:]
     private let userInputTimeoutSeconds: TimeInterval
     private let unreadCompletionsKey = "cloudcodex.unreadCompletions.v1"
+    private let favoriteConversationsKey = "cloudcodex.favoriteConversations.v1"
 
     func markConversationRead(_ threadID: String) {
         guard unreadCompletions.unread.contains(threadID) else { return }
@@ -33,6 +36,29 @@ final class AppModel: ObservableObject {
     private func saveUnreadCompletions() {
         if let data = try? JSONEncoder().encode(unreadCompletions) {
             remoteDefaults.set(data, forKey: unreadCompletionsKey)
+        }
+    }
+
+    func isFavoriteConversation(_ threadID: String) -> Bool {
+        favoriteConversations.contains(threadID)
+    }
+
+    func toggleFavoriteConversation(_ thread: CodexThread) {
+        favoriteConversations.toggle(thread)
+        saveFavoriteConversations()
+    }
+
+    private func saveFavoriteConversations() {
+        if let data = try? JSONEncoder().encode(favoriteConversations) {
+            remoteDefaults.set(data, forKey: favoriteConversationsKey)
+        }
+    }
+
+    private func updateFavoriteSnapshot(_ thread: CodexThread) {
+        let previous = favoriteConversations
+        favoriteConversations.updateIfFavorite(thread)
+        if favoriteConversations != previous {
+            saveFavoriteConversations()
         }
     }
 
@@ -376,6 +402,10 @@ final class AppModel: ObservableObject {
            let saved = try? JSONDecoder().decode(UnreadCompletions.self, from: data) {
             unreadCompletions = saved
         }
+        if let data = remoteDefaults.data(forKey: favoriteConversationsKey),
+           let saved = try? JSONDecoder().decode(FavoriteConversations.self, from: data) {
+            favoriteConversations = saved
+        }
         isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
         remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
         remotePairingCode = remoteDefaults.string(forKey: remotePairingCodeKey) ?? ""
@@ -508,9 +538,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    var visibleFavoriteThreads: [CodexThread] {
+        favoriteConversations.sortedThreads(matching: searchText)
+    }
+
     var selectedThread: CodexThread? {
         threads.first { $0.id == selectedThreadID }
             ?? selectedThreadID.flatMap { threadSummaries[$0] }
+            ?? selectedThreadID.flatMap { favoriteConversations.thread($0) }
     }
 
     var selectedModel: CodexModelOption? {
@@ -566,6 +601,7 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        systemMetrics.start()
         connectionHealth.start { [weak self] in
             guard let self else { throw CodexClientError.notRunning }
             do {
@@ -641,6 +677,13 @@ final class AppModel: ObservableObject {
             threadSummaries[thread.id] = updated
             return updated
         }
+        let previousFavorites = favoriteConversations
+        for thread in merged {
+            favoriteConversations.updateIfFavorite(thread)
+        }
+        if favoriteConversations != previousFavorites {
+            saveFavoriteConversations()
+        }
         // Retained selected/running rows must follow the same recency rule;
         // retaining a row does not pin it above a newer user request.
         let ordered = merged.enumerated().sorted {
@@ -707,6 +750,9 @@ final class AppModel: ObservableObject {
         }
         if didChange {
             threads = updatedThreads
+            for thread in updatedThreads {
+                updateFavoriteSnapshot(thread)
+            }
         }
     }
 
@@ -714,6 +760,7 @@ final class AppModel: ObservableObject {
         if var cached = threadSummaries[threadID] {
             cached.status = running ? "active" : "idle"
             threadSummaries[threadID] = cached
+            updateFavoriteSnapshot(cached)
         }
         guard let index = threads.firstIndex(where: { $0.id == threadID }) else { return }
         let status = running ? "active" : "idle"
@@ -812,6 +859,7 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }
             if locallyRunningThreadIDs.contains(id) { updated.status = "active" }
             threadSummaries[id] = updated
+            updateFavoriteSnapshot(updated)
             if let index = threads.firstIndex(where: { $0.id == id }), threads[index] != updated {
                 threads[index] = updated
             }
@@ -1682,7 +1730,8 @@ final class AppModel: ObservableObject {
             threads: Array(snapshots),
             usage: remoteControlPaired ? remoteUsageSnapshot : nil,
             defaultModel: selectedModel?.model,
-            defaultEffort: selectedEffort
+            defaultEffort: selectedEffort,
+            systemMetrics: remoteControlPaired && systemMetrics.snapshot.hasValues ? systemMetrics.snapshot : nil
         )
     }
 

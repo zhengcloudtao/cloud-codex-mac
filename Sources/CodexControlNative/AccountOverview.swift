@@ -77,7 +77,6 @@ struct AccountOverviewView: View {
                         .foregroundStyle(model.accountOverviewError == nil ? Color.secondary : Color.orange)
                 }
                 .lineLimit(1)
-                .padding(.horizontal, 12).padding(.vertical, 6)
                 // The toolbar supplies its own rounded container. Adding another
                 // background and stroke here produces two overlapping outlines.
             } else {

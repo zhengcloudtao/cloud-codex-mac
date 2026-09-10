@@ -7,10 +7,12 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var threadListScrollID: String?
     @State private var filePreview: LocalFilePreviewTarget?
+    @State private var showingFavoriteThreads = false
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
     @AppStorage("cloudcodex.showConversationPreview") private var showConversationPreview = true
     @AppStorage("cloudcodex.showUnreadCompletionDot") private var showUnreadCompletionDot = true
     @AppStorage("cloudcodex.showUnreadDockBadge") private var showUnreadDockBadge = true
+    @AppStorage(SystemMetricsRefreshInterval.storageKey) private var systemMetricsRefreshInterval = SystemMetricsRefreshInterval.fiveSeconds.rawValue
     private let categoryDragPrefix = "cloudcodex-category://"
 
     var body: some View {
@@ -54,8 +56,10 @@ struct ContentView: View {
         }
         .onAppear(perform: applyAppearancePreference)
         .onAppear(perform: updateUnreadDockBadge)
+        .onAppear(perform: applySystemMetricsRefreshInterval)
         .onChange(of: model.unreadCompletions.unread) { _, _ in updateUnreadDockBadge() }
         .onChange(of: showUnreadDockBadge) { _, _ in updateUnreadDockBadge() }
+        .onChange(of: systemMetricsRefreshInterval) { _, _ in applySystemMetricsRefreshInterval() }
         .onChange(of: appearancePreference) { _, _ in
             applyAppearancePreference()
         }
@@ -85,11 +89,20 @@ struct ContentView: View {
         NSApp.dockTile.badgeLabel = showUnreadDockBadge && count > 0 ? String(count) : nil
     }
 
+    private func applySystemMetricsRefreshInterval() {
+        model.systemMetrics.setRefreshInterval(.resolved(systemMetricsRefreshInterval))
+    }
+
     private var folderSidebar: some View {
         List(selection: Binding(
-            get: { model.selectedFolder ?? "__all__" },
+            get: { showingFavoriteThreads ? "__favorites__" : model.selectedFolder ?? "__all__" },
             set: { selection in
                 guard let selection else { return }
+                if selection == "__favorites__" {
+                    showingFavoriteThreads = true
+                    return
+                }
+                showingFavoriteThreads = false
                 let previous = model.selectedFolder
                 DispatchQueue.main.async {
                     guard model.selectedFolder == previous else { return }
@@ -102,6 +115,10 @@ struct ContentView: View {
                     .padding(.vertical, 3)
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
                     .tag("__all__")
+                Label("收藏会话", systemImage: "star")
+                    .padding(.vertical, 3)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
+                    .tag("__favorites__")
             } header: {
                 HStack {
                     Text("工作区")
@@ -406,10 +423,12 @@ struct ContentView: View {
     private var threadList: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(model.selectedFolder.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "最近会话")
+                Text(showingFavoriteThreads
+                     ? "收藏会话"
+                     : model.selectedFolder.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "最近会话")
                     .font(.headline)
                 Spacer()
-                if model.selectedFolder != nil {
+                if !showingFavoriteThreads, model.selectedFolder != nil {
                     Button(action: model.prepareNewThread) {
                         Image(systemName: "square.and.pencil")
                     }
@@ -427,24 +446,31 @@ struct ContentView: View {
             // the place the user is browsing in the recent list stays put.
             ScrollView {
                 LazyVStack(spacing: 6) {
-                    ForEach(model.visibleThreads) { thread in
-                        Button {
-                            model.selectThread(thread.id)
-                        } label: {
-                            ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id,
-                                      outcome: model.conversationOutcome(for: thread),
-                                      showPreview: showConversationPreview,
-                                      hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id),
-                                      needsUserInput: model.userInputRequests.contains { $0.threadID == thread.id })
-                                .background(
-                                    model.selectedThreadID == thread.id ? Color.accentColor : .clear,
-                                    in: RoundedRectangle(cornerRadius: 10)
-                                )
+                    ForEach(displayedThreads) { thread in
+                        HStack(spacing: 0) {
+                            Button {
+                                model.selectThread(thread.id)
+                            } label: {
+                                ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id,
+                                          outcome: model.conversationOutcome(for: thread),
+                                          showPreview: showConversationPreview,
+                                          hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id),
+                                          needsUserInput: model.userInputRequests.contains { $0.threadID == thread.id })
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(thread.displayName)
+                            .accessibilityValue(model.selectedThreadID == thread.id ? "当前会话" : "")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(thread.displayName)
-                        .accessibilityValue(model.selectedThreadID == thread.id ? "当前会话" : "")
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            model.selectedThreadID == thread.id ? Color.accentColor : .clear,
+                            in: RoundedRectangle(cornerRadius: 10)
+                        )
+                        .contextMenu {
+                            Button(model.isFavoriteConversation(thread.id) ? "取消收藏" : "收藏会话") {
+                                model.toggleFavoriteConversation(thread)
+                            }
+                        }
                     }
                 }
                 .scrollTargetLayout()
@@ -456,16 +482,18 @@ struct ContentView: View {
             .overlay {
                 if model.isLoading && model.selectedThreadID == nil {
                     ProgressView("加载最近会话…")
-                } else if model.visibleThreads.isEmpty {
+                } else if displayedThreads.isEmpty {
                     ContentUnavailableView(
-                        "暂无会话",
-                        systemImage: "bubble.left.and.bubble.right",
-                        description: Text("在这个文件夹中新建一个 Codex 会话")
+                        showingFavoriteThreads ? "暂无收藏会话" : "暂无会话",
+                        systemImage: showingFavoriteThreads ? "star" : "bubble.left.and.bubble.right",
+                        description: Text(showingFavoriteThreads
+                                          ? "在会话上右键即可收藏"
+                                          : "在这个文件夹中新建一个 Codex 会话")
                     )
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if model.hasMoreThreads {
+                if !showingFavoriteThreads, model.hasMoreThreads {
                     Text("为保持流畅，仅显示最近 60 个会话")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -475,6 +503,10 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var displayedThreads: [CodexThread] {
+        showingFavoriteThreads ? model.visibleFavoriteThreads : model.visibleThreads
     }
 
     @ViewBuilder
@@ -514,8 +546,17 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .principal) {
-            AccountOverviewView()
-                .frame(maxWidth: 420)
+            HStack(spacing: 12) {
+                SystemMetricsView(monitor: model.systemMetrics)
+                Divider()
+                    .frame(height: 26)
+                AccountOverviewView()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 4)
+            // Keep the title-bar status strip at its intrinsic width. A flexible
+            // max width makes the toolbar background stretch into a large blank area.
+            .fixedSize(horizontal: true, vertical: false)
         }
         ToolbarItemGroup {
             Button {
@@ -563,7 +604,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("个性设置")
                         .font(.headline)
-                    Text("选择 CloudCodex 的显示外观")
+                    Text("调整 CloudCodex 的外观与显示偏好")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -598,9 +639,26 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Divider()
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("电脑状态刷新频率")
+                    Text("控制顶部温度、CPU 和存储信息的采样间隔。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("电脑状态刷新频率", selection: $systemMetricsRefreshInterval) {
+                    ForEach(SystemMetricsRefreshInterval.allCases) { interval in
+                        Text(interval.title).tag(interval.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 92)
+            }
         }
         .padding(24)
-        .frame(width: 360)
+        .frame(width: 400)
     }
 
 }
@@ -1588,43 +1646,62 @@ private struct MessageAttachmentCard: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        Button(action: openAttachment) {
-            if attachment.kind == .image,
-               let image = NSImage(contentsOfFile: attachment.path) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 148, height: 92)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+        ZStack(alignment: .topTrailing) {
+            Button(action: openAttachment) {
+                if attachment.kind == .image,
+                   let image = NSImage(contentsOfFile: attachment.path) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 148, height: 92)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                    Label(attachment.name, systemImage: "photo")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        Label(attachment.name, systemImage: "photo")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(width: 148, alignment: .leading)
+                    }
+                    .padding(6)
+                    .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                } else {
+                    Label(attachment.name, systemImage: attachment.kind == .image ? "photo" : "doc")
+                        .font(.callout)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .frame(width: 148, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: 260, alignment: .leading)
+                        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
                 }
-                .padding(6)
-                .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
-            } else {
-                Label(attachment.name, systemImage: attachment.kind == .image ? "photo" : "doc")
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: 260, alignment: .leading)
-                    .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .help(attachment.path.isEmpty ? attachment.name : "在 CloudCodex 中预览 \(attachment.name)")
+
+            if !attachment.path.isEmpty {
+                Button(action: revealAttachment) {
+                    Image(systemName: "folder")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 25, height: 25)
+                        .background(.regularMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(5)
+                .help("在 Finder 中显示")
             }
         }
-        .buttonStyle(.plain)
-        .help(attachment.path.isEmpty ? attachment.name : "在 CloudCodex 中预览 \(attachment.name)")
     }
 
     private func openAttachment() {
         guard !attachment.path.isEmpty else { return }
         openURL(URL(fileURLWithPath: attachment.path))
+    }
+
+    private func revealAttachment() {
+        guard !attachment.path.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: attachment.path)])
     }
 }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-struct CodexThread: Identifiable, Hashable {
+struct CodexThread: Identifiable, Hashable, Codable {
     let id: String
     var name: String?
     var preview: String

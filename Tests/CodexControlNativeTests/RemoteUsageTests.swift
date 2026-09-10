@@ -18,7 +18,7 @@ final class RemoteUsageTests: XCTestCase {
 
     func testBucketWindowsAreNotAssumedToBeFiveHoursAndWeek() throws {
         let response: [String: Any] = ["accountId": "do-not-forward", "rateLimitsByLimitId": [
-            "codex": ["primary": ["usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1800000000]],
+            "codex": ["planType": "pro", "primary": ["usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1800000000]],
             "spark": ["limitName": "Spark", "primary": ["usedPercent": 0, "windowDurationMins": 300]]
         ], "rateLimitResetCredits": ["availableCount": 3, "credits": [
             ["id": "do-not-forward", "status": "available", "expiresAt": 1800000100],
@@ -27,12 +27,14 @@ final class RemoteUsageTests: XCTestCase {
         let snapshot = RemoteUsageSnapshot.parse(response)
         XCTAssertEqual(snapshot.buckets[0].windows[0].windowDurationMins, 10080)
         XCTAssertEqual(snapshot.buckets[0].windows[0].usedPercent, 4)
+        XCTAssertEqual(snapshot.plan, "pro")
         XCTAssertEqual(snapshot.resetCredits?.availableCount, 3)
         XCTAssertEqual(snapshot.resetCredits?.expirations?.count, 2)
         XCTAssertEqual(snapshot.resetCredits?.expirations?.first!, 1800000100)
         let encoded = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
         XCTAssertFalse(encoded.contains("do-not-forward"))
         XCTAssertFalse(encoded.contains("accountId"))
+        XCTAssertTrue(encoded.contains("\"plan\":\"pro\""))
     }
 
     func testUnknownIsDifferentFromZeroAndLegacyResponseIsSupported() {
