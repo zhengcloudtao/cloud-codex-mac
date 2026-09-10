@@ -434,7 +434,8 @@ struct ContentView: View {
                             ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id,
                                       outcome: model.conversationOutcome(for: thread),
                                       showPreview: showConversationPreview,
-                                      hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id))
+                                      hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id),
+                                      needsUserInput: model.userInputRequests.contains { $0.threadID == thread.id })
                                 .background(
                                     model.selectedThreadID == thread.id ? Color.accentColor : .clear,
                                     in: RoundedRectangle(cornerRadius: 10)
@@ -490,6 +491,12 @@ struct ContentView: View {
                     isThinking: model.isSelectedThreadProcessing
                 )
                     .id(thread.id)
+                if !model.selectedUserInputRequests.isEmpty {
+                    Divider()
+                    UserInputRequestsPanel(requests: model.selectedUserInputRequests) { requestID, answers in
+                        model.submitUserInput(requestID: requestID, answers: answers)
+                    }
+                }
                 Divider()
                 Composer(mode: .conversation)
             }
@@ -869,6 +876,7 @@ struct ThreadRow: View {
     var outcome: ConversationOutcome? = nil
     var showPreview = true
     var hasUnreadCompletion = false
+    var needsUserInput = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -887,7 +895,12 @@ struct ThreadRow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ZStack(alignment: .trailing) {
                     Color.clear
-                    if let outcome {
+                    if needsUserInput {
+                        Label("待输入", systemImage: "questionmark.bubble.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.white : Color.orange)
+                            .help("Codex 正在等待你的回答")
+                    } else if let outcome {
                         Label(outcome.title, systemImage: outcome.symbol)
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(isSelected ? Color.white : outcomeColor)
@@ -1572,6 +1585,7 @@ private struct UserMessageContent: View {
 
 private struct MessageAttachmentCard: View {
     let attachment: ChatMessageAttachment
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         Button(action: openAttachment) {
@@ -1605,12 +1619,12 @@ private struct MessageAttachmentCard: View {
             }
         }
         .buttonStyle(.plain)
-        .help(attachment.path.isEmpty ? attachment.name : "打开 \(attachment.name)")
+        .help(attachment.path.isEmpty ? attachment.name : "在 CloudCodex 中预览 \(attachment.name)")
     }
 
     private func openAttachment() {
         guard !attachment.path.isEmpty else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: attachment.path))
+        openURL(URL(fileURLWithPath: attachment.path))
     }
 }
 
@@ -2530,28 +2544,35 @@ final class ComposerNSTextView: NSTextView {
 private struct AttachmentPreview: View {
     let attachment: ComposerAttachment
     let remove: () -> Void
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Group {
-                if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    VStack(spacing: 5) {
-                        Image(systemName: "doc.fill").font(.title2)
-                        Text(attachment.url.lastPathComponent)
-                            .font(.caption2)
-                            .lineLimit(2)
+            Button {
+                openURL(attachment.url)
+            } label: {
+                Group {
+                    if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        VStack(spacing: 5) {
+                            Image(systemName: "doc.fill").font(.title2)
+                            Text(attachment.url.lastPathComponent)
+                                .font(.caption2)
+                                .lineLimit(2)
+                        }
+                        .padding(7)
                     }
-                    .padding(7)
                 }
+                .frame(width: 72, height: 72)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
             }
-            .frame(width: 72, height: 72)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+            .buttonStyle(.plain)
+            .help("在 CloudCodex 中预览 \(attachment.url.lastPathComponent)")
 
             Button(action: remove) {
                 Image(systemName: "xmark")

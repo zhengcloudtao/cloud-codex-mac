@@ -2,6 +2,12 @@ import XCTest
 @testable import CloudCodex
 
 final class LocalFilePreviewTests: XCTestCase {
+    func testMarkdownExtensionsUseFormattedPreview() {
+        XCTAssertTrue(LocalFilePreviewTarget(url: URL(fileURLWithPath: "/tmp/README.md")).isMarkdown)
+        XCTAssertTrue(LocalFilePreviewTarget(url: URL(fileURLWithPath: "/tmp/Guide.MARKDOWN")).isMarkdown)
+        XCTAssertFalse(LocalFilePreviewTarget(url: URL(fileURLWithPath: "/tmp/schema.sql")).isMarkdown)
+    }
+
     func testAbsolutePathWithSpacesAndLineNumber() throws {
         let url = try XCTUnwrap(URL(string: "/tmp/My%20Project/seed.sql:12:3"))
         XCTAssertEqual(LocalFilePreviewTarget.resolve(url, cwd: nil)?.url.path, "/tmp/My Project/seed.sql")

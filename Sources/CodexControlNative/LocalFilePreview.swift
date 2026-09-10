@@ -5,6 +5,7 @@ import Quartz
 struct LocalFilePreviewTarget: Identifiable {
     let url: URL
     var id: String { url.path }
+    var isMarkdown: Bool { ["md", "markdown"].contains(url.pathExtension.lowercased()) }
 
     static func resolve(_ url: URL, cwd: String?) -> Self? {
         guard url.scheme == nil || url.isFileURL else { return nil }
@@ -51,17 +52,28 @@ struct LocalFilePreviewSheet: View {
             } else if let error {
                 ContentUnavailableView("无法预览文件", systemImage: "doc.badge.ellipsis", description: Text(error))
             } else if let text {
-                ScrollView([.horizontal, .vertical]) {
-                    Text(text).font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .topLeading).padding(12)
+                if target.isMarkdown {
+                    ScrollView(.vertical, showsIndicators: true) {
+                        MarkdownMessageView(markdown: text)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .padding(20)
+                    }
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                } else {
+                    ScrollView([.horizontal, .vertical]) {
+                        Text(text).font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .topLeading).padding(12)
+                    }
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 }
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
             } else {
                 SystemFilePreview(url: target.url)
             }
             Text("只读预览，不会执行脚本或修改文件").font(.caption).foregroundStyle(.secondary)
         }
-        .padding(20).frame(width: 800, height: 600)
+        .padding(20)
+        .frame(minWidth: 720, idealWidth: 960, minHeight: 520, idealHeight: 700)
+        .background(ResizablePreviewWindow(minimumSize: NSSize(width: 720, height: 520)))
         .task(id: target.id) {
             let url = target.url
             let result = await Task.detached { Result { try LocalFilePreviewTarget.readText(url) } }.value
@@ -71,6 +83,30 @@ struct LocalFilePreviewSheet: View {
             case .failure(let failure): error = failure.localizedDescription
             }
             loading = false
+        }
+    }
+}
+
+private struct ResizablePreviewWindow: NSViewRepresentable {
+    let minimumSize: NSSize
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        configure(view)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        configure(view)
+    }
+
+    private func configure(_ view: NSView) {
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            window.styleMask.insert(.resizable)
+            window.contentMinSize = minimumSize
+            window.contentMaxSize = NSSize(width: 10_000, height: 10_000)
+            window.standardWindowButton(.zoomButton)?.isEnabled = true
         }
     }
 }

@@ -234,6 +234,7 @@ private struct MarkdownTableCell: View {
 private struct MarkdownImage: View {
     let alt: String
     let target: String
+    @Environment(\.openURL) private var openURL
     private var localURL: URL? { ImagePreviewLink.localURL(target) }
 
     var body: some View {
@@ -242,10 +243,10 @@ private struct MarkdownImage: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
-                    .onTapGesture { NSWorkspace.shared.open(url) }
+                    .onTapGesture { openURL(url) }
                     .accessibilityLabel(alt.isEmpty ? "图片预览" : alt)
                     .accessibilityAddTraits(.isButton)
-                    .accessibilityAction { NSWorkspace.shared.open(url) }
+                    .accessibilityAction { openURL(url) }
             } else if let url = URL(string: target), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
                 AsyncImage(url: url) { phase in
                     if let image = phase.image {

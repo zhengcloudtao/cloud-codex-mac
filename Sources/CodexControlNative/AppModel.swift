@@ -14,6 +14,9 @@ final class AppModel: ObservableObject {
     @Published var composerText = ""
     @Published private(set) var threadOutcomes: [String: ConversationOutcome] = [:]
     @Published private(set) var unreadCompletions = UnreadCompletions()
+    @Published private(set) var userInputRequests: [UserInputRequest] = []
+    private var userInputTimeoutTasks: [String: Task<Void, Never>] = [:]
+    private let userInputTimeoutSeconds: TimeInterval
     private let unreadCompletionsKey = "cloudcodex.unreadCompletions.v1"
 
     func markConversationRead(_ threadID: String) {
@@ -36,6 +39,40 @@ final class AppModel: ObservableObject {
     func conversationOutcome(for thread: CodexThread) -> ConversationOutcome? {
         if thread.status == "active" || locallyRunningThreadIDs.contains(thread.id) { return .running }
         return threadOutcomes[thread.id]
+    }
+
+    var selectedUserInputRequests: [UserInputRequest] {
+        guard let selectedThreadID else { return [] }
+        return userInputRequests.filter { $0.threadID == selectedThreadID }
+    }
+
+    func submitUserInput(requestID: String, answers: [String: String]) {
+        guard let index = userInputRequests.firstIndex(where: { $0.id == requestID }),
+              userInputRequests[index].questions.allSatisfy({ !(answers[$0.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return }
+        userInputRequests[index].isSubmitting = true
+        userInputRequests[index].error = nil
+        let request = userInputRequests[index]
+        let payload = request.responsePayload(answers: answers)
+        do {
+            try client.respond(to: request.requestID, result: payload)
+            userInputTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+            userInputRequests.removeAll { $0.id == requestID }
+            upsertConversationActivity(threadID: request.threadID,
+                id: "user-input-\(request.itemID)", title: "已提交所需信息", text: "Codex 已收到你的回答，正在继续执行。", status: "已回答")
+        } catch {
+            guard let retryIndex = userInputRequests.firstIndex(where: { $0.id == requestID }) else { return }
+            userInputRequests[retryIndex].isSubmitting = false
+            userInputRequests[retryIndex].error = error.localizedDescription
+        }
+    }
+
+    private func upsertConversationActivity(threadID: String, id: String, title: String, text: String, status: String) {
+        var rows = conversationMessages(for: threadID)
+        let message = ChatMessage(id: id, role: .activity, text: text, activityKind: .status,
+                                  activityTitle: title, activityStatus: status,
+                                  turnID: activeTurnIDsByThread[threadID])
+        if let index = rows.firstIndex(where: { $0.id == id }) { rows[index] = message } else { rows.append(message) }
+        storeMessages(rows, for: threadID)
     }
     struct WaitingMessage: Identifiable {
         let id = UUID()
@@ -326,11 +363,13 @@ final class AppModel: ObservableObject {
 
     init(
         remoteDefaults: UserDefaults = .standard,
+        userInputTimeoutSeconds: TimeInterval = 60,
         remoteAPILoader: @escaping @Sendable (Bool) async throws -> RemoteControlAPI = {
             try await RemoteControlAPI.connect(allowInteraction: $0)
         }
     ) {
         self.remoteDefaults = remoteDefaults
+        self.userInputTimeoutSeconds = userInputTimeoutSeconds
         self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
         if let data = remoteDefaults.data(forKey: unreadCompletionsKey),
@@ -538,6 +577,9 @@ final class AppModel: ObservableObject {
             }
         }
         client.onEvent = { [weak self] method, params in self?.handleEvent(method, params) }
+        client.onServerRequest = { [weak self] requestID, method, params in
+            self?.handleServerRequest(requestID, method: method, params: params)
+        }
         client.onDisconnect = { [weak self] message in
             self?.connectionText = "未连接"
             self?.errorMessage = message
@@ -1964,6 +2006,42 @@ final class AppModel: ObservableObject {
         return String(text.suffix(limit))
     }
 
+    func handleServerRequest(_ requestID: AppServerRequestID, method: String, params: [String: Any]) {
+        guard method == "item/tool/requestUserInput",
+              let request = UserInputRequest(requestID: requestID, params: params, timeout: userInputTimeoutSeconds) else { return }
+        userInputTimeoutTasks.removeValue(forKey: request.id)?.cancel()
+        if let index = userInputRequests.firstIndex(where: { $0.id == request.id }) {
+            userInputRequests[index] = request
+        } else {
+            userInputRequests.append(request)
+        }
+        upsertConversationActivity(threadID: request.threadID,
+            id: "user-input-\(request.itemID)", title: "Codex 需要你的输入",
+            text: request.questions.map(\.question).joined(separator: "\n"), status: "待回答")
+        let delay = max(0, request.expiresAt.timeIntervalSinceNow)
+        userInputTimeoutTasks[request.id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.expireUserInputRequest(request.id)
+        }
+    }
+
+    private func expireUserInputRequest(_ requestID: String) {
+        guard let request = userInputRequests.first(where: { $0.id == requestID }), !request.isSubmitting else { return }
+        do {
+            try client.respond(to: request.requestID, result: request.skippedResponsePayload)
+            userInputTimeoutTasks.removeValue(forKey: requestID)
+            userInputRequests.removeAll { $0.id == requestID }
+            upsertConversationActivity(threadID: request.threadID,
+                id: "user-input-\(request.itemID)", title: "已自动跳过输入",
+                text: "1 分钟内未收到回答，CloudCodex 已跳过本次输入并让任务继续执行。", status: "已跳过")
+        } catch {
+            userInputTimeoutTasks.removeValue(forKey: requestID)
+            guard let index = userInputRequests.firstIndex(where: { $0.id == requestID }) else { return }
+            userInputRequests[index].error = "自动跳过失败：\(error.localizedDescription)"
+        }
+    }
+
     func handleEvent(_ method: String, _ params: [String: Any]) {
         guard let eventThreadID = params["threadId"] as? String else {
             if method == "error", let error = params["error"] as? [String: Any] {
@@ -1980,6 +2058,15 @@ final class AppModel: ObservableObject {
                 }
             }
             return
+        }
+        if method == "serverRequest/resolved",
+           let rawID = params["requestId"], let requestID = AppServerRequestID(rawID),
+           let resolved = userInputRequests.first(where: { $0.id == requestID.stableID }) {
+            userInputTimeoutTasks.removeValue(forKey: requestID.stableID)?.cancel()
+            userInputRequests.removeAll { $0.id == requestID.stableID }
+            upsertConversationActivity(threadID: eventThreadID,
+                id: "user-input-\(resolved.itemID)", title: "输入请求已结束",
+                text: "该请求已由 Codex 处理或随任务状态变化而取消。", status: "已处理")
         }
         if method == "turn/started" || method == "turn/completed" || method == "error" {
             turnEventRevision[eventThreadID, default: 0] += 1
@@ -2003,6 +2090,11 @@ final class AppModel: ObservableObject {
                     recordCompletedConversation(eventThreadID, turnID: turnID,
                         viewed: selectedThreadID == eventThreadID)
                 }
+            }
+            if let turnID = turn?["id"] as? String {
+                let expiredIDs = userInputRequests.filter { $0.threadID == eventThreadID && $0.turnID == turnID }.map(\.id)
+                expiredIDs.forEach { userInputTimeoutTasks.removeValue(forKey: $0)?.cancel() }
+                userInputRequests.removeAll { $0.threadID == eventThreadID && $0.turnID == turnID }
             }
         }
 

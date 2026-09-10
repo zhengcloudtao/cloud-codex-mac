@@ -4,6 +4,7 @@ import Foundation
 final class AppServerClient {
     typealias JSON = [String: Any]
     typealias EventHandler = (String, JSON) -> Void
+    typealias ServerRequestHandler = (AppServerRequestID, String, JSON) -> Void
 
     private var process: Process?
     private var input: FileHandle?
@@ -33,6 +34,7 @@ final class AppServerClient {
     private var threadItemsListAvailability: Bool? = nil
     private(set) var connected = false
     var onEvent: EventHandler?
+    var onServerRequest: ServerRequestHandler?
     var onDisconnect: ((String) -> Void)?
 
     deinit {
@@ -532,6 +534,10 @@ final class AppServerClient {
         try input.write(contentsOf: data)
     }
 
+    func respond(to requestID: AppServerRequestID, result: JSON) throws {
+        try send(["id": requestID.jsonValue, "result": result])
+    }
+
     private func handle(_ objects: [JSON]) {
         for object in objects {
             handle(object)
@@ -539,6 +545,18 @@ final class AppServerClient {
     }
 
     private func handle(_ object: JSON) {
+        // A bidirectional JSON-RPC server request can reuse a numeric id from
+        // our outbound request namespace. A method identifies it as a request,
+        // so dispatch it before looking for an outbound response.
+        if let method = object["method"] as? String,
+           let params = object["params"] as? JSON {
+            if let rawID = object["id"], let requestID = AppServerRequestID(rawID) {
+                onServerRequest?(requestID, method, params)
+                return
+            }
+            onEvent?(method, params)
+            return
+        }
         if let idNumber = object["id"] as? NSNumber,
            let request = pending.removeValue(forKey: idNumber.intValue) {
             request.timeoutTask.cancel()
@@ -551,10 +569,6 @@ final class AppServerClient {
                 request.continuation.resume(throwing: CodexClientError.invalidResponse)
             }
             return
-        }
-        if let method = object["method"] as? String,
-           let params = object["params"] as? JSON {
-            onEvent?(method, params)
         }
     }
 

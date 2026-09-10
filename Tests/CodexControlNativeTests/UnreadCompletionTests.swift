@@ -42,7 +42,7 @@ final class UnreadCompletionTests: XCTestCase {
 
     @MainActor
     func testSelectedConversationCompletionIsAlreadyViewed() {
-        let model = AppModel()
+        let model = AppModel(remoteDefaults: UserDefaults(suiteName: "selected.\(UUID())")!)
         model.selectedThreadID = "one"
         model.handleEvent("turn/started", [
             "threadId": "one", "turn": ["id": "turn-one"]
@@ -55,7 +55,7 @@ final class UnreadCompletionTests: XCTestCase {
 
     @MainActor
     func testUnselectedConversationCompletionRemainsUnread() {
-        let model = AppModel()
+        let model = AppModel(remoteDefaults: UserDefaults(suiteName: "unselected.\(UUID())")!)
         model.selectedThreadID = "one"
         model.handleEvent("turn/started", [
             "threadId": "two", "turn": ["id": "turn-two"]
