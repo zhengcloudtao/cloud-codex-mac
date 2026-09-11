@@ -241,6 +241,7 @@ final class AppModel: ObservableObject {
     @Published var searchText = ""
     @Published var connectionText = "正在连接…"
     @Published var isLoading = false
+    @Published private(set) var isConversationLoading = false
     @Published var isSending = false
     @Published var isExternalThreadProcessing = false
     @Published var threadOwnershipNotice: String?
@@ -825,6 +826,7 @@ final class AppModel: ObservableObject {
         syncSelectedLocalTurnState()
         threads = []
         messages = []
+        isConversationLoading = false
         hasMoreThreads = false
         searchText = ""
         Task {
@@ -857,7 +859,7 @@ final class AppModel: ObservableObject {
         messages = id.flatMap { messagesByThread[$0] } ?? []
         // Publish loading together with the new selection so an uncached
         // conversation never renders the empty "开始对话" state for one frame.
-        isLoading = id != nil && messages.isEmpty
+        isConversationLoading = id != nil && messages.isEmpty
         syncSelectedLocalTurnState()
         guard let id else {
             messages = []
@@ -912,11 +914,16 @@ final class AppModel: ObservableObject {
     func loadSelectedThread() async {
         guard let id = selectedThreadID else {
             messages = []
+            isConversationLoading = false
             return
         }
         let generation = selectionGeneration
-        isLoading = true
-        defer { if generation == selectionGeneration { isLoading = false } }
+        isConversationLoading = true
+        defer {
+            if generation == selectionGeneration, selectedThreadID == id {
+                isConversationLoading = false
+            }
+        }
         do {
             var (updated, loadedMessages) = try await client.readThread(id)
             guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }

@@ -467,7 +467,8 @@ final class StreamingEventTests: XCTestCase {
 
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isSelectedThreadProcessing)
-        XCTAssertTrue(model.isLoading)
+        XCTAssertTrue(model.isConversationLoading)
+        XCTAssertFalse(model.isLoading)
         model.applyVisibleThreadStatuses([
             runningThread.id: "idle",
             idleThread.id: "idle"

@@ -519,7 +519,7 @@ struct ContentView: View {
                 Divider()
                 MessageList(
                     messages: model.messages,
-                    isLoading: model.isLoading,
+                    isLoading: model.isConversationLoading,
                     isThinking: model.isSelectedThreadProcessing
                 )
                     .id(thread.id)
@@ -671,69 +671,37 @@ struct ContentView: View {
 private struct ThreadInputUnavailableView: View {
     @EnvironmentObject private var model: AppModel
     let state: ThreadInputAvailability
-    @State private var showDelayedCheckingState = false
 
     private var isChecking: Bool { state == .checking }
 
     var body: some View {
-        Group {
-            if state == .occupied || showDelayedCheckingState {
-                statusCard
-            } else {
-                // Most ownership checks finish immediately. Reserve the final
-                // card's space without briefly flashing a loading card first.
-                Color.clear
-                    .frame(minHeight: 82)
-                    .accessibilityHidden(true)
-            }
-        }
-        .task(id: state) {
-            showDelayedCheckingState = false
-            guard state == .checking else { return }
-            try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled, state == .checking else { return }
-            showDelayedCheckingState = true
-        }
-        .transaction { transaction in
-            transaction.animation = nil
-        }
-    }
-
-    private var statusCard: some View {
         HStack(spacing: 16) {
-            Group {
-                if isChecking {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "lock")
-                        .font(.title3)
-                }
-            }
+            Image(systemName: "lock")
+                .font(.title3)
             .frame(width: 26)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(isChecking ? "正在确认会话状态…" : "已在另一个应用中打开")
+                Text("已在另一个应用中打开")
                     .font(.headline)
-                Text(isChecking
-                     ? "确认完成后即可继续输入。"
-                     : (model.threadOwnershipNotice ?? AppModel.occupiedThreadMessage))
+                Text(model.threadOwnershipNotice ?? AppModel.occupiedThreadMessage)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
             Spacer(minLength: 16)
 
-            if !isChecking {
-                Divider()
-                    .frame(height: 38)
-                Button("重试") {
-                    Task { await model.retrySelectedThreadOwnership() }
-                }
-                .buttonStyle(.plain)
-                .font(.callout.weight(.medium))
-                .padding(.horizontal, 12)
+            Divider()
+                .frame(height: 38)
+            Button("重试") {
+                Task { await model.retrySelectedThreadOwnership() }
             }
+            .buttonStyle(.plain)
+            .font(.callout.weight(.medium))
+            .padding(.horizontal, 12)
+            // Keep the checking and occupied cards pixel-identical. The first
+            // ownership request is already in flight, so ignore extra clicks
+            // without dimming or moving the retry control.
+            .allowsHitTesting(!isChecking)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 18)
@@ -745,9 +713,10 @@ private struct ThreadInputUnavailableView: View {
                 .padding(.vertical, 10)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(isChecking
-                            ? "正在确认会话状态"
-                            : "已在另一个应用中打开，请先在那边关闭会话，才能在这里继续")
+        .accessibilityLabel("已在另一个应用中打开，请先在那边关闭会话，才能在这里继续")
+        .transaction { transaction in
+            transaction.animation = nil
+        }
     }
 }
 
@@ -1179,13 +1148,13 @@ private struct MessageList: View {
     let messages: [ChatMessage]
     let isLoading: Bool
     let isThinking: Bool
+    @State private var showDelayedLoadingIndicator = false
     @State private var isAtLatest = true
     @State private var hasUnseenUpdates = false
     @State private var hasNewContentBelow = false
     @State private var visibleMessageLimit = 12
     @State private var viewportResetID = UUID()
     @State private var scrollViewportController = MessageScrollViewportController()
-    @State private var entryViewportOffsets: [String: CGFloat] = [:]
 
     private let messageBatchSize = 12
 
@@ -1199,9 +1168,16 @@ private struct MessageList: View {
         ZStack(alignment: .bottomTrailing) {
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 18) {
+                    VStack(spacing: 18) {
                         if messages.isEmpty && isLoading {
-                            ProgressView("正在读取会话…").padding(.top, 80)
+                            Group {
+                                if showDelayedLoadingIndicator {
+                                    ProgressView("正在读取会话…")
+                                } else {
+                                    Color.clear
+                                }
+                            }
+                            .frame(minHeight: 110)
                         } else if messages.isEmpty {
                             ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
                                 .padding(.top, 80)
@@ -1210,27 +1186,12 @@ private struct MessageList: View {
                         if hiddenEntryCount > 0 {
                             Button {
                                 let anchorID = prependAnchorID(in: entries)
-                                scrollViewportController.prepareForPrepend(
-                                    anchorViewportOffset: anchorID.flatMap { entryViewportOffsets[$0] }
-                                )
+                                let alignment = scrollViewportController.prependAlignment(for: anchorID)
+                                scrollViewportController.pendingAnchor = anchorID.map { ($0, alignment) }
                                 var transaction = Transaction()
                                 transaction.disablesAnimations = true
                                 withTransaction(transaction) {
                                     visibleMessageLimit = min(entries.count, visibleMessageLimit + messageBatchSize)
-                                }
-                                // Make the old boundary entry deterministic after the
-                                // LazyVStack grows. The native controller then restores
-                                // its exact pre-click screen Y, so the newly inserted
-                                // history occupies only the space above the viewport.
-                                DispatchQueue.main.async {
-                                    if let anchorID {
-                                        var scrollTransaction = Transaction()
-                                        scrollTransaction.disablesAnimations = true
-                                        withTransaction(scrollTransaction) {
-                                            proxy.scrollTo(anchorID, anchor: .top)
-                                        }
-                                    }
-                                    scrollViewportController.finishPrependAfterLayout()
                                 }
                             } label: {
                                 Label(
@@ -1250,18 +1211,19 @@ private struct MessageList: View {
                         }
 
                         ForEach(entries.suffix(visibleMessageLimit)) { entry in
-                            switch entry {
-                            case .message(let message):
-                                MessageBubble(message: message)
-                                    .equatable()
-                                    .id(entry.id)
-                                    .background(messageEntryOffsetReader(id: entry.id))
-                            case .process(let group):
-                                ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
-                                    .equatable()
-                                    .id(entry.id)
-                                    .background(messageEntryOffsetReader(id: entry.id))
+                            VStack(spacing: 0) {
+                                switch entry {
+                                case .message(let message):
+                                    MessageBubble(message: message)
+                                        .equatable()
+                                        .background(messageEntryOffsetReader(id: entry.id))
+                                case .process(let group):
+                                    ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
+                                        .equatable()
+                                        .background(messageEntryOffsetReader(id: entry.id))
+                                }
                             }
+                            .id(entry.id)
                         }
 
                         if isThinking && currentProcessID == nil {
@@ -1280,9 +1242,21 @@ private struct MessageList: View {
                     .defaultScrollAnchor(.bottom)
                     .coordinateSpace(name: "message-scroll-viewport")
                     .id(viewportResetID)
+                    .onChange(of: visibleMessageLimit) { _, _ in
+                        guard let (id, alignment) = scrollViewportController.pendingAnchor else { return }
+                        scrollViewportController.pendingAnchor = nil
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            proxy.scrollTo(id, anchor: alignment)
+                        }
+                    }
                 }
                 .onPreferenceChange(MessageEntryViewportOffsetPreferenceKey.self) { offsets in
-                    entryViewportOffsets = offsets
+                    // Geometry is a measurement cache, not display state.
+                    // Publishing every lazy-layout offset back into SwiftUI
+                    // invalidates the list while it is still placing its rows.
+                    scrollViewportController.entryViewportOffsets = offsets
                 }
 
             if hasNewContentBelow && !isAtLatest {
@@ -1306,6 +1280,13 @@ private struct MessageList: View {
             isAtLatest = true
             hasUnseenUpdates = false
             hasNewContentBelow = false
+        }
+        .task(id: isLoading) {
+            showDelayedLoadingIndicator = false
+            guard isLoading, messages.isEmpty else { return }
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled, isLoading, messages.isEmpty else { return }
+            showDelayedLoadingIndicator = true
         }
         .onChange(of: messages.last?.id) { _, _ in
             handleNewMessage()
@@ -1343,7 +1324,7 @@ private struct MessageList: View {
         GeometryReader { geometry in
             Color.clear.preference(
                 key: MessageEntryViewportOffsetPreferenceKey.self,
-                value: [id: geometry.frame(in: .named("message-scroll-viewport")).minY]
+                value: [id: geometry.frame(in: .named("message-scroll-viewport"))]
             )
         }
     }
@@ -1381,9 +1362,9 @@ private struct MessageList: View {
 }
 
 private struct MessageEntryViewportOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
+    static var defaultValue: [String: CGRect] = [:]
 
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, newest in newest })
     }
 }
@@ -1514,7 +1495,6 @@ private final class ScrollLatestProbeView: NSView {
             object: scrollView.contentView,
             queue: .main
         ) { [weak self] _ in
-            self?.viewportController?.viewportDidScroll()
             self?.reportCurrentPosition()
         })
 
@@ -1549,190 +1529,27 @@ private final class ScrollLatestProbeView: NSView {
     }
 }
 
-private final class FrozenMessageViewportOverlay: NSImageView {
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-}
-
 private final class MessageScrollViewportController {
+    var pendingAnchor: (String, UnitPoint)?
+    var entryViewportOffsets: [String: CGRect] = [:]
     private weak var scrollView: NSScrollView?
-    private weak var observedDocumentView: NSView?
-    private var documentFrameObserver: NSObjectProtocol?
-    private var frozenOverlay: FrozenMessageViewportOverlay?
-    private var preservation: PrependPreservation?
-    private var isWaitingForPrependLayout = false
-    private var lastProgrammaticOriginY: CGFloat?
-    private var didApplyNativeAnchorCorrection = false
-    private var isAnchorRestorationReady = false
-
-    private struct PrependPreservation {
-        let token: UUID
-        let baselineDocumentHeight: CGFloat
-        let baselineOriginY: CGFloat
-        let documentIsFlipped: Bool
-        let anchorViewportOffset: CGFloat?
-    }
-
-    deinit {
-        if let documentFrameObserver {
-            NotificationCenter.default.removeObserver(documentFrameObserver)
-        }
-    }
 
     func attach(_ scrollView: NSScrollView) {
         self.scrollView = scrollView
-        guard let documentView = scrollView.documentView else { return }
-        guard observedDocumentView !== documentView else { return }
-        if let documentFrameObserver {
-            NotificationCenter.default.removeObserver(documentFrameObserver)
-        }
-        observedDocumentView = documentView
-        documentView.postsFrameChangedNotifications = true
-        documentFrameObserver = NotificationCenter.default.addObserver(
-            forName: NSView.frameDidChangeNotification,
-            object: documentView,
-            queue: .main
-        ) { [weak self] _ in
-            self?.restoreLockedViewport()
-        }
     }
 
-    func prepareForPrepend(anchorViewportOffset: CGFloat?) {
-        guard let scrollView,
-              let documentView = scrollView.documentView else { return }
-        scrollView.window?.layoutIfNeeded()
-        documentView.layoutSubtreeIfNeeded()
-        removeFrozenOverlay()
-        freezeVisibleViewport(of: scrollView)
-        isWaitingForPrependLayout = true
-        didApplyNativeAnchorCorrection = false
-        isAnchorRestorationReady = false
-        lastProgrammaticOriginY = scrollView.contentView.bounds.origin.y
-        preservation = PrependPreservation(
-            token: UUID(),
-            baselineDocumentHeight: documentView.bounds.height,
-            baselineOriginY: scrollView.contentView.bounds.origin.y,
-            documentIsFlipped: documentView.isFlipped,
-            anchorViewportOffset: anchorViewportOffset
-        )
-    }
-
-    func finishPrependAfterLayout() {
-        guard let token = preservation?.token else { return }
-        // `ScrollViewReader.scrollTo` commits its native clip-view position
-        // after the surrounding SwiftUI layout pass. Do not restore during
-        // the document-frame notification: that early correction would be
-        // overwritten by the pending scrollTo and the old content would jump
-        // to the top. Keep the frozen viewport visible until both phases have
-        // settled, then apply exactly one native correction.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
-            guard self?.preservation?.token == token else { return }
-            self?.isAnchorRestorationReady = true
-            self?.layoutAndRestoreLockedViewport()
-            self?.isWaitingForPrependLayout = false
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
-            guard self?.preservation?.token == token else { return }
-            self?.layoutAndRestoreLockedViewport()
-            self?.preservation = nil
-            self?.didApplyNativeAnchorCorrection = false
-            self?.isAnchorRestorationReady = false
-            self?.lastProgrammaticOriginY = nil
-            self?.removeFrozenOverlay()
-        }
-    }
-
-    func viewportDidScroll() {
-        guard preservation != nil,
-              !isWaitingForPrependLayout,
-              let scrollView else { return }
-        let currentOriginY = scrollView.contentView.bounds.origin.y
-        if let lastProgrammaticOriginY,
-           abs(currentOriginY - lastProgrammaticOriginY) <= 0.5 {
-            return
-        }
-        // Once the user starts scrolling, the prepend transaction is over.
-        // Never pull the viewport back to its pre-click position.
-        preservation = nil
-        didApplyNativeAnchorCorrection = false
-        isAnchorRestorationReady = false
-        self.lastProgrammaticOriginY = nil
-        removeFrozenOverlay()
-    }
-
-    private func freezeVisibleViewport(of scrollView: NSScrollView) {
-        let clipView = scrollView.contentView
-        let visibleBounds = clipView.bounds
-        guard visibleBounds.width > 0,
-              visibleBounds.height > 0,
-              let bitmap = clipView.bitmapImageRepForCachingDisplay(in: visibleBounds) else { return }
-        clipView.cacheDisplay(in: visibleBounds, to: bitmap)
-        let image = NSImage(size: visibleBounds.size)
-        image.addRepresentation(bitmap)
-
-        let overlay = FrozenMessageViewportOverlay(frame: clipView.frame)
-        overlay.image = image
-        overlay.imageScaling = .scaleAxesIndependently
-        overlay.imageAlignment = .alignTopLeft
-        overlay.autoresizingMask = [.width, .height]
-        overlay.setAccessibilityElement(false)
-        scrollView.addSubview(overlay, positioned: .above, relativeTo: clipView)
-        frozenOverlay = overlay
-    }
-
-    private func layoutAndRestoreLockedViewport() {
-        scrollView?.window?.layoutIfNeeded()
-        scrollView?.documentView?.layoutSubtreeIfNeeded()
-        restoreLockedViewport()
-    }
-
-    private func restoreLockedViewport() {
-        guard let preservation,
+    func prependAlignment(for id: String?) -> UnitPoint {
+        guard let id,
+              let frame = entryViewportOffsets[id],
               let scrollView,
-              let documentView = scrollView.documentView else { return }
-        let clipView = scrollView.contentView
-        var bounds = clipView.bounds
-        if let anchorViewportOffset = preservation.anchorViewportOffset {
-            guard isAnchorRestorationReady else { return }
-            guard !didApplyNativeAnchorCorrection else { return }
-            guard anchorViewportOffset > 0.25 else { return }
-            bounds.origin.y = HistoryPrependGeometry.windowAnchorLockedOrigin(
-                currentOrigin: bounds.origin.y,
-                anchorDisplacement: anchorViewportOffset,
-                documentIsFlipped: preservation.documentIsFlipped
-            )
-            didApplyNativeAnchorCorrection = true
-        } else {
-            bounds.origin.y = HistoryPrependGeometry.lockedOrigin(
-                baselineOrigin: preservation.baselineOriginY,
-                baselineDocumentHeight: preservation.baselineDocumentHeight,
-                currentDocumentHeight: documentView.bounds.height,
-                documentIsFlipped: preservation.documentIsFlipped
-            )
-        }
-        let constrained = clipView.constrainBoundsRect(bounds)
-        guard abs(constrained.origin.y - clipView.bounds.origin.y) > 0.25 else { return }
-        lastProgrammaticOriginY = constrained.origin.y
-        clipView.scroll(to: constrained.origin)
-        scrollView.reflectScrolledClipView(clipView)
-        if didApplyNativeAnchorCorrection {
-            DispatchQueue.main.async { [weak self] in
-                guard self?.didApplyNativeAnchorCorrection == true else { return }
-                self?.preservation = nil
-                self?.isAnchorRestorationReady = false
-                self?.lastProgrammaticOriginY = nil
-                self?.removeFrozenOverlay()
-            }
-        }
-    }
-
-    private func removeFrozenOverlay() {
-        frozenOverlay?.removeFromSuperview()
-        frozenOverlay = nil
+              scrollView.contentView.bounds.height > 0 else { return .top }
+        // For a row of height h in viewport H, scrollTo places its top at
+        // (H - h) * anchor.y. Solve for the existing measured top offset.
+        let available = scrollView.contentView.bounds.height - frame.height
+        guard abs(available) > 0.5 else { return .top }
+        return UnitPoint(x: 0, y: frame.minY / available)
     }
 }
-
 enum HistoryPrependGeometry {
     static func windowAnchorLockedOrigin(
         currentOrigin: CGFloat,
