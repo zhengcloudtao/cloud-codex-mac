@@ -2,6 +2,12 @@ import Foundation
 import SwiftUI
 
 struct AccountOverview {
+    struct WeeklyUsageRecommendation: Equatable {
+        let title: String
+        let value: String
+        let detail: String
+    }
+
     let plan: String
     let usage: RemoteUsageSnapshot
     let subscriptionPeriodEnd: Date?
@@ -49,6 +55,50 @@ struct AccountOverview {
     var compactResetCredits: String? {
         usage.resetCredits?.availableCount.map { "\($0) 次" }
     }
+
+    func weeklyUsageRecommendation(now: Date = Date()) -> WeeklyUsageRecommendation? {
+        guard let window = primaryBucket?.windows.first(where: { $0.windowDurationMins == 10_080 }),
+              let used = window.usedPercent,
+              let resetsAt = window.resetsAt,
+              used.isFinite,
+              resetsAt.isFinite else { return nil }
+
+        let secondsRemaining = resetsAt - now.timeIntervalSince1970
+        guard secondsRemaining > 0 else { return nil }
+
+        let remaining = max(0, min(100, 100 - used))
+        let isDueWithinOneDay = secondsRemaining <= 24 * 60 * 60
+        let recommended = isDueWithinOneDay
+            ? remaining
+            : min(remaining, remaining * 24 * 60 * 60 / secondsRemaining)
+        let value = Self.percentageLabel(recommended)
+        let remainingLabel = Self.percentageLabel(remaining)
+
+        if isDueWithinOneDay {
+            return .init(
+                title: "重置前建议",
+                value: value,
+                detail: remaining > 0
+                    ? "距每周重置不足 24 小时。建议在重置前使用剩余 \(remainingLabel)，否则该部分额度会未使用。"
+                    : "本周额度已经用完，等待下一次每周重置。"
+            )
+        }
+        return .init(
+            title: "24小时建议",
+            value: value,
+            detail: remaining > 0
+                ? "按当前剩余 \(remainingLabel) 和每周重置时间计算，接下来 24 小时建议至少使用 \(value)。低于这个进度，之后需要加快使用才能在重置前用完。"
+                : "本周额度已经用完，等待下一次每周重置。"
+        )
+    }
+
+    private static func percentageLabel(_ value: Double) -> String {
+        let roundedUp = ceil(max(0, min(100, value)) * 10) / 10
+        if roundedUp.rounded() == roundedUp {
+            return "\(Int(roundedUp))%"
+        }
+        return String(format: "%.1f%%", roundedUp)
+    }
 }
 
 struct AccountOverviewRefreshIssue: Equatable {
@@ -88,33 +138,38 @@ struct AccountOverviewView: View {
     var body: some View {
         Button { expanded.toggle() } label: {
             if let account = model.accountOverview {
-                HStack(spacing: 12) {
-                    Text(account.planDisplayName)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(Color.accentColor.opacity(0.12), in: Capsule())
-                    if let value = account.compactRemaining(minutes: 300) {
-                        quotaColumn("5小时剩余", value: value)
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    HStack(spacing: 12) {
+                        Text(account.planDisplayName)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+                        if let value = account.compactRemaining(minutes: 300) {
+                            quotaColumn("5小时剩余", value: value)
+                        }
+                        if let value = account.compactRemaining(minutes: 10_080) {
+                            quotaColumn("每周剩余", value: value)
+                        }
+                        if let recommendation = account.weeklyUsageRecommendation(now: context.date) {
+                            quotaColumn(recommendation.title, value: recommendation.value, help: recommendation.detail)
+                        }
+                        if let value = account.compactResetCredits {
+                            quotaColumn("可用重置", value: value)
+                        }
+                        Image(systemName: model.accountOverviewError == nil ? "chevron.down" : "exclamationmark.circle")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(model.accountOverviewError == nil ? Color.secondary : Color.orange)
+                            // Keep the compact glyph, but give the toolbar edge a
+                            // full-sized hit target instead of only the drawn pixels.
+                            .frame(width: 32, height: 30)
+                            .contentShape(Rectangle())
                     }
-                    if let value = account.compactRemaining(minutes: 10_080) {
-                        quotaColumn("每周剩余", value: value)
-                    }
-                    if let value = account.compactResetCredits {
-                        quotaColumn("可用重置", value: value)
-                    }
-                    Image(systemName: model.accountOverviewError == nil ? "chevron.down" : "exclamationmark.circle")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(model.accountOverviewError == nil ? Color.secondary : Color.orange)
-                        // Keep the compact glyph, but give the toolbar edge a
-                        // full-sized hit target instead of only the drawn pixels.
-                        .frame(width: 32, height: 30)
-                        .contentShape(Rectangle())
+                    .lineLimit(1)
+                    .contentShape(Rectangle())
+                    // The toolbar supplies its own rounded container. Adding another
+                    // background and stroke here produces two overlapping outlines.
                 }
-                .lineLimit(1)
-                .contentShape(Rectangle())
-                // The toolbar supplies its own rounded container. Adding another
-                // background and stroke here produces two overlapping outlines.
             } else {
                 Label("套餐与额度", systemImage: "chart.bar")
             }
@@ -146,6 +201,17 @@ struct AccountOverviewView: View {
                                 }
                             }
                             if account.usage.buckets.isEmpty { Text("当前账号未提供额度窗口。") }
+                            if let recommendation = account.weeklyUsageRecommendation() {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("\(recommendation.title)：\(recommendation.value)")
+                                        .fontWeight(.semibold)
+                                    Text(recommendation.detail)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
                             Divider()
                             Text("可用重置次数：\(account.usage.resetCredits?.availableCount.map(String.init) ?? "未提供")")
                                 .fontWeight(.semibold)
@@ -218,13 +284,13 @@ struct AccountOverviewView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func quotaColumn(_ title: String, value: String) -> some View {
+    private func quotaColumn(_ title: String, value: String, help: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
             Text(value).font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
         }
         .frame(minWidth: 48, alignment: .leading)
-        .help(title + "：" + value)
+        .help(help ?? title + "：" + value)
     }
 
     private func windowName(_ minutes: Int?) -> String {

@@ -75,4 +75,63 @@ final class AccountOverviewTests: XCTestCase {
         XCTAssertEqual(account.compactRemaining(minutes: 10_080), "74%")
         XCTAssertEqual(account.compactResetCredits, "0 次")
     }
+
+    func testWeeklyRecommendationUsesRemainingQuotaAndResetTime() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = AccountOverview.parse([
+            "rateLimitsByLimitId": ["codex": ["planType": "pro",
+                "primary": [
+                    "usedPercent": 25,
+                    "windowDurationMins": 10_080,
+                    "resetsAt": Int(now.addingTimeInterval(3 * 24 * 60 * 60).timeIntervalSince1970)
+                ]]]
+        ])
+
+        let recommendation = try XCTUnwrap(account.weeklyUsageRecommendation(now: now))
+        XCTAssertEqual(recommendation.title, "24小时建议")
+        XCTAssertEqual(recommendation.value, "25%")
+        XCTAssertTrue(recommendation.detail.contains("当前剩余 75%"))
+    }
+
+    func testWeeklyRecommendationUsesAllRemainingQuotaWithinOneDay() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = AccountOverview.parse([
+            "rateLimits": ["planType": "plus", "primary": [
+                "usedPercent": 26,
+                "windowDurationMins": 10_080,
+                "resetsAt": Int(now.addingTimeInterval(12 * 60 * 60).timeIntervalSince1970)
+            ]]
+        ])
+
+        let recommendation = try XCTUnwrap(account.weeklyUsageRecommendation(now: now))
+        XCTAssertEqual(recommendation.title, "重置前建议")
+        XCTAssertEqual(recommendation.value, "74%")
+        XCTAssertTrue(recommendation.detail.contains("不足 24 小时"))
+    }
+
+    func testWeeklyRecommendationRoundsUpAndHidesUnknownOrExpiredWindows() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = AccountOverview.parse([
+            "rateLimits": ["primary": [
+                "usedPercent": 50,
+                "windowDurationMins": 10_080,
+                "resetsAt": Int(now.addingTimeInterval(7 * 24 * 60 * 60).timeIntervalSince1970)
+            ]]
+        ])
+        XCTAssertEqual(try XCTUnwrap(account.weeklyUsageRecommendation(now: now)).value, "7.2%")
+
+        let unknownReset = AccountOverview.parse([
+            "rateLimits": ["primary": ["usedPercent": 50, "windowDurationMins": 10_080]]
+        ])
+        XCTAssertNil(unknownReset.weeklyUsageRecommendation(now: now))
+
+        let expired = AccountOverview.parse([
+            "rateLimits": ["primary": [
+                "usedPercent": 50,
+                "windowDurationMins": 10_080,
+                "resetsAt": Int(now.addingTimeInterval(-1).timeIntervalSince1970)
+            ]]
+        ])
+        XCTAssertNil(expired.weeklyUsageRecommendation(now: now))
+    }
 }
