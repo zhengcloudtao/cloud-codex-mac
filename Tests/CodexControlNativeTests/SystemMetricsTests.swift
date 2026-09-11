@@ -59,6 +59,27 @@ final class SystemMetricsTests: XCTestCase {
                                          workspaces: [], threads: [])
         let legacyObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
         XCTAssertNil(legacyObject["systemMetrics"])
+        XCTAssertNil(legacyObject["connectionHealth"])
+    }
+
+    func testHeartbeatEncodesSanitizedConnectionHealthSnapshot() throws {
+        let health = RemoteConnectionHealthSnapshot(networkState: "connected", gptState: "failed",
+                                                    failureKind: "timeout", checkedAt: 120, capturedAt: 123)
+        let body = RemoteHeartbeatBody(name: "Mac", permissionLabel: "full", remoteControlReady: true,
+                                       workspaces: [], threads: [], connectionHealth: health)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(body)) as? [String: Any])
+        let encoded = try XCTUnwrap(object["connectionHealth"] as? [String: Any])
+        XCTAssertEqual(encoded["networkState"] as? String, "connected")
+        XCTAssertEqual(encoded["gptState"] as? String, "failed")
+        XCTAssertEqual(encoded["failureKind"] as? String, "timeout")
+        XCTAssertNil(encoded["detail"])
+    }
+
+    func testConnectionFailureClassificationDoesNotExposeRawErrors() {
+        XCTAssertEqual(RemoteConnectionHealthSnapshot.failureKind(for: "401 Unauthorized token_revoked"), "auth")
+        XCTAssertEqual(RemoteConnectionHealthSnapshot.failureKind(for: "request timed out"), "timeout")
+        XCTAssertEqual(RemoteConnectionHealthSnapshot.failureKind(for: "method not supported"), "unsupported")
+        XCTAssertEqual(RemoteConnectionHealthSnapshot.failureKind(for: "unexpected response"), "unknown")
     }
 
     @MainActor

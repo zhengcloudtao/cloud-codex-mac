@@ -553,6 +553,7 @@ struct ContentView: View {
             } actions: {
                 Button("新建会话", action: model.prepareNewThread)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
     }
 

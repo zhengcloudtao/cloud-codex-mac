@@ -106,8 +106,13 @@ struct AccountOverviewView: View {
                     Image(systemName: model.accountOverviewError == nil ? "chevron.down" : "exclamationmark.circle")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(model.accountOverviewError == nil ? Color.secondary : Color.orange)
+                        // Keep the compact glyph, but give the toolbar edge a
+                        // full-sized hit target instead of only the drawn pixels.
+                        .frame(width: 32, height: 30)
+                        .contentShape(Rectangle())
                 }
                 .lineLimit(1)
+                .contentShape(Rectangle())
                 // The toolbar supplies its own rounded container. Adding another
                 // background and stroke here produces two overlapping outlines.
             } else {

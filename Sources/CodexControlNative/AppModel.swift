@@ -1805,7 +1805,8 @@ final class AppModel: ObservableObject {
             usage: remoteControlPaired ? remoteUsageSnapshot : nil,
             defaultModel: selectedModel?.model,
             defaultEffort: selectedEffort,
-            systemMetrics: remoteControlPaired && systemMetrics.snapshot.hasValues ? systemMetrics.snapshot : nil
+            systemMetrics: remoteControlPaired && systemMetrics.snapshot.hasValues ? systemMetrics.snapshot : nil,
+            connectionHealth: remoteControlPaired ? connectionHealth.remoteSnapshot : nil
         )
     }
 
