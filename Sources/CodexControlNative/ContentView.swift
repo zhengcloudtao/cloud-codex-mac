@@ -26,7 +26,7 @@ struct ContentView: View {
             // Detail content accepts the column's width, never the other way
             // around. Long prompts/code must not renegotiate the split view.
             GeometryReader { viewport in
-                conversation
+                BrowserConversationLayout(browser: model.browser, threadID: model.selectedThreadID) { conversation }
                     .frame(width: viewport.size.width, height: viewport.size.height)
             }
         }
@@ -36,6 +36,14 @@ struct ContentView: View {
         .navigationSplitViewStyle(.balanced)
         .toolbar { toolbar }
         .environment(\.openURL, OpenURLAction { url in
+            if ["https", "http"].contains(url.scheme?.lowercased() ?? ""), let threadID = model.selectedThreadID {
+                do {
+                    _ = try BrowserTool.url(url.absoluteString)
+                    let tab = try model.browser.create(threadID: threadID)
+                    try tab.navigate(url.absoluteString)
+                } catch { model.errorMessage = error.localizedDescription }
+                return .handled
+            }
             guard let target = LocalFilePreviewTarget.resolve(url, cwd: model.selectedThread?.cwd ?? model.selectedFolder) else {
                 return .systemAction
             }
@@ -564,6 +572,11 @@ struct ContentView: View {
             .fixedSize(horizontal: true, vertical: false)
         }
         ToolbarItemGroup {
+            Button {
+                model.browser.visible.toggle()
+            } label: {
+                Image(systemName: "globe")
+            }.help("内置浏览器")
             Button {
                 Task { await model.refreshThreads() }
             } label: {

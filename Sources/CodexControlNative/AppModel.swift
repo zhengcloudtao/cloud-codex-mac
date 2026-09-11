@@ -9,6 +9,7 @@ enum ThreadInputAvailability: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    let browser = EmbeddedBrowser()
     let connectionHealth = ConnectionHealth()
     let systemMetrics = SystemMetricsMonitor()
     @Published private(set) var accountOverview: AccountOverview?
@@ -2129,6 +2130,22 @@ final class AppModel: ObservableObject {
     }
 
     func handleServerRequest(_ requestID: AppServerRequestID, method: String, params: [String: Any]) {
+        if method == "item/tool/call" {
+            Task { [weak self] in
+                guard let self else { return }
+                let result: [String: Any]
+                if params["tool"] as? String == BrowserTool.name,
+                   let threadID = params["threadId"] as? String,
+                   let arguments = params["arguments"] as? [String: Any] {
+                    result = await browser.execute(threadID: threadID, arguments: arguments)
+                } else {
+                    result = BrowserTool.result("CloudCodex 不支持此动态工具。", success: false)
+                }
+                do { try client.respond(to: requestID, result: result) }
+                catch { errorMessage = "浏览器结果发送失败：\(error.localizedDescription)" }
+            }
+            return
+        }
         guard method == "item/tool/requestUserInput",
               let request = UserInputRequest(requestID: requestID, params: params, timeout: userInputTimeoutSeconds) else { return }
         userInputTimeoutTasks.removeValue(forKey: request.id)?.cancel()

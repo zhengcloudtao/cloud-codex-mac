@@ -421,7 +421,7 @@ final class AppServerClient {
     }
 
     func createThread(cwd: String, model: String?, permissions: String?) async throws -> CodexThread {
-        var params: JSON = ["cwd": cwd, "ephemeral": false]
+        var params: JSON = ["cwd": cwd, "ephemeral": false, "dynamicTools": [BrowserTool.specification]]
         if let model { params["model"] = model }
         if let permissions { params["permissions"] = permissions }
         let result = try await request(
