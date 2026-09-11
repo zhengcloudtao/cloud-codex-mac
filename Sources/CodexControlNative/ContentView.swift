@@ -530,7 +530,12 @@ struct ContentView: View {
                     }
                 }
                 Divider()
-                Composer(mode: .conversation)
+                switch model.threadInputAvailability {
+                case .checking, .occupied:
+                    ThreadInputUnavailableView(state: model.threadInputAvailability)
+                case .available:
+                    Composer(mode: .conversation)
+                }
             }
         } else {
             ContentUnavailableView {
@@ -661,6 +666,89 @@ struct ContentView: View {
         .frame(width: 400)
     }
 
+}
+
+private struct ThreadInputUnavailableView: View {
+    @EnvironmentObject private var model: AppModel
+    let state: ThreadInputAvailability
+    @State private var showDelayedCheckingState = false
+
+    private var isChecking: Bool { state == .checking }
+
+    var body: some View {
+        Group {
+            if state == .occupied || showDelayedCheckingState {
+                statusCard
+            } else {
+                // Most ownership checks finish immediately. Reserve the final
+                // card's space without briefly flashing a loading card first.
+                Color.clear
+                    .frame(minHeight: 82)
+                    .accessibilityHidden(true)
+            }
+        }
+        .task(id: state) {
+            showDelayedCheckingState = false
+            guard state == .checking else { return }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, state == .checking else { return }
+            showDelayedCheckingState = true
+        }
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+    }
+
+    private var statusCard: some View {
+        HStack(spacing: 16) {
+            Group {
+                if isChecking {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "lock")
+                        .font(.title3)
+                }
+            }
+            .frame(width: 26)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(isChecking ? "正在确认会话状态…" : "已在另一个应用中打开")
+                    .font(.headline)
+                Text(isChecking
+                     ? "确认完成后即可继续输入。"
+                     : (model.threadOwnershipNotice ?? AppModel.occupiedThreadMessage))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 16)
+
+            if !isChecking {
+                Divider()
+                    .frame(height: 38)
+                Button("重试") {
+                    Task { await model.retrySelectedThreadOwnership() }
+                }
+                .buttonStyle(.plain)
+                .font(.callout.weight(.medium))
+                .padding(.horizontal, 12)
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 18)
+        .background(Color(nsColor: .textBackgroundColor))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(.quaternary)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(isChecking
+                            ? "正在确认会话状态"
+                            : "已在另一个应用中打开，请先在那边关闭会话，才能在这里继续")
+    }
 }
 
 private struct ConnectionHealthView: View {
@@ -1096,6 +1184,8 @@ private struct MessageList: View {
     @State private var hasNewContentBelow = false
     @State private var visibleMessageLimit = 12
     @State private var viewportResetID = UUID()
+    @State private var scrollViewportController = MessageScrollViewportController()
+    @State private var entryViewportOffsets: [String: CGFloat] = [:]
 
     private let messageBatchSize = 12
 
@@ -1107,56 +1197,93 @@ private struct MessageList: View {
             return group.id
         }()
         ZStack(alignment: .bottomTrailing) {
-            ScrollView {
-                VStack(spacing: 18) {
-                    if messages.isEmpty && isLoading {
-                        ProgressView("正在读取会话…").padding(.top, 80)
-                    } else if messages.isEmpty {
-                        ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
-                            .padding(.top, 80)
-                    }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 18) {
+                        if messages.isEmpty && isLoading {
+                            ProgressView("正在读取会话…").padding(.top, 80)
+                        } else if messages.isEmpty {
+                            ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
+                                .padding(.top, 80)
+                        }
 
-                    if hiddenEntryCount > 0 {
-                        Button {
-                            visibleMessageLimit = min(entries.count, visibleMessageLimit + messageBatchSize)
-                        } label: {
-                            Label(
-                                "显示更早的 \(min(messageBatchSize, hiddenEntryCount)) 段内容",
-                                systemImage: "clock.arrow.circlepath"
+                        if hiddenEntryCount > 0 {
+                            Button {
+                                let anchorID = prependAnchorID(in: entries)
+                                scrollViewportController.prepareForPrepend(
+                                    anchorViewportOffset: anchorID.flatMap { entryViewportOffsets[$0] }
+                                )
+                                var transaction = Transaction()
+                                transaction.disablesAnimations = true
+                                withTransaction(transaction) {
+                                    visibleMessageLimit = min(entries.count, visibleMessageLimit + messageBatchSize)
+                                }
+                                // Make the old boundary entry deterministic after the
+                                // LazyVStack grows. The native controller then restores
+                                // its exact pre-click screen Y, so the newly inserted
+                                // history occupies only the space above the viewport.
+                                DispatchQueue.main.async {
+                                    if let anchorID {
+                                        var scrollTransaction = Transaction()
+                                        scrollTransaction.disablesAnimations = true
+                                        withTransaction(scrollTransaction) {
+                                            proxy.scrollTo(anchorID, anchor: .top)
+                                        }
+                                    }
+                                    scrollViewportController.finishPrependAfterLayout()
+                                }
+                            } label: {
+                                Label(
+                                    "显示更早的 \(min(messageBatchSize, hiddenEntryCount)) 段内容",
+                                    systemImage: "clock.arrow.circlepath"
+                                )
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                            }
+                            .buttonStyle(.plain)
+                            .background(.quaternary.opacity(0.65), in: Capsule())
+
+                            Text("已折叠更早的 \(hiddenEntryCount) 段对话，执行过程可单独展开")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+
+                        ForEach(entries.suffix(visibleMessageLimit)) { entry in
+                            switch entry {
+                            case .message(let message):
+                                MessageBubble(message: message)
+                                    .equatable()
+                                    .id(entry.id)
+                                    .background(messageEntryOffsetReader(id: entry.id))
+                            case .process(let group):
+                                ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
+                                    .equatable()
+                                    .id(entry.id)
+                                    .background(messageEntryOffsetReader(id: entry.id))
+                            }
+                        }
+
+                        if isThinking && currentProcessID == nil {
+                            ThinkingIndicator()
+                                .id("persistent-thinking-indicator")
+                        }
+                    }
+                        .padding(22)
+                        .background(
+                            ScrollLatestObserver(
+                                isAtLatest: $isAtLatest,
+                                viewportController: scrollViewportController
                             )
-                            .font(.caption.weight(.medium))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                        }
-                        .buttonStyle(.plain)
-                        .background(.quaternary.opacity(0.65), in: Capsule())
-
-                        Text("已折叠更早的 \(hiddenEntryCount) 段对话，执行过程可单独展开")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                        )
                     }
-
-                    ForEach(entries.suffix(visibleMessageLimit)) { entry in
-                        switch entry {
-                        case .message(let message):
-                            MessageBubble(message: message)
-                                .equatable()
-                        case .process(let group):
-                            ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
-                                .equatable()
-                        }
-                    }
-
-                    if isThinking && currentProcessID == nil {
-                        ThinkingIndicator()
-                            .id("persistent-thinking-indicator")
-                    }
+                    .defaultScrollAnchor(.bottom)
+                    .coordinateSpace(name: "message-scroll-viewport")
+                    .id(viewportResetID)
                 }
-                .padding(22)
-            }
-            .defaultScrollAnchor(.bottom)
-            .background(ScrollLatestObserver(isAtLatest: $isAtLatest))
-            .id(viewportResetID)
+                .onPreferenceChange(MessageEntryViewportOffsetPreferenceKey.self) { offsets in
+                    entryViewportOffsets = offsets
+                }
 
             if hasNewContentBelow && !isAtLatest {
                 Button {
@@ -1205,6 +1332,22 @@ private struct MessageList: View {
         }
     }
 
+    private func prependAnchorID(in entries: [ConversationTimelineEntry]) -> String? {
+        // The load button is rendered immediately before the current suffix.
+        // Its first entry is therefore the exact boundary that must remain
+        // fixed while older entries are inserted above it.
+        entries.suffix(visibleMessageLimit).first?.id
+    }
+
+    private func messageEntryOffsetReader(id: String) -> some View {
+        GeometryReader { geometry in
+            Color.clear.preference(
+                key: MessageEntryViewportOffsetPreferenceKey.self,
+                value: [id: geometry.frame(in: .named("message-scroll-viewport")).minY]
+            )
+        }
+    }
+
     private func handleNewMessage() {
         guard let last = messages.last else { return }
         if last.role == .user {
@@ -1234,6 +1377,14 @@ private struct MessageList: View {
     private var streamingScrollToken: String {
         guard let last = messages.last else { return "empty" }
         return "\(messages.count):\(last.id):\(last.text.count):\(last.isStreaming)"
+    }
+}
+
+private struct MessageEntryViewportOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newest in newest })
     }
 }
 
@@ -1279,6 +1430,7 @@ private struct ThinkingIndicator: View {
 /// actually changes, avoiding continuous layout invalidation while streaming.
 private struct ScrollLatestObserver: NSViewRepresentable {
     @Binding var isAtLatest: Bool
+    var viewportController: MessageScrollViewportController? = nil
 
     func makeNSView(context: Context) -> ScrollLatestProbeView {
         let view = ScrollLatestProbeView()
@@ -1295,6 +1447,7 @@ private struct ScrollLatestObserver: NSViewRepresentable {
     }
 
     private func update(_ view: ScrollLatestProbeView) {
+        view.viewportController = viewportController
         view.onLatestChanged = { latest in
             if isAtLatest != latest {
                 isAtLatest = latest
@@ -1306,6 +1459,7 @@ private struct ScrollLatestObserver: NSViewRepresentable {
 
 private final class ScrollLatestProbeView: NSView {
     var onLatestChanged: ((Bool) -> Void)?
+    weak var viewportController: MessageScrollViewportController?
 
     private weak var observedScrollView: NSScrollView?
     private var observationTokens: [NSObjectProtocol] = []
@@ -1344,12 +1498,14 @@ private final class ScrollLatestProbeView: NSView {
         }
         guard let scrollView = ancestor as? NSScrollView else { return }
         guard observedScrollView !== scrollView else {
+            viewportController?.attach(scrollView)
             reportCurrentPosition()
             return
         }
 
         disconnect()
         observedScrollView = scrollView
+        viewportController?.attach(scrollView)
 
         let center = NotificationCenter.default
         scrollView.contentView.postsBoundsChangedNotifications = true
@@ -1358,6 +1514,7 @@ private final class ScrollLatestProbeView: NSView {
             object: scrollView.contentView,
             queue: .main
         ) { [weak self] _ in
+            self?.viewportController?.viewportDidScroll()
             self?.reportCurrentPosition()
         })
 
@@ -1391,6 +1548,218 @@ private final class ScrollLatestProbeView: NSView {
         }
     }
 }
+
+private final class FrozenMessageViewportOverlay: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+private final class MessageScrollViewportController {
+    private weak var scrollView: NSScrollView?
+    private weak var observedDocumentView: NSView?
+    private var documentFrameObserver: NSObjectProtocol?
+    private var frozenOverlay: FrozenMessageViewportOverlay?
+    private var preservation: PrependPreservation?
+    private var isWaitingForPrependLayout = false
+    private var lastProgrammaticOriginY: CGFloat?
+    private var didApplyNativeAnchorCorrection = false
+    private var isAnchorRestorationReady = false
+
+    private struct PrependPreservation {
+        let token: UUID
+        let baselineDocumentHeight: CGFloat
+        let baselineOriginY: CGFloat
+        let documentIsFlipped: Bool
+        let anchorViewportOffset: CGFloat?
+    }
+
+    deinit {
+        if let documentFrameObserver {
+            NotificationCenter.default.removeObserver(documentFrameObserver)
+        }
+    }
+
+    func attach(_ scrollView: NSScrollView) {
+        self.scrollView = scrollView
+        guard let documentView = scrollView.documentView else { return }
+        guard observedDocumentView !== documentView else { return }
+        if let documentFrameObserver {
+            NotificationCenter.default.removeObserver(documentFrameObserver)
+        }
+        observedDocumentView = documentView
+        documentView.postsFrameChangedNotifications = true
+        documentFrameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: documentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.restoreLockedViewport()
+        }
+    }
+
+    func prepareForPrepend(anchorViewportOffset: CGFloat?) {
+        guard let scrollView,
+              let documentView = scrollView.documentView else { return }
+        scrollView.window?.layoutIfNeeded()
+        documentView.layoutSubtreeIfNeeded()
+        removeFrozenOverlay()
+        freezeVisibleViewport(of: scrollView)
+        isWaitingForPrependLayout = true
+        didApplyNativeAnchorCorrection = false
+        isAnchorRestorationReady = false
+        lastProgrammaticOriginY = scrollView.contentView.bounds.origin.y
+        preservation = PrependPreservation(
+            token: UUID(),
+            baselineDocumentHeight: documentView.bounds.height,
+            baselineOriginY: scrollView.contentView.bounds.origin.y,
+            documentIsFlipped: documentView.isFlipped,
+            anchorViewportOffset: anchorViewportOffset
+        )
+    }
+
+    func finishPrependAfterLayout() {
+        guard let token = preservation?.token else { return }
+        // `ScrollViewReader.scrollTo` commits its native clip-view position
+        // after the surrounding SwiftUI layout pass. Do not restore during
+        // the document-frame notification: that early correction would be
+        // overwritten by the pending scrollTo and the old content would jump
+        // to the top. Keep the frozen viewport visible until both phases have
+        // settled, then apply exactly one native correction.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            guard self?.preservation?.token == token else { return }
+            self?.isAnchorRestorationReady = true
+            self?.layoutAndRestoreLockedViewport()
+            self?.isWaitingForPrependLayout = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
+            guard self?.preservation?.token == token else { return }
+            self?.layoutAndRestoreLockedViewport()
+            self?.preservation = nil
+            self?.didApplyNativeAnchorCorrection = false
+            self?.isAnchorRestorationReady = false
+            self?.lastProgrammaticOriginY = nil
+            self?.removeFrozenOverlay()
+        }
+    }
+
+    func viewportDidScroll() {
+        guard preservation != nil,
+              !isWaitingForPrependLayout,
+              let scrollView else { return }
+        let currentOriginY = scrollView.contentView.bounds.origin.y
+        if let lastProgrammaticOriginY,
+           abs(currentOriginY - lastProgrammaticOriginY) <= 0.5 {
+            return
+        }
+        // Once the user starts scrolling, the prepend transaction is over.
+        // Never pull the viewport back to its pre-click position.
+        preservation = nil
+        didApplyNativeAnchorCorrection = false
+        isAnchorRestorationReady = false
+        self.lastProgrammaticOriginY = nil
+        removeFrozenOverlay()
+    }
+
+    private func freezeVisibleViewport(of scrollView: NSScrollView) {
+        let clipView = scrollView.contentView
+        let visibleBounds = clipView.bounds
+        guard visibleBounds.width > 0,
+              visibleBounds.height > 0,
+              let bitmap = clipView.bitmapImageRepForCachingDisplay(in: visibleBounds) else { return }
+        clipView.cacheDisplay(in: visibleBounds, to: bitmap)
+        let image = NSImage(size: visibleBounds.size)
+        image.addRepresentation(bitmap)
+
+        let overlay = FrozenMessageViewportOverlay(frame: clipView.frame)
+        overlay.image = image
+        overlay.imageScaling = .scaleAxesIndependently
+        overlay.imageAlignment = .alignTopLeft
+        overlay.autoresizingMask = [.width, .height]
+        overlay.setAccessibilityElement(false)
+        scrollView.addSubview(overlay, positioned: .above, relativeTo: clipView)
+        frozenOverlay = overlay
+    }
+
+    private func layoutAndRestoreLockedViewport() {
+        scrollView?.window?.layoutIfNeeded()
+        scrollView?.documentView?.layoutSubtreeIfNeeded()
+        restoreLockedViewport()
+    }
+
+    private func restoreLockedViewport() {
+        guard let preservation,
+              let scrollView,
+              let documentView = scrollView.documentView else { return }
+        let clipView = scrollView.contentView
+        var bounds = clipView.bounds
+        if let anchorViewportOffset = preservation.anchorViewportOffset {
+            guard isAnchorRestorationReady else { return }
+            guard !didApplyNativeAnchorCorrection else { return }
+            guard anchorViewportOffset > 0.25 else { return }
+            bounds.origin.y = HistoryPrependGeometry.windowAnchorLockedOrigin(
+                currentOrigin: bounds.origin.y,
+                anchorDisplacement: anchorViewportOffset,
+                documentIsFlipped: preservation.documentIsFlipped
+            )
+            didApplyNativeAnchorCorrection = true
+        } else {
+            bounds.origin.y = HistoryPrependGeometry.lockedOrigin(
+                baselineOrigin: preservation.baselineOriginY,
+                baselineDocumentHeight: preservation.baselineDocumentHeight,
+                currentDocumentHeight: documentView.bounds.height,
+                documentIsFlipped: preservation.documentIsFlipped
+            )
+        }
+        let constrained = clipView.constrainBoundsRect(bounds)
+        guard abs(constrained.origin.y - clipView.bounds.origin.y) > 0.25 else { return }
+        lastProgrammaticOriginY = constrained.origin.y
+        clipView.scroll(to: constrained.origin)
+        scrollView.reflectScrolledClipView(clipView)
+        if didApplyNativeAnchorCorrection {
+            DispatchQueue.main.async { [weak self] in
+                guard self?.didApplyNativeAnchorCorrection == true else { return }
+                self?.preservation = nil
+                self?.isAnchorRestorationReady = false
+                self?.lastProgrammaticOriginY = nil
+                self?.removeFrozenOverlay()
+            }
+        }
+    }
+
+    private func removeFrozenOverlay() {
+        frozenOverlay?.removeFromSuperview()
+        frozenOverlay = nil
+    }
+}
+
+enum HistoryPrependGeometry {
+    static func windowAnchorLockedOrigin(
+        currentOrigin: CGFloat,
+        anchorDisplacement: CGFloat,
+        documentIsFlipped: Bool
+    ) -> CGFloat {
+        // Scroll toward earlier content by exactly the old anchor's measured
+        // viewport offset. SwiftUI currently hosts this in a non-flipped
+        // document, where moving visually upward increases the AppKit origin.
+        return documentIsFlipped
+            ? currentOrigin - anchorDisplacement
+            : currentOrigin + anchorDisplacement
+    }
+
+    static func lockedOrigin(
+        baselineOrigin: CGFloat,
+        baselineDocumentHeight: CGFloat,
+        currentDocumentHeight: CGFloat,
+        documentIsFlipped: Bool
+    ) -> CGFloat {
+        let insertedHeight = currentDocumentHeight - baselineDocumentHeight
+        return documentIsFlipped
+            ? baselineOrigin + insertedHeight
+            : baselineOrigin - insertedHeight
+    }
+}
+
 
 private struct MessageBubble: View, Equatable {
     let message: ChatMessage
@@ -1603,8 +1972,20 @@ private struct LongAssistantMessageView: View {
     }
 }
 
+enum UserMessagePresentation {
+    static let collapsedLineLimit = 8
+    static let collapsedCharacterLimit = 600
+
+    static func shouldCollapse(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let lineCount = text.lazy.filter { $0 == "\n" }.count + 1
+        return text.count > collapsedCharacterLimit || lineCount > collapsedLineLimit
+    }
+}
+
 private struct UserMessageContent: View {
     let message: ChatMessage
+    @State private var isExpanded = false
 
     private var usesCompactWidth: Bool {
         message.attachments.isEmpty
@@ -1627,7 +2008,37 @@ private struct UserMessageContent: View {
             }
 
             if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownMessageView(markdown: message.text, expandsHorizontally: !usesCompactWidth)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(verbatim: message.text)
+                        .font(.body)
+                        .textSelection(.enabled)
+                        .tint(Color(nsColor: .selectedTextBackgroundColor))
+                        .lineLimit(
+                            isExpanded || !UserMessagePresentation.shouldCollapse(message.text)
+                                ? nil
+                                : UserMessagePresentation.collapsedLineLimit
+                        )
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if UserMessagePresentation.shouldCollapse(message.text) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                isExpanded.toggle()
+                            }
+                        } label: {
+                            Label(
+                                isExpanded ? "收起" : "展开全文",
+                                systemImage: isExpanded ? "chevron.up" : "chevron.down"
+                            )
+                            .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .accessibilityHint(isExpanded ? "折叠这条用户消息" : "显示这条用户消息的完整内容")
+                    }
+                }
             }
         }
 

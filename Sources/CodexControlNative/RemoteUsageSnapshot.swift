@@ -9,6 +9,7 @@ struct RemoteUsageSnapshot: Codable, Equatable {
     let buckets: [Bucket]
     let resetCredits: ResetCredits?
     var plan: String? = nil
+    var subscriptionPeriodEnd: Double? = nil
 
     struct Window: Codable, Equatable {
         let usedPercent: Double?
@@ -39,7 +40,11 @@ struct RemoteUsageSnapshot: Codable, Equatable {
         .init(capturedAt: Date().timeIntervalSince1970, available: false, buckets: [], resetCredits: nil)
     }
 
-    static func parse(_ json: [String: Any], now: Date = Date()) -> Self {
+    static func parse(
+        _ json: [String: Any],
+        now: Date = Date(),
+        subscriptionPeriodEnd: Date? = nil
+    ) -> Self {
         var snapshots = json["rateLimitsByLimitId"] as? [String: [String: Any]] ?? [:]
         if snapshots.isEmpty, let legacy = json["rateLimits"] as? [String: Any] {
             snapshots[legacy["limitId"] as? String ?? "codex"] = legacy
@@ -73,7 +78,13 @@ struct RemoteUsageSnapshot: Codable, Equatable {
                 }
             }
         }
-        return .init(capturedAt: now.timeIntervalSince1970, available: true, buckets: buckets,
-                     resetCredits: resets, plan: plan)
+        return .init(
+            capturedAt: now.timeIntervalSince1970,
+            available: true,
+            buckets: buckets,
+            resetCredits: resets,
+            plan: plan,
+            subscriptionPeriodEnd: subscriptionPeriodEnd?.timeIntervalSince1970
+        )
     }
 }

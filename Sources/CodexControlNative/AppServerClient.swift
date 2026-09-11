@@ -101,10 +101,18 @@ final class AppServerClient {
     }
 
     func readRemoteUsage() async throws -> RemoteUsageSnapshot {
-        RemoteUsageSnapshot.parse(try await request("account/rateLimits/read", params: [:]))
+        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader().read()
+        return RemoteUsageSnapshot.parse(
+            try await request("account/rateLimits/read", params: [:]),
+            subscriptionPeriodEnd: subscriptionPeriodEnd
+        )
     }
     func readAccountOverview() async throws -> AccountOverview {
-        AccountOverview.parse(try await request("account/rateLimits/read", params: [:]))
+        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader().read()
+        return AccountOverview.parse(
+            try await request("account/rateLimits/read", params: [:]),
+            subscriptionPeriodEnd: subscriptionPeriodEnd
+        )
     }
 
     func consumeRemoteReset(_ attempt: RemoteResetAttempt) async throws -> String {
@@ -432,6 +440,12 @@ final class AppServerClient {
         if loadedThreadIDs.contains(id) { return }
         _ = try await request("thread/resume", params: ["threadId": id])
         loadedThreadIDs.insert(id)
+    }
+
+    func unsubscribeThread(_ id: String) async throws {
+        guard loadedThreadIDs.contains(id) else { return }
+        _ = try await request("thread/unsubscribe", params: ["threadId": id])
+        loadedThreadIDs.remove(id)
     }
 
     func startTurn(

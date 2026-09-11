@@ -4,6 +4,7 @@ import SwiftUI
 struct AccountOverview {
     let plan: String
     let usage: RemoteUsageSnapshot
+    let subscriptionPeriodEnd: Date?
 
     // Matches the installed official client's personal.pro/proLite tier labels.
     var planDisplayName: String {
@@ -17,14 +18,14 @@ struct AccountOverview {
         }
     }
 
-    static func parse(_ json: [String: Any]) -> Self {
+    static func parse(_ json: [String: Any], subscriptionPeriodEnd: Date? = nil) -> Self {
         let legacy = json["rateLimits"] as? [String: Any]
         let buckets = json["rateLimitsByLimitId"] as? [String: [String: Any]] ?? [:]
         let plan = legacy?["planType"] as? String
             ?? buckets["codex"]?["planType"] as? String
             ?? buckets.keys.sorted().compactMap { buckets[$0]?["planType"] as? String }.first
             ?? "未提供"
-        return .init(plan: plan, usage: .parse(json))
+        return .init(plan: plan, usage: .parse(json), subscriptionPeriodEnd: subscriptionPeriodEnd)
     }
 
     static func remaining(_ window: RemoteUsageSnapshot.Window?) -> String {
@@ -47,6 +48,36 @@ struct AccountOverview {
 
     var compactResetCredits: String? {
         usage.resetCredits?.availableCount.map { "\($0) 次" }
+    }
+}
+
+struct AccountOverviewRefreshIssue: Equatable {
+    let title: String
+    let message: String
+
+    static func parse(_ rawError: String) -> Self {
+        let error = rawError.lowercased()
+        if error.contains("token_revoked")
+            || error.contains("invalidated oauth token")
+            || error.contains("authentication token is invalid") {
+            return .init(
+                title: "Codex 登录已失效",
+                message: "当前显示的是上次获取的数据。请在 Codex 中重新登录，然后返回此处刷新。"
+            )
+        }
+        if error.contains("timed out")
+            || error.contains("timeout")
+            || error.contains("network")
+            || error.contains("connection") {
+            return .init(
+                title: "暂时无法刷新",
+                message: "当前显示的是上次获取的数据。请检查网络连接后重试。"
+            )
+        }
+        return .init(
+            title: "套餐信息刷新失败",
+            message: "当前显示的是上次获取的数据，请稍后重试。"
+        )
     }
 }
 
@@ -97,7 +128,7 @@ struct AccountOverviewView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("订阅套餐：\(account.planDisplayName)").fontWeight(.semibold)
-                            Text("套餐到期：当前接口未提供，不能用额度恢复时间代替。")
+                            Text(subscriptionPeriodLabel(account.subscriptionPeriodEnd))
                                 .foregroundStyle(.secondary)
                             Divider()
                             ForEach(account.usage.buckets, id: \.id) { bucket in
@@ -135,7 +166,7 @@ struct AccountOverviewView: View {
                     }
                 } else { Text("尚未读取到套餐或额度，请检查本机 Codex 登录和连接状态。") }
                 if let error = model.accountOverviewError {
-                    Text("刷新失败，以上可能是旧数据：\(error)").font(.caption).foregroundStyle(.orange)
+                    refreshIssueBanner(AccountOverviewRefreshIssue.parse(error))
                 }
             }
             .padding(20)
@@ -146,6 +177,40 @@ struct AccountOverviewView: View {
     private func dateLabel(_ timestamp: Double?) -> String {
         guard let timestamp, timestamp.isFinite else { return "未提供" }
         return Date(timeIntervalSince1970: timestamp).formatted(date: .numeric, time: .shortened)
+    }
+
+    private func subscriptionPeriodLabel(_ date: Date?) -> String {
+        guard let date else {
+            return "套餐到期：本机登录信息未提供，不能用额度恢复时间代替。"
+        }
+        let value = date.formatted(date: .numeric, time: .shortened)
+        return date <= Date() ? "套餐已于 \(value) 到期" : "套餐到期：\(value)"
+    }
+
+    private func refreshIssueBanner(_ issue: AccountOverviewRefreshIssue) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.orange)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(issue.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(issue.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.orange.opacity(0.24), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private func quotaColumn(_ title: String, value: String) -> some View {

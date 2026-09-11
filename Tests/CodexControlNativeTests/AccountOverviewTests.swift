@@ -2,11 +2,37 @@ import XCTest
 @testable import CloudCodex
 
 final class AccountOverviewTests: XCTestCase {
+    func testTokenRevokedErrorBecomesConciseReloginGuidance() {
+        let raw = #"failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage failed: 401 Unauthorized; body={"error":{"message":"Encountered invalidated oauth token for user","code":"token_revoked"}}"#
+
+        let issue = AccountOverviewRefreshIssue.parse(raw)
+
+        XCTAssertEqual(issue.title, "Codex 登录已失效")
+        XCTAssertEqual(issue.message, "当前显示的是上次获取的数据。请在 Codex 中重新登录，然后返回此处刷新。")
+        XCTAssertFalse(issue.message.contains("https://"))
+        XCTAssertFalse(issue.message.contains("token_revoked"))
+    }
+
+    func testNetworkAndUnknownErrorsUseShortFallbackMessages() {
+        XCTAssertEqual(AccountOverviewRefreshIssue.parse("network connection timed out").title, "暂时无法刷新")
+        XCTAssertEqual(AccountOverviewRefreshIssue.parse("unexpected backend response").title, "套餐信息刷新失败")
+    }
+
     func testProTiersMatchOfficialClientNames() {
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "pro"]]).planDisplayName, "Pro 20×")
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "prolite"]]).planDisplayName, "Pro 5×")
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "unknown"]]).planDisplayName, "套餐未提供")
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "future-plan"]]).planDisplayName, "future-plan")
+    }
+    func testKeepsLocallyReadSubscriptionPeriodSeparateFromQuotaResets() {
+        let periodEnd = Date(timeIntervalSince1970: 1_790_819_369)
+        let account = AccountOverview.parse(
+            ["rateLimits": ["planType": "pro", "primary": ["resetsAt": 1_800_000_000]]],
+            subscriptionPeriodEnd: periodEnd
+        )
+
+        XCTAssertEqual(account.subscriptionPeriodEnd, periodEnd)
+        XCTAssertNotEqual(account.subscriptionPeriodEnd?.timeIntervalSince1970, 1_800_000_000)
     }
     func testQuotaWindowsAreMatchedByDurationNotPosition() {
         let account = AccountOverview.parse([

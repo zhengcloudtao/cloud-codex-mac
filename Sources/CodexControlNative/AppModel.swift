@@ -1,6 +1,12 @@
 import AppKit
 import Foundation
 
+enum ThreadInputAvailability: Equatable {
+    case checking
+    case available
+    case occupied
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     let connectionHealth = ConnectionHealth()
@@ -238,6 +244,7 @@ final class AppModel: ObservableObject {
     @Published var isSending = false
     @Published var isExternalThreadProcessing = false
     @Published var threadOwnershipNotice: String?
+    @Published private(set) var threadInputAvailability: ThreadInputAvailability = .available
     @Published var hasMoreThreads = false
     @Published var errorMessage: String?
     @Published var showingNewThread = false
@@ -589,6 +596,11 @@ final class AppModel: ObservableObject {
     var canSend: Bool {
         (!composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
             && selectedThreadID != nil
+            && threadInputAvailability == .available
+    }
+
+    var isSelectedThreadOwnedElsewhere: Bool {
+        selectedThreadID != nil && threadInputAvailability == .occupied
     }
 
     var canCreateThread: Bool {
@@ -794,6 +806,11 @@ final class AppModel: ObservableObject {
         if path != selectedFolder { speech.stop() }
         if path != selectedFolder { cancelWaitingMessageEdit() }
         guard path != selectedFolder else { return }
+        let previousThreadID = selectedThreadID
+        let canReleasePrevious = previousThreadID.map { previousID in
+            !locallyRunningThreadIDs.contains(previousID)
+                && !waitingMessages.contains(where: { $0.threadID == previousID })
+        } ?? false
         preserveSelectedConversation()
         if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
@@ -802,6 +819,7 @@ final class AppModel: ObservableObject {
         selectedThreadMetadataTask = nil
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
+        threadInputAvailability = .available
         selectedFolder = path
         selectedThreadID = nil
         syncSelectedLocalTurnState()
@@ -810,6 +828,9 @@ final class AppModel: ObservableObject {
         hasMoreThreads = false
         searchText = ""
         Task {
+            if canReleasePrevious, let previousThreadID {
+                try? await client.unsubscribeThread(previousThreadID)
+            }
             await loadPermissionProfiles(cwd: path)
             await refreshThreads()
         }
@@ -820,21 +841,37 @@ final class AppModel: ObservableObject {
         if id != selectedThreadID { speech.stop() }
         if id != selectedThreadID { cancelWaitingMessageEdit() }
         guard id != selectedThreadID else { return }
+        let previousThreadID = selectedThreadID
+        let canReleasePrevious = previousThreadID.map { previousID in
+            !locallyRunningThreadIDs.contains(previousID)
+                && !waitingMessages.contains(where: { $0.threadID == previousID })
+        } ?? false
         preserveSelectedConversation()
         if showingNewThread { cancelNewThread() }
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
         isExternalThreadProcessing = false
         threadOwnershipNotice = nil
+        threadInputAvailability = id == nil ? .available : .checking
         selectedThreadID = id
         messages = id.flatMap { messagesByThread[$0] } ?? []
+        // Publish loading together with the new selection so an uncached
+        // conversation never renders the empty "开始对话" state for one frame.
+        isLoading = id != nil && messages.isEmpty
         syncSelectedLocalTurnState()
         guard let id else {
             messages = []
+            if canReleasePrevious, let previousThreadID {
+                Task { [weak self] in try? await self?.client.unsubscribeThread(previousThreadID) }
+            }
             return
         }
         selectedThreadMonitorTask = Task { [weak self] in
             guard !Task.isCancelled, let self, self.selectedThreadID == id else { return }
+            if canReleasePrevious, let previousThreadID {
+                try? await self.client.unsubscribeThread(previousThreadID)
+            }
+            await self.claimSelectedThreadForInput(threadID: id)
             await self.loadSelectedThread()
             await self.syncLatestExternalActivity(threadID: id)
             while !Task.isCancelled, self.selectedThreadID == id {
@@ -842,6 +879,32 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 await self.syncLatestExternalActivity(threadID: id)
+            }
+        }
+    }
+
+    func retrySelectedThreadOwnership() async {
+        guard let selectedThreadID else { return }
+        await claimSelectedThreadForInput(threadID: selectedThreadID)
+    }
+
+    private func claimSelectedThreadForInput(threadID: String) async {
+        guard selectedThreadID == threadID else { return }
+        threadInputAvailability = .checking
+        threadOwnershipNotice = nil
+        do {
+            try await client.resumeThread(threadID)
+            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            threadInputAvailability = .available
+        } catch {
+            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            if Self.isActiveWriterError(error) {
+                errorMessage = nil
+                threadInputAvailability = .occupied
+                threadOwnershipNotice = Self.occupiedThreadMessage
+            } else {
+                threadInputAvailability = .available
+                errorMessage = error.localizedDescription
             }
         }
     }
@@ -980,7 +1043,8 @@ final class AppModel: ObservableObject {
         )
         if Self.isActiveWriterError(error) {
             errorMessage = nil
-            threadOwnershipNotice = "此会话已在 Codex 主应用中打开。关闭原窗口后，再点击发送即可继续。"
+            threadInputAvailability = .occupied
+            threadOwnershipNotice = Self.occupiedThreadMessage
         } else {
             errorMessage = error.localizedDescription
         }
@@ -1010,6 +1074,8 @@ final class AppModel: ObservableObject {
     static func isActiveWriterError(_ error: Error) -> Bool {
         error.localizedDescription.localizedCaseInsensitiveContains("active writer")
     }
+
+    static let occupiedThreadMessage = "请先在另一个应用中关闭此会话，才能在这里继续。"
 
     func cancelTurn() async {
         guard let threadID = selectedThreadID, let turnID = activeTurnID else { return }

@@ -1,7 +1,10 @@
 APP_NAME := CloudCodex
 BUNDLE := dist/$(APP_NAME).app
 EXECUTABLE := CloudCodex
-CODESIGN_IDENTITY ?= -
+# Keep the code identity stable so the login Keychain can retain the user's
+# access decision across local rebuilds. Callers may still override this when
+# producing a build on another Mac.
+CODESIGN_IDENTITY ?= Apple Development: Yuntao Zheng (ZK97MFMJ5H)
 
 .PHONY: build app run clean
 

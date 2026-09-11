@@ -467,13 +467,15 @@ final class StreamingEventTests: XCTestCase {
 
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isSelectedThreadProcessing)
+        XCTAssertTrue(model.isLoading)
         model.applyVisibleThreadStatuses([
             runningThread.id: "idle",
             idleThread.id: "idle"
         ])
         XCTAssertEqual(model.threads.first?.status, "active")
         model.composerText = "这是另一个任务"
-        XCTAssertTrue(model.canSend)
+        XCTAssertEqual(model.threadInputAvailability, .checking)
+        XCTAssertFalse(model.canSend)
     }
 
     func testBackgroundTurnCompletionClearsThreadScopedSendingState() throws {
@@ -548,8 +550,11 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
         XCTAssertEqual(
             model.threadOwnershipNotice,
-            "此会话已在 Codex 主应用中打开。关闭原窗口后，再点击发送即可继续。"
+            AppModel.occupiedThreadMessage
         )
+        XCTAssertEqual(model.threadInputAvailability, .occupied)
+        XCTAssertTrue(model.isSelectedThreadOwnedElsewhere)
+        XCTAssertFalse(model.canSend)
     }
 
     func testActiveWriterErrorRecognitionIsCaseInsensitive() {

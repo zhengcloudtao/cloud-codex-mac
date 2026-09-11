@@ -24,10 +24,12 @@ final class RemoteUsageTests: XCTestCase {
             ["id": "do-not-forward", "status": "available", "expiresAt": 1800000100],
             ["status": "available", "expiresAt": NSNull()], ["status": "redeemed", "expiresAt": 1800000000]
         ]]]
-        let snapshot = RemoteUsageSnapshot.parse(response)
+        let subscriptionPeriodEnd = Date(timeIntervalSince1970: 1_900_000_000)
+        let snapshot = RemoteUsageSnapshot.parse(response, subscriptionPeriodEnd: subscriptionPeriodEnd)
         XCTAssertEqual(snapshot.buckets[0].windows[0].windowDurationMins, 10080)
         XCTAssertEqual(snapshot.buckets[0].windows[0].usedPercent, 4)
         XCTAssertEqual(snapshot.plan, "pro")
+        XCTAssertEqual(snapshot.subscriptionPeriodEnd, 1_900_000_000)
         XCTAssertEqual(snapshot.resetCredits?.availableCount, 3)
         XCTAssertEqual(snapshot.resetCredits?.expirations?.count, 2)
         XCTAssertEqual(snapshot.resetCredits?.expirations?.first!, 1800000100)
@@ -35,12 +37,14 @@ final class RemoteUsageTests: XCTestCase {
         XCTAssertFalse(encoded.contains("do-not-forward"))
         XCTAssertFalse(encoded.contains("accountId"))
         XCTAssertTrue(encoded.contains("\"plan\":\"pro\""))
+        XCTAssertTrue(encoded.contains("\"subscriptionPeriodEnd\":1900000000"))
     }
 
     func testUnknownIsDifferentFromZeroAndLegacyResponseIsSupported() {
         let unknown = RemoteUsageSnapshot.parse(["rateLimits": ["primary": ["usedPercent": NSNull()]]])
         XCTAssertNil(unknown.buckets[0].windows[0].usedPercent)
         XCTAssertNil(unknown.resetCredits)
+        XCTAssertNil(unknown.subscriptionPeriodEnd)
         let countOnly = RemoteUsageSnapshot.parse(["rateLimitResetCredits": ["availableCount": 0]])
         XCTAssertEqual(countOnly.resetCredits?.availableCount, 0)
         XCTAssertNil(countOnly.resetCredits?.expirations)
