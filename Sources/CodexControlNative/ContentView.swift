@@ -1169,6 +1169,7 @@ private struct MessageList: View {
     @State private var visibleMessageLimit = 12
     @State private var viewportResetID = UUID()
     @State private var scrollViewportController = MessageScrollViewportController()
+    @State private var hasPositionedInitialHistory = false
 
     private let messageBatchSize = 12
 
@@ -1294,6 +1295,7 @@ private struct MessageList: View {
             isAtLatest = true
             hasUnseenUpdates = false
             hasNewContentBelow = false
+            positionInitialHistoryIfNeeded()
         }
         .task(id: isLoading) {
             showDelayedLoadingIndicator = false
@@ -1303,7 +1305,9 @@ private struct MessageList: View {
             showDelayedLoadingIndicator = true
         }
         .onChange(of: messages.last?.id) { _, _ in
-            handleNewMessage()
+            if !positionInitialHistoryIfNeeded() {
+                handleNewMessage()
+            }
         }
         .onChange(of: streamingScrollToken) { _, _ in
             markNewContent()
@@ -1350,6 +1354,19 @@ private struct MessageList: View {
         } else {
             markNewContent()
         }
+    }
+
+    /// A newly selected conversation often mounts while its history is still
+    /// loading. The default scroll anchor only applies to the empty viewport;
+    /// when the first history snapshot arrives later, explicitly recreate the
+    /// viewport once so that selection opens at the latest message. Subsequent
+    /// refreshes keep the user's reading position.
+    @discardableResult
+    private func positionInitialHistoryIfNeeded() -> Bool {
+        guard !hasPositionedInitialHistory, !messages.isEmpty else { return false }
+        hasPositionedInitialHistory = true
+        jumpToBottom()
+        return true
     }
 
     private func markNewContent() {
