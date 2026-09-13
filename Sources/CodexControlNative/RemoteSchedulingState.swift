@@ -18,7 +18,8 @@ struct RemoteSchedulingState {
         let known = threads.first { $0.id == task.threadId }
         busyThreads[task.threadId] = (
             RemoteThreadSnapshot(id: task.threadId, title: known?.displayName ?? "正在执行的会话",
-                                 workspace: task.workspace, model: known?.model ?? task.model, status: "active"),
+                                 workspace: task.workspace, model: known?.model ?? task.model, status: "active",
+                                 updatedAt: now.timeIntervalSince1970),
             now.addingTimeInterval(30)
         )
     }
@@ -35,7 +36,8 @@ struct RemoteSchedulingState {
         }
         for thread in locallyRunning {
             append(RemoteThreadSnapshot(id: thread.id, title: thread.displayName,
-                                       workspace: thread.cwd, model: thread.model ?? "", status: "active"))
+                                       workspace: thread.cwd, model: thread.model ?? "", status: "active",
+                                       updatedAt: thread.updatedAt.timeIntervalSince1970))
         }
         for id in busyThreads.keys.sorted() {
             if let busy = busyThreads[id], busy.until > now { append(busy.snapshot) }
@@ -43,7 +45,8 @@ struct RemoteSchedulingState {
         for thread in threads {
             append(RemoteThreadSnapshot(id: thread.id, title: thread.displayName,
                                        workspace: thread.cwd, model: thread.model ?? "",
-                                       status: fresh ? thread.status : "unknown"))
+                                       status: fresh ? thread.status : "unknown",
+                                       updatedAt: thread.updatedAt.timeIntervalSince1970))
         }
         return Array(result.prefix(300))
     }

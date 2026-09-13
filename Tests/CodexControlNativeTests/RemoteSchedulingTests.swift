@@ -22,6 +22,7 @@ final class RemoteSchedulingTests: XCTestCase {
         state.replace(with: [thread("busy"), thread("free", workspace: "/b")], now: now.addingTimeInterval(9))
         let snapshot = state.snapshots(allowedPaths: ["/a", "/b"], now: now.addingTimeInterval(10))
         XCTAssertEqual(snapshot.first { $0.id == "busy" }?.status, "active")
+        XCTAssertEqual(snapshot.first { $0.id == "busy" }?.updatedAt, now.timeIntervalSince1970)
         XCTAssertEqual(snapshot.first { $0.id == "free" }?.status, "idle")
         XCTAssertEqual(state.snapshots(allowedPaths: ["/a", "/b"], now: now.addingTimeInterval(31))
             .first { $0.id == "busy" }?.status, "idle")
@@ -42,6 +43,7 @@ final class RemoteSchedulingTests: XCTestCase {
         let locallyRunning = state.snapshots(allowedPaths: ["/a"], locallyRunning: [thread("external")], now: now.addingTimeInterval(31))
         XCTAssertEqual(locallyRunning.count, 1)
         XCTAssertEqual(locallyRunning.first?.status, "active")
+        XCTAssertEqual(locallyRunning.first?.updatedAt, 0)
     }
 
     @MainActor

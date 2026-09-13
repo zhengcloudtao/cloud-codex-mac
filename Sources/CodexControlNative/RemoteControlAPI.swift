@@ -11,6 +11,8 @@ struct RemoteThreadSnapshot: Codable, Equatable {
     let workspace: String
     let model: String
     let status: String
+    /// Unix time used by the mini-program to keep Mac-created conversations in recency order.
+    var updatedAt: Double? = nil
 }
 
 struct RemoteHeartbeatBody: Codable, Equatable {
