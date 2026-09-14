@@ -574,10 +574,14 @@ struct ContentView: View {
         }
         ToolbarItemGroup {
             Button {
-                model.browser.visible.toggle()
+                if let threadID = model.selectedThreadID {
+                    model.browser.toggle(threadID: threadID)
+                }
             } label: {
                 Image(systemName: "globe")
-            }.help("内置浏览器")
+            }
+            .disabled(model.selectedThreadID == nil)
+            .help("内置浏览器")
             Button {
                 Task { await model.refreshThreads() }
             } label: {

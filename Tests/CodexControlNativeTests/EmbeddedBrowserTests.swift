@@ -4,6 +4,20 @@ import AppKit
 
 @MainActor
 final class EmbeddedBrowserTests: XCTestCase {
+    func testBrowserVisibilityIsScopedToTheConversationAndManualClosePersists() {
+        let browser = EmbeddedBrowser()
+        XCTAssertFalse(browser.isVisible(for: "unused"))
+
+        browser.show(threadID: "used")
+        XCTAssertTrue(browser.isVisible(for: "used"))
+        XCTAssertFalse(browser.isVisible(for: "unused"), "A browser used by one conversation must not open in another")
+
+        browser.hide(threadID: "used")
+        XCTAssertFalse(browser.isVisible(for: "used"), "Switching conversations must not undo a manual close")
+        browser.toggle(threadID: "used")
+        XCTAssertTrue(browser.isVisible(for: "used"), "The toolbar can still open the browser explicitly")
+    }
+
     func testLiveAppServerToolRoundTrip() async throws {
         guard ProcessInfo.processInfo.environment["CLOUDCODEX_BROWSER_MODEL_TEST"] == "1" else { throw XCTSkip("Opt-in live model test") }
         let client = AppServerClient()

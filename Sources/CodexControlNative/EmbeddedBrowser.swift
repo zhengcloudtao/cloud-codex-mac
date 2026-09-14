@@ -110,19 +110,30 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
 @MainActor
 final class EmbeddedBrowser: ObservableObject {
     @Published var tabs: [BrowserTab] = []
-    @Published var visible = false
+    @Published private(set) var visibleThreadIDs: Set<String> = []
     @Published var selectedID: String?
     func tabs(for threadID: String) -> [BrowserTab] { tabs.filter { $0.threadID == threadID } }
+    func isVisible(for threadID: String) -> Bool { visibleThreadIDs.contains(threadID) }
+    func show(threadID: String) { guard !threadID.isEmpty else { return }; visibleThreadIDs.insert(threadID) }
+    func hide(threadID: String) { visibleThreadIDs.remove(threadID) }
+    func toggle(threadID: String) {
+        if isVisible(for: threadID) { hide(threadID: threadID) }
+        else { show(threadID: threadID) }
+    }
     func selected(for threadID: String) -> BrowserTab? {
         tabs(for: threadID).first { $0.id == selectedID } ?? tabs(for: threadID).last
     }
     @discardableResult func create(threadID: String) throws -> BrowserTab {
         guard tabs.count < 24, tabs(for: threadID).count < 8 else { throw BrowserFailure("标签页数量已达上限，请先关闭不用的网页。") }
         let tab = BrowserTab(threadID: threadID)
-        tabs.append(tab); selectedID = tab.id; visible = true
+        tabs.append(tab); selectedID = tab.id; show(threadID: threadID)
         return tab
     }
-    func close(_ tab: BrowserTab) { tab.webView.stopLoading(); tabs.removeAll { $0.id == tab.id } }
+    func close(_ tab: BrowserTab) {
+        tab.webView.stopLoading()
+        tabs.removeAll { $0.id == tab.id }
+        if tabs(for: tab.threadID).isEmpty { hide(threadID: tab.threadID) }
+    }
     func execute(threadID: String, arguments: [String: Any]) async -> [String: Any] {
         do {
             guard !threadID.isEmpty, let action = arguments["action"] as? String else { throw BrowserFailure("缺少任务或操作。") }
@@ -141,7 +152,7 @@ final class EmbeddedBrowser: ObservableObject {
             guard !tab.busy else { throw BrowserFailure("此标签页正在执行操作，请稍后重试。") }
             tab.busy = true
             defer { tab.busy = false }
-            visible = true; selectedID = tab.id
+            show(threadID: threadID); selectedID = tab.id
             switch action {
             case "open": try tab.navigate(arguments["url"] as? String ?? ""); try await tab.settled()
             case "read": break
@@ -214,7 +225,7 @@ struct EmbeddedBrowserPanel: View {
                 Label("内置浏览器", systemImage: "globe")
                 Spacer()
                 Button { _ = try? browser.create(threadID: threadID) } label: { Image(systemName: "plus") }.help("新标签页")
-                Button { browser.visible = false } label: { Image(systemName: "xmark") }.help("收起浏览器")
+                Button { browser.hide(threadID: threadID) } label: { Image(systemName: "xmark") }.help("收起浏览器")
             }.padding(10)
             ScrollView(.horizontal) {
                 HStack {
@@ -242,7 +253,7 @@ struct BrowserConversationLayout<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
         GeometryReader { geometry in
-            if browser.visible, let threadID {
+            if let threadID, browser.isVisible(for: threadID) {
                 HSplitView {
                     content().frame(minWidth: 300).frame(height: geometry.size.height)
                     EmbeddedBrowserPanel(browser: browser, threadID: threadID)
