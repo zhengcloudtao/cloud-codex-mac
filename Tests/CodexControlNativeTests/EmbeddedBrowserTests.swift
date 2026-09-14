@@ -18,6 +18,18 @@ final class EmbeddedBrowserTests: XCTestCase {
         XCTAssertTrue(browser.isVisible(for: "used"), "The toolbar can still open the browser explicitly")
     }
 
+    func testBackgroundTabCreationDoesNotRevealBrowser() throws {
+        let browser = EmbeddedBrowser()
+        let tab = try browser.create(threadID: "background")
+
+        XCTAssertEqual(browser.tabs(for: "background").map(\.id), [tab.id])
+        XCTAssertEqual(browser.selected(for: "background")?.id, tab.id)
+        XCTAssertFalse(browser.isVisible(for: "background"), "A model-created tab must not change the user's layout")
+
+        browser.show(threadID: "background")
+        XCTAssertTrue(browser.isVisible(for: "background"), "The user can still reveal a background tab explicitly")
+    }
+
     func testLiveAppServerToolRoundTrip() async throws {
         guard ProcessInfo.processInfo.environment["CLOUDCODEX_BROWSER_MODEL_TEST"] == "1" else { throw XCTSkip("Opt-in live model test") }
         let client = AppServerClient()

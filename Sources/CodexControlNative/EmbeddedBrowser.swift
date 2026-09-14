@@ -126,7 +126,9 @@ final class EmbeddedBrowser: ObservableObject {
     @discardableResult func create(threadID: String) throws -> BrowserTab {
         guard tabs.count < 24, tabs(for: threadID).count < 8 else { throw BrowserFailure("标签页数量已达上限，请先关闭不用的网页。") }
         let tab = BrowserTab(threadID: threadID)
-        tabs.append(tab); selectedID = tab.id; show(threadID: threadID)
+        // Creating a tab may be initiated by a background model tool. Keep it
+        // available without changing the user's conversation layout.
+        tabs.append(tab); selectedID = tab.id
         return tab
     }
     func close(_ tab: BrowserTab) {
@@ -152,7 +154,9 @@ final class EmbeddedBrowser: ObservableObject {
             guard !tab.busy else { throw BrowserFailure("此标签页正在执行操作，请稍后重试。") }
             tab.busy = true
             defer { tab.busy = false }
-            show(threadID: threadID); selectedID = tab.id
+            // Tool activity stays in the background until the user explicitly
+            // opens the browser panel from the app UI.
+            selectedID = tab.id
             switch action {
             case "open": try tab.navigate(arguments["url"] as? String ?? ""); try await tab.settled()
             case "read": break

@@ -41,6 +41,8 @@ struct ContentView: View {
                     _ = try BrowserTool.url(url.absoluteString)
                     let tab = try model.browser.create(threadID: threadID)
                     try tab.navigate(url.absoluteString)
+                    // Opening a link is an explicit user request to view it.
+                    model.browser.show(threadID: threadID)
                 } catch { model.errorMessage = error.localizedDescription }
                 return .handled
             }
