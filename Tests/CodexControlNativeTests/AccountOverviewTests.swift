@@ -155,6 +155,7 @@ final class AccountOverviewTests: XCTestCase {
         let rate = try XCTUnwrap(tracker.record(account: account(at: 1_800_001_800, used: 23.5)))
         XCTAssertEqual(rate, 3.5, accuracy: 0.001)
         XCTAssertEqual(AccountOverview.consumptionRateLabel(rate), "3.5%/30分钟")
+        XCTAssertEqual(AccountOverview.compactConsumptionRateLabel(rate), "3.5%")
     }
 
     func testThirtyMinuteConsumptionInterpolatesAndRestartsAfterQuotaRestore() throws {

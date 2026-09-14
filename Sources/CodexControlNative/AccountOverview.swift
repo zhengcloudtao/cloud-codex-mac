@@ -107,6 +107,10 @@ struct AccountOverview {
     static func consumptionRateLabel(_ value: Double) -> String {
         String(format: "%.1f%%/30分钟", max(0, min(100, value)))
     }
+
+    static func compactConsumptionRateLabel(_ value: Double) -> String {
+        String(format: "%.1f%%", max(0, min(100, value)))
+    }
 }
 
 struct AccountOverviewRefreshIssue: Equatable {
@@ -162,12 +166,12 @@ struct AccountOverviewView: View {
                         if account.weeklyUsageWindow?.usedPercent != nil {
                             if let rate = model.recentThirtyMinuteConsumptionRate {
                                 quotaColumn(
-                                    "30分钟速度",
-                                    value: AccountOverview.consumptionRateLabel(rate),
+                                    "30分钟消耗",
+                                    value: AccountOverview.compactConsumptionRateLabel(rate),
                                     help: "最近 30 分钟消耗了每周总额度的 \(AccountOverview.consumptionRateLabel(rate))。"
                                 )
                             } else {
-                                quotaColumn("30分钟速度", value: "采集中", help: "需要连续采集满 30 分钟后显示。")
+                                quotaColumn("30分钟消耗", value: "采集中", help: "需要连续采集满 30 分钟后显示。")
                             }
                         }
                         if let recommendation = account.weeklyUsageRecommendation(now: context.date) {
