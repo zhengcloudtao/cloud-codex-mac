@@ -55,6 +55,7 @@ struct ContentView: View {
         .sheet(item: $filePreview) { LocalFilePreviewSheet(target: $0) }
         .sheet(isPresented: $model.showingAppearanceSettings) { appearanceSettingsSheet }
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
+        .sheet(isPresented: $model.showingThreadNameEditor) { threadNameEditorSheet }
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -430,6 +431,41 @@ struct ContentView: View {
         .frame(width: 360)
     }
 
+    private var threadNameEditorSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("编辑会话名称")
+                .font(.title2.bold())
+            TextField("会话名称", text: $model.threadNameDraft)
+                .textFieldStyle(.roundedBorder)
+                .disabled(model.isSavingThreadName)
+                .onSubmit {
+                    Task { await model.saveThreadName() }
+                }
+            if let error = model.threadNameEditorError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                if model.isSavingThreadName {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Spacer()
+                Button("取消", action: model.cancelThreadNameEditor)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(model.isSavingThreadName)
+                Button("保存") {
+                    Task { await model.saveThreadName() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.isSavingThreadName)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+
     private var threadList: some View {
         VStack(spacing: 0) {
             HStack {
@@ -477,6 +513,12 @@ struct ContentView: View {
                             in: RoundedRectangle(cornerRadius: 10)
                         )
                         .contextMenu {
+                            Button {
+                                model.beginRenamingThread(thread)
+                            } label: {
+                                Label("编辑会话名称", systemImage: "pencil")
+                            }
+                            Divider()
                             Button(model.isFavoriteConversation(thread.id) ? "取消收藏" : "收藏会话") {
                                 model.toggleFavoriteConversation(thread)
                             }
@@ -1236,7 +1278,6 @@ private struct MessageList: View {
                                 switch entry {
                                 case .message(let message):
                                     MessageBubble(message: message)
-                                        .equatable()
                                         .background(messageEntryOffsetReader(id: entry.id))
                                 case .process(let group):
                                     ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
@@ -1616,7 +1657,12 @@ enum HistoryPrependGeometry {
 
 
 private struct MessageBubble: View, Equatable {
+    @EnvironmentObject private var model: AppModel
     let message: ChatMessage
+
+    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.message == rhs.message
+    }
 
     @ViewBuilder
     var body: some View {
@@ -1638,10 +1684,28 @@ private struct MessageBubble: View, Equatable {
                         // Keep the user's messages on the familiar right side
                         // and give them a calm blue surface distinct from AI replies.
                         VStack(alignment: .trailing, spacing: 6) {
-                            bubbleSurface {
-                                UserMessageContent(message: message)
+                            if model.isEditingInterruptedMessage(message.id) {
+                                InterruptedMessageEditor(message: message)
+                            } else {
+                                bubbleSurface {
+                                    UserMessageContent(message: message)
+                                }
                             }
-                            MessageMetadataFooter(message: message)
+                            HStack(spacing: 9) {
+                                if !model.isEditingInterruptedMessage(message.id),
+                                   model.canEditInterruptedMessage(message) {
+                                    Button {
+                                        model.beginEditingInterruptedMessage(message)
+                                    } label: {
+                                        Label("编辑并重新执行", systemImage: "pencil")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                                    .help("撤回已停止的最后一轮，修改后重新执行；不会回滚已经修改的本地文件")
+                                }
+                                MessageMetadataFooter(message: message)
+                            }
+                            .font(.caption2.weight(.medium))
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 6) {
@@ -1691,6 +1755,64 @@ private struct MessageBubble: View, Equatable {
             .background(background, in: RoundedRectangle(cornerRadius: 13))
     }
 
+}
+
+private struct InterruptedMessageEditor: View {
+    @EnvironmentObject private var model: AppModel
+    let message: ChatMessage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !message.attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 9) {
+                        ForEach(Array(message.attachments.enumerated()), id: \.offset) { _, attachment in
+                            MessageAttachmentCard(attachment: attachment)
+                        }
+                    }
+                }
+            }
+
+            ComposerTextEditor(
+                text: $model.interruptedMessageEditText,
+                pasteImages: { false },
+                submit: { Task { await model.submitInterruptedMessageEdit() } },
+                focusRequest: model.interruptedMessageEditFocusRequest
+            )
+            .frame(minHeight: 86, maxHeight: 180)
+
+            if let error = model.interruptedMessageEdit?.error {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Label("重新执行不会撤销上一轮已产生的文件修改", systemImage: "info.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 12)
+                Button("取消", action: model.cancelInterruptedMessageEdit)
+                    .disabled(model.interruptedMessageEdit?.isSubmitting == true)
+                Button {
+                    Task { await model.submitInterruptedMessageEdit() }
+                } label: {
+                    if model.interruptedMessageEdit?.isSubmitting == true {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("发送")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canSubmitInterruptedMessageEdit)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.gray.opacity(0.18), in: RoundedRectangle(cornerRadius: 13))
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(.quaternary))
+    }
 }
 
 private struct MessageMetadataFooter: View {

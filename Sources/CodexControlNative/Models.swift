@@ -7,6 +7,7 @@ struct CodexThread: Identifiable, Hashable, Codable {
     var cwd: String
     var model: String?
     var reasoningEffort: String?
+    var serviceTier: String?
     var updatedAt: Date
     var status: String
     var path: String?
@@ -35,6 +36,7 @@ struct CodexThread: Identifiable, Hashable, Codable {
         self.cwd = cwd
         self.model = json["model"] as? String
         self.reasoningEffort = json["reasoningEffort"] as? String
+        self.serviceTier = json["serviceTier"] as? String
         self.path = json["path"] as? String
         let timestamp = (json["recencyAt"] as? NSNumber)?.doubleValue
             ?? (json["updatedAt"] as? NSNumber)?.doubleValue

@@ -44,7 +44,17 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertEqual(option.serviceTiers.first?.name, "Fast")
     }
 
-    func testTurnStartUsesPerTurnServiceTierOverride() {
+    func testThreadParsesPersistedServiceTier() throws {
+        let thread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-1",
+            "cwd": "/tmp/project",
+            "serviceTier": "priority"
+        ]))
+
+        XCTAssertEqual(thread.serviceTier, "priority")
+    }
+
+    func testTurnStartPersistsServiceTierOnThread() {
         let parameters = AppServerClient.turnStartParameters(
             threadID: "thread-1",
             text: "继续处理",
@@ -52,12 +62,48 @@ final class StreamingEventTests: XCTestCase {
             model: "gpt-test",
             effort: "high",
             permissions: ":workspace",
-            serviceTierForTurn: "fast"
+            serviceTier: "fast"
         )
 
-        XCTAssertEqual(parameters["serviceTierForTurn"] as? String, "fast")
+        XCTAssertEqual(parameters["serviceTier"] as? String, "fast")
+        XCTAssertNil(parameters["serviceTierForTurn"])
         XCTAssertEqual(parameters["threadId"] as? String, "thread-1")
         XCTAssertEqual(parameters["model"] as? String, "gpt-test")
+    }
+
+    func testThreadSettingsUpdateUsesPersistentServiceTier() {
+        let parameters = AppServerClient.threadServiceTierUpdateParameters(
+            threadID: "thread-1",
+            serviceTier: "priority"
+        )
+
+        XCTAssertEqual(parameters["threadId"] as? String, "thread-1")
+        XCTAssertEqual(parameters["serviceTier"] as? String, "priority")
+    }
+
+    func testThreadSettingsNotificationKeepsSpeedMenuInSync() throws {
+        let model = AppModel()
+        let thread = try XCTUnwrap(CodexThread(json: [
+            "id": "thread-1",
+            "cwd": "/tmp/project",
+            "serviceTier": "default"
+        ]))
+        model.selectedThreadID = thread.id
+        model.applyThreadListSnapshot([thread])
+
+        model.handleEvent("thread/settings/updated", [
+            "threadId": thread.id,
+            "threadSettings": ["serviceTier": "priority"]
+        ])
+        XCTAssertTrue(model.isFastModeEnabled)
+        XCTAssertEqual(model.threads.first?.serviceTier, "priority")
+
+        model.handleEvent("thread/settings/updated", [
+            "threadId": thread.id,
+            "threadSettings": ["serviceTier": "default"]
+        ])
+        XCTAssertFalse(model.isFastModeEnabled)
+        XCTAssertEqual(model.threads.first?.serviceTier, "default")
     }
 
     func testUnchangedStatusPollDoesNotRepublishThreadList() throws {

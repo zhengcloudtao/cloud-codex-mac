@@ -98,6 +98,30 @@ final class ConversationLayoutTests: XCTestCase {
         assertStableLayout("switch back to short conversation", hostingView: hostingView, window: window,
                            baseline: baseline, originalWindowWidth: originalWindowWidth)
 
+        let stoppedMessages: [ChatMessage] = [
+            .init(id: "stopped-question", role: .user, text: "暂停后修改并重新执行", turnID: "stopped-turn"),
+            .init(id: "stopped-step", role: .activity, text: "已终止", activityKind: .status,
+                  activityTitle: "任务已停止", activityStatus: "已停止", turnID: "stopped-turn")
+        ]
+        selectFixture(shortThread, messages: stoppedMessages, model: model)
+        model.applyExternalActivitySnapshot(
+            ThreadActivitySnapshot(
+                thread: shortThread,
+                turn: TurnRuntimeState(
+                    id: "stopped-turn",
+                    status: "interrupted",
+                    startedAt: nil,
+                    completedAt: nil
+                ),
+                messages: stoppedMessages
+            ),
+            threadID: shortThread.id
+        )
+        model.beginEditingInterruptedMessage(stoppedMessages[0])
+        assertStableLayout("stopped-turn inline editor", hostingView: hostingView, window: window,
+                           baseline: baseline, originalWindowWidth: originalWindowWidth)
+        model.cancelInterruptedMessageEdit()
+
         // No intermediate layout pass: stale async selection/layout callbacks
         // must not apply an earlier conversation's minimum size afterward.
         selectFixture(longThread, messages: longMessages, model: model)

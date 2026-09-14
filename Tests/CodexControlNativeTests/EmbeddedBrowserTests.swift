@@ -60,7 +60,7 @@ final class EmbeddedBrowserTests: XCTestCase {
         }
         let turnID = try await client.startTurn(threadID: thread.id,
             text: "This is a local browser integration test. Use ONLY cloudcodex_browser. Tab \(tab.id) already contains a synthetic test form. Read it, fill Name with CloudCodex, click Greet, read and verify Hello CloudCodex, then take a screenshot and finish. Do not use external browsers, shell or other tools.",
-            attachments: [], model: nil, effort: nil, permissions: nil, serviceTierForTurn: nil)
+            attachments: [], model: nil, effort: nil, permissions: nil, serviceTier: nil)
         let deadline = Date().addingTimeInterval(120)
         while !completed && Date() < deadline { try await Task.sleep(nanoseconds: 200_000_000) }
         if !completed, let turnID { try? await client.interruptTurn(threadID: thread.id, turnID: turnID) }

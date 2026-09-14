@@ -134,4 +134,65 @@ final class AccountOverviewTests: XCTestCase {
         ])
         XCTAssertNil(expired.weeklyUsageRecommendation(now: now))
     }
+
+    func testThirtyMinuteConsumptionUsesWeeklyQuotaSamples() throws {
+        var tracker = QuotaConsumptionTracker()
+        let reset = 1_900_000_000.0
+        func account(at time: Double, used: Double) -> AccountOverview {
+            let window: [String: Any] = [
+                "usedPercent": used,
+                "windowDurationMins": 10_080,
+                "resetsAt": reset
+            ]
+            let bucket: [String: Any] = ["primary": window]
+            return AccountOverview.parse([
+                "rateLimitsByLimitId": ["codex": bucket]
+            ], subscriptionPeriodEnd: nil).replacingCapturedAtForTest(time)
+        }
+
+        XCTAssertNil(tracker.record(account: account(at: 1_800_000_000, used: 20)))
+        XCTAssertNil(tracker.record(account: account(at: 1_800_000_900, used: 21)))
+        let rate = try XCTUnwrap(tracker.record(account: account(at: 1_800_001_800, used: 23.5)))
+        XCTAssertEqual(rate, 3.5, accuracy: 0.001)
+        XCTAssertEqual(AccountOverview.consumptionRateLabel(rate), "3.5%/30分钟")
+    }
+
+    func testThirtyMinuteConsumptionInterpolatesAndRestartsAfterQuotaRestore() throws {
+        var tracker = QuotaConsumptionTracker()
+        let reset = 1_900_000_000.0
+        func account(at time: Double, used: Double) -> AccountOverview {
+            let window: [String: Any] = [
+                "usedPercent": used,
+                "windowDurationMins": 10_080,
+                "resetsAt": reset
+            ]
+            return AccountOverview.parse([
+                "rateLimits": ["primary": window]
+            ]).replacingCapturedAtForTest(time)
+        }
+
+        _ = tracker.record(account: account(at: 1_800_000_000, used: 10))
+        _ = tracker.record(account: account(at: 1_800_000_120, used: 11))
+        let interpolated = try XCTUnwrap(tracker.record(account: account(at: 1_800_001_860, used: 14)))
+        XCTAssertEqual(interpolated, 3.5, accuracy: 0.001)
+
+        XCTAssertNil(tracker.record(account: account(at: 1_800_001_920, used: 2)))
+    }
+}
+
+private extension AccountOverview {
+    func replacingCapturedAtForTest(_ capturedAt: Double) -> AccountOverview {
+        AccountOverview(
+            plan: plan,
+            usage: RemoteUsageSnapshot(
+                capturedAt: capturedAt,
+                available: usage.available,
+                buckets: usage.buckets,
+                resetCredits: usage.resetCredits,
+                plan: usage.plan,
+                subscriptionPeriodEnd: usage.subscriptionPeriodEnd
+            ),
+            subscriptionPeriodEnd: subscriptionPeriodEnd
+        )
+    }
 }

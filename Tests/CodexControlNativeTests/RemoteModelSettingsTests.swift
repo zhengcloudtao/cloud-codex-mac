@@ -54,7 +54,7 @@ final class RemoteModelSettingsTests: XCTestCase {
         XCTAssertEqual(snapshot.defaultEffort, "xhigh")
         model.selectModel("gpt-5.6-sol", preferredEffort: "low")
         let params = AppServerClient.turnStartParameters(threadID: "thread", text: "test", attachments: [],
-            model: snapshot.defaultModel, effort: snapshot.defaultEffort, permissions: nil, serviceTierForTurn: nil)
+            model: snapshot.defaultModel, effort: snapshot.defaultEffort, permissions: nil, serviceTier: nil)
         XCTAssertEqual(params["model"] as? String, "gpt-6-astra")
         XCTAssertEqual(params["effort"] as? String, "xhigh")
     }

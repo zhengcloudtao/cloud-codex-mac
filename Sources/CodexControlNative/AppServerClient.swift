@@ -19,6 +19,7 @@ final class AppServerClient {
     }
     private var pending: [Int: PendingRequest] = [:]
     private var loadedThreadIDs: Set<String> = []
+    private var serviceTierByThreadID: [String: String] = [:]
     private struct ActivityHistory {
         var turnID: String
         var tailCursor: String?
@@ -136,9 +137,17 @@ final class AppServerClient {
         let result = try await request("thread/list", params: Self.threadListParameters(limit: limit, cwd: cwd))
         let rows = result["data"] as? [JSON] ?? []
         return ThreadPage(
-            threads: rows.compactMap(CodexThread.init(json:)),
+            threads: rows.compactMap(CodexThread.init(json:)).map(applyingCachedServiceTier),
             hasMore: result["nextCursor"] is String
         )
+    }
+
+    private func applyingCachedServiceTier(_ original: CodexThread) -> CodexThread {
+        var thread = original
+        if let cached = serviceTierByThreadID[thread.id] {
+            thread.serviceTier = cached
+        }
+        return thread
     }
 
     static func threadListParameters(limit: Int = 60, cwd: String? = nil) -> JSON {
@@ -200,9 +209,10 @@ final class AppServerClient {
             params: ["threadId": id, "includeTurns": false]
         )
         guard let json = result["thread"] as? JSON,
-              let thread = CodexThread(json: json) else {
+              let decodedThread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
+        let thread = applyingCachedServiceTier(decodedThread)
         // thread/read is read-only and does not acquire a writer. Only successful
         // thread/start or thread/resume may populate loadedThreadIDs.
         let turnsResult = try await request(
@@ -307,9 +317,10 @@ final class AppServerClient {
             params: ["threadId": id, "includeTurns": false]
         )
         guard let json = result["thread"] as? JSON,
-              let thread = CodexThread(json: json) else {
+              let decodedThread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
+        let thread = applyingCachedServiceTier(decodedThread)
         return thread
     }
 
@@ -420,26 +431,40 @@ final class AppServerClient {
         hasMoreActivityHistory(thread.id) || activityHistoryByThread[thread.id]?.updatedAt != thread.updatedAt
     }
 
-    func createThread(cwd: String, model: String?, permissions: String?) async throws -> CodexThread {
+    func createThread(
+        cwd: String,
+        model: String?,
+        permissions: String?,
+        serviceTier: String? = nil
+    ) async throws -> CodexThread {
         var params: JSON = ["cwd": cwd, "ephemeral": false, "dynamicTools": [BrowserTool.specification]]
         if let model { params["model"] = model }
         if let permissions { params["permissions"] = permissions }
+        if let serviceTier { params["serviceTier"] = serviceTier }
         let result = try await request(
             "thread/start",
             params: params
         )
         guard let json = result["thread"] as? JSON,
-              let thread = CodexThread(json: json) else {
+              var thread = CodexThread(json: json) else {
             throw CodexClientError.invalidResponse
         }
+        let effectiveServiceTier = result["serviceTier"] as? String ?? serviceTier ?? "default"
+        serviceTierByThreadID[thread.id] = effectiveServiceTier
+        thread.serviceTier = effectiveServiceTier
         loadedThreadIDs.insert(thread.id)
         return thread
     }
 
-    func resumeThread(_ id: String) async throws {
-        if loadedThreadIDs.contains(id) { return }
-        _ = try await request("thread/resume", params: ["threadId": id])
+    @discardableResult
+    func resumeThread(_ id: String) async throws -> String? {
+        if loadedThreadIDs.contains(id) { return serviceTierByThreadID[id] }
+        let result = try await request("thread/resume", params: ["threadId": id])
+        if let serviceTier = result["serviceTier"] as? String {
+            serviceTierByThreadID[id] = serviceTier
+        }
         loadedThreadIDs.insert(id)
+        return serviceTierByThreadID[id]
     }
 
     func unsubscribeThread(_ id: String) async throws {
@@ -455,7 +480,7 @@ final class AppServerClient {
         model: String?,
         effort: String?,
         permissions: String?,
-        serviceTierForTurn: String?,
+        serviceTier: String?,
         approvalPolicy: String? = nil,
         approvalsReviewer: String? = nil
     ) async throws -> String? {
@@ -466,7 +491,7 @@ final class AppServerClient {
             model: model,
             effort: effort,
             permissions: permissions,
-            serviceTierForTurn: serviceTierForTurn,
+            serviceTier: serviceTier,
             approvalPolicy: approvalPolicy,
             approvalsReviewer: approvalsReviewer
         )
@@ -484,7 +509,7 @@ final class AppServerClient {
         model: String?,
         effort: String?,
         permissions: String?,
-        serviceTierForTurn: String?,
+        serviceTier: String?,
         approvalPolicy: String? = nil,
         approvalsReviewer: String? = nil
     ) -> JSON {
@@ -495,10 +520,54 @@ final class AppServerClient {
         if let model { params["model"] = model }
         if let effort { params["effort"] = effort }
         if let permissions { params["permissions"] = permissions }
-        if let serviceTierForTurn { params["serviceTierForTurn"] = serviceTierForTurn }
+        if let serviceTier { params["serviceTier"] = serviceTier }
         if let approvalPolicy { params["approvalPolicy"] = approvalPolicy }
         if let approvalsReviewer { params["approvalsReviewer"] = approvalsReviewer }
         return params
+    }
+
+    func updateThreadServiceTier(threadID: String, serviceTier: String) async throws {
+        _ = try await request(
+            "thread/settings/update",
+            params: Self.threadServiceTierUpdateParameters(
+                threadID: threadID,
+                serviceTier: serviceTier
+            )
+        )
+        serviceTierByThreadID[threadID] = serviceTier
+    }
+
+    static func threadServiceTierUpdateParameters(
+        threadID: String,
+        serviceTier: String
+    ) -> JSON {
+        ["threadId": threadID, "serviceTier": serviceTier]
+    }
+
+    func updateTurnServiceTier(
+        threadID: String,
+        turnID: String,
+        serviceTier: String
+    ) async throws {
+        _ = try await request(
+            "turn/settings/update",
+            params: [
+                "threadId": threadID,
+                "turnId": turnID,
+                "serviceTier": serviceTier
+            ]
+        )
+    }
+
+    func setThreadName(threadID: String, name: String) async throws {
+        _ = try await request(
+            "thread/name/set",
+            params: Self.threadNameParameters(threadID: threadID, name: name)
+        )
+    }
+
+    static func threadNameParameters(threadID: String, name: String) -> JSON {
+        ["threadId": threadID, "name": name]
     }
 
     func interruptTurn(threadID: String, turnID: String) async throws {
@@ -506,6 +575,20 @@ final class AppServerClient {
             "turn/interrupt",
             params: ["threadId": threadID, "turnId": turnID]
         )
+    }
+
+    func revertThread(_ threadID: String, beforeTurnID: String) async throws {
+        _ = try await request(
+            "thread/revert",
+            params: Self.threadRevertParameters(threadID: threadID, beforeTurnID: beforeTurnID)
+        )
+        // The cached activity page still contains the removed turn. Force the
+        // next read to reconcile against the server's new durable history.
+        activityHistoryByThread.removeValue(forKey: threadID)
+    }
+
+    nonisolated static func threadRevertParameters(threadID: String, beforeTurnID: String) -> JSON {
+        ["threadId": threadID, "beforeTurnId": beforeTurnID]
     }
 
     func steerTurn(threadID: String, turnID: String, text: String, attachments: [ComposerAttachment]) async throws {
@@ -568,6 +651,12 @@ final class AppServerClient {
                 onServerRequest?(requestID, method, params)
                 return
             }
+            if method == "thread/settings/updated",
+               let threadID = params["threadId"] as? String,
+               let settings = params["threadSettings"] as? JSON,
+               settings.keys.contains("serviceTier") {
+                serviceTierByThreadID[threadID] = settings["serviceTier"] as? String ?? "default"
+            }
             onEvent?(method, params)
             return
         }
@@ -589,6 +678,7 @@ final class AppServerClient {
     private func handleTermination(_ status: Int32) {
         connected = false
         loadedThreadIDs.removeAll()
+        serviceTierByThreadID.removeAll()
         let error = CodexClientError.process("Codex 本地服务已退出（状态码 \(status)）")
         let callbacks = pending.values
         pending.removeAll()

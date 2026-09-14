@@ -14,13 +14,13 @@ final class RemoteControlAPITests: XCTestCase {
             threadID: "thread", text: task.prompt,
             attachments: [attachment],
             model: nil, effort: nil, permissions: ":workspace",
-            serviceTierForTurn: "priority", approvalPolicy: "on-request", approvalsReviewer: "auto_review"
+            serviceTier: "priority", approvalPolicy: "on-request", approvalsReviewer: "auto_review"
         )
         let input = try XCTUnwrap(params["input"] as? [[String: Any]])
         XCTAssertEqual(input[1]["type"] as? String, "image")
         XCTAssertTrue((input[1]["url"] as? String ?? "").hasPrefix("data:image/png;base64,"))
         XCTAssertNil(input[1]["path"])
-        XCTAssertEqual(params["serviceTierForTurn"] as? String, "priority")
+        XCTAssertEqual(params["serviceTier"] as? String, "priority")
         XCTAssertEqual(params["approvalPolicy"] as? String, "on-request")
         XCTAssertEqual(params["approvalsReviewer"] as? String, "auto_review")
     }

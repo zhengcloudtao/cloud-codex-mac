@@ -43,6 +43,10 @@ struct AccountOverview {
         usage.buckets.first(where: { $0.id == "codex" }) ?? usage.buckets.first
     }
 
+    var weeklyUsageWindow: RemoteUsageSnapshot.Window? {
+        primaryBucket?.windows.first(where: { $0.windowDurationMins == 10_080 })
+    }
+
     func remaining(minutes: Int) -> String {
         Self.remaining(primaryBucket?.windows.first(where: { $0.windowDurationMins == minutes }))
     }
@@ -57,7 +61,7 @@ struct AccountOverview {
     }
 
     func weeklyUsageRecommendation(now: Date = Date()) -> WeeklyUsageRecommendation? {
-        guard let window = primaryBucket?.windows.first(where: { $0.windowDurationMins == 10_080 }),
+        guard let window = weeklyUsageWindow,
               let used = window.usedPercent,
               let resetsAt = window.resetsAt,
               used.isFinite,
@@ -98,6 +102,10 @@ struct AccountOverview {
             return "\(Int(roundedUp))%"
         }
         return String(format: "%.1f%%", roundedUp)
+    }
+
+    static func consumptionRateLabel(_ value: Double) -> String {
+        String(format: "%.1f%%/30分钟", max(0, min(100, value)))
     }
 }
 
@@ -150,6 +158,17 @@ struct AccountOverviewView: View {
                         }
                         if let value = account.compactRemaining(minutes: 10_080) {
                             quotaColumn("每周剩余", value: value)
+                        }
+                        if account.weeklyUsageWindow?.usedPercent != nil {
+                            if let rate = model.recentThirtyMinuteConsumptionRate {
+                                quotaColumn(
+                                    "30分钟速度",
+                                    value: AccountOverview.consumptionRateLabel(rate),
+                                    help: "最近 30 分钟消耗了每周总额度的 \(AccountOverview.consumptionRateLabel(rate))。"
+                                )
+                            } else {
+                                quotaColumn("30分钟速度", value: "采集中", help: "需要连续采集满 30 分钟后显示。")
+                            }
                         }
                         if let recommendation = account.weeklyUsageRecommendation(now: context.date) {
                             quotaColumn(recommendation.title, value: recommendation.value, help: recommendation.detail)
@@ -211,6 +230,25 @@ struct AccountOverviewView: View {
                                 .padding(10)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                            if account.weeklyUsageWindow?.usedPercent != nil {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("最近 30 分钟消耗速度")
+                                        .fontWeight(.semibold)
+                                    if let rate = model.recentThirtyMinuteConsumptionRate {
+                                        Text(AccountOverview.consumptionRateLabel(rate))
+                                            .font(.title3.weight(.semibold))
+                                            .monospacedDigit()
+                                        Text("表示最近 30 分钟消耗的每周总额度百分比；额度恢复或重置后会重新采集。")
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text("正在采集，需要连续获得满 30 分钟的额度数据。")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                             Divider()
                             Text("可用重置次数：\(account.usage.resetCredits?.availableCount.map(String.init) ?? "未提供")")
