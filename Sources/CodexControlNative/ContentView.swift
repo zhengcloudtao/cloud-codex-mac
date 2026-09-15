@@ -66,10 +66,13 @@ struct ContentView: View {
             Text(model.errorMessage ?? "未知错误")
         }
         .onAppear(perform: applyAppearancePreference)
-        .onAppear(perform: updateUnreadDockBadge)
+        .onAppear(perform: acknowledgeVisibleCompletions)
         .onAppear(perform: applySystemMetricsRefreshInterval)
         .onChange(of: model.unreadCompletions.unread) { _, _ in updateUnreadDockBadge() }
         .onChange(of: showUnreadDockBadge) { _, _ in updateUnreadDockBadge() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            acknowledgeVisibleCompletions()
+        }
         .onChange(of: systemMetricsRefreshInterval) { _, _ in applySystemMetricsRefreshInterval() }
         .onChange(of: appearancePreference) { _, _ in
             applyAppearancePreference()
@@ -98,6 +101,11 @@ struct ContentView: View {
     private func updateUnreadDockBadge() {
         let count = model.unreadCompletions.unread.count
         NSApp.dockTile.badgeLabel = showUnreadDockBadge && count > 0 ? String(count) : nil
+    }
+
+    private func acknowledgeVisibleCompletions() {
+        model.markAllConversationsRead()
+        updateUnreadDockBadge()
     }
 
     private func applySystemMetricsRefreshInterval() {
@@ -571,6 +579,7 @@ struct ContentView: View {
                 Divider()
                 MessageList(
                     messages: model.messages,
+                    collaborationTasks: model.selectedCollaborationTasks,
                     isLoading: model.isConversationLoading,
                     isThinking: model.isSelectedThreadProcessing
                 )
@@ -1208,6 +1217,7 @@ private struct ConversationHeader: View {
 
 private struct MessageList: View {
     let messages: [ChatMessage]
+    let collaborationTasks: [CollaborationChildTask]
     let isLoading: Bool
     let isThinking: Bool
     @State private var showDelayedLoadingIndicator = false
@@ -1223,6 +1233,7 @@ private struct MessageList: View {
 
     var body: some View {
         let entries = ConversationTimeline.entries(from: messages)
+        let latestChildTasks = collaborationTasks
         let hiddenEntryCount = max(0, entries.count - visibleMessageLimit)
         let currentProcessID: String? = {
             guard isThinking, case .process(let group) = entries.last else { return nil }
@@ -1286,6 +1297,11 @@ private struct MessageList: View {
                                 }
                             }
                             .id(entry.id)
+                        }
+
+                        if !latestChildTasks.isEmpty {
+                            CollaborationTaskSummaryView(tasks: latestChildTasks)
+                                .id("latest-collaboration-summary")
                         }
 
                         if isThinking && currentProcessID == nil {
@@ -1354,6 +1370,15 @@ private struct MessageList: View {
         .onChange(of: messages.last?.id) { _, _ in
             if !positionInitialHistoryIfNeeded() {
                 handleNewMessage()
+            }
+        }
+        .onChange(of: collaborationTasks) { oldTasks, newTasks in
+            guard oldTasks != newTasks, !newTasks.isEmpty else { return }
+            if isAtLatest {
+                jumpToBottom()
+            } else {
+                hasUnseenUpdates = true
+                hasNewContentBelow = true
             }
         }
         .onChange(of: streamingScrollToken) { _, _ in
@@ -1436,6 +1461,49 @@ private struct MessageList: View {
     private var streamingScrollToken: String {
         guard let last = messages.last else { return "empty" }
         return "\(messages.count):\(last.id):\(last.text.count):\(last.isStreaming)"
+    }
+}
+
+private struct CollaborationTaskSummaryView: View, Equatable {
+    let tasks: [CollaborationChildTask]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: "person.2.fill")
+                    .foregroundStyle(.mint)
+                Text("并行子任务 · \(tasks.count)")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+            }
+            ForEach(tasks) { task in
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(color(task))
+                        .frame(width: 7, height: 7)
+                    Text(task.name)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    if task.isRunning { ProgressView().controlSize(.mini) }
+                    Text(task.status)
+                        .foregroundStyle(color(task))
+                }
+                .font(.caption)
+            }
+        }
+        .padding(13)
+        .background(Color.secondary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("并行子任务，\(tasks.map { "\($0.name)，\($0.status)" }.joined(separator: "；"))")
+    }
+
+    private func color(_ task: CollaborationChildTask) -> Color {
+        if task.hasFailed { return .red }
+        if task.isRunning { return .blue }
+        if task.status == "已停止" { return .orange }
+        if task.status == "已完成" { return .green }
+        return .secondary
     }
 }
 
@@ -2336,6 +2404,7 @@ struct ConversationProcessView: View, Equatable {
         .background(Color.secondary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
     }
+
 }
 
 private struct ProcessContentHeightKey: PreferenceKey {

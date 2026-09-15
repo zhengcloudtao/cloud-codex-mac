@@ -220,7 +220,12 @@ final class AppServerClient {
             params: [
                 "threadId": id,
                 "limit": 20,
-                "itemsView": "summary",
+                // Collaboration/sub-agent records are persisted as turn items.
+                // The summary view deliberately omits them, which left only the
+                // parent conversation badge after selecting or reopening a thread.
+                // Keep the read bounded to 20 turns, but load their complete item
+                // lists so child task names and states survive historical reloads.
+                "itemsView": "full",
                 "sortDirection": "desc"
             ]
         )
@@ -873,6 +878,19 @@ final class AppServerClient {
                         activityTitle: "查看图片",
                         activityStatus: "已完成"
                     ))
+                case "collabAgentToolCall", "subAgentActivity":
+                    if let presentation = CollaborationItemPresentation.parse(item, completed: true) {
+                        messages.append(.init(
+                            id: id,
+                            role: .activity,
+                            text: presentation.text,
+                            isStreaming: presentation.isStreaming,
+                            activityKind: .collaboration,
+                            activityTitle: presentation.title,
+                            activityStatus: presentation.status,
+                            collaborationChildTasks: presentation.childTasks
+                        ))
+                    }
                 case "contextCompaction":
                     messages.append(.init(
                         id: id,

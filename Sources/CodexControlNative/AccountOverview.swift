@@ -2,6 +2,15 @@ import Foundation
 import SwiftUI
 
 struct AccountOverview {
+    struct WeeklyPaceStatus: Equatable {
+        enum State: Equatable { case ahead, onTrack, behind }
+
+        let state: State
+        let compactLabel: String
+        let label: String
+        let detail: String
+    }
+
     struct WeeklyUsageRecommendation: Equatable {
         let title: String
         let value: String
@@ -64,6 +73,8 @@ struct AccountOverview {
         guard let window = weeklyUsageWindow,
               let used = window.usedPercent,
               let resetsAt = window.resetsAt,
+              let windowDurationMins = window.windowDurationMins,
+              windowDurationMins > 0,
               used.isFinite,
               resetsAt.isFinite else { return nil }
 
@@ -72,11 +83,14 @@ struct AccountOverview {
 
         let remaining = max(0, min(100, 100 - used))
         let isDueWithinOneDay = secondsRemaining <= 24 * 60 * 60
+        let weeklyBaseline = Double(100 * 24 * 60) / Double(windowDurationMins)
+        let resetCatchUp = remaining * 24 * 60 * 60 / secondsRemaining
         let recommended = isDueWithinOneDay
             ? remaining
-            : min(remaining, remaining * 24 * 60 * 60 / secondsRemaining)
+            : min(remaining, max(weeklyBaseline, resetCatchUp))
         let value = Self.percentageLabel(recommended)
         let remainingLabel = Self.percentageLabel(remaining)
+        let baselineLabel = Self.percentageLabel(weeklyBaseline)
 
         if isDueWithinOneDay {
             return .init(
@@ -91,8 +105,53 @@ struct AccountOverview {
             title: "24小时建议",
             value: value,
             detail: remaining > 0
-                ? "按当前剩余 \(remainingLabel) 和每周重置时间计算，接下来 24 小时建议至少使用 \(value)。低于这个进度，之后需要加快使用才能在重置前用完。"
+                ? "每周总额度按 7 天计算，基础保底速度为 \(baselineLabel)/24小时；同时根据当前剩余 \(remainingLabel) 和重置时间计算追赶速度，采用两者中更高的 \(value)，降低额度提前重置时未使用完的风险。"
                 : "本周额度已经用完，等待下一次每周重置。"
+        )
+    }
+
+    func weeklyPaceStatus(now: Date = Date()) -> WeeklyPaceStatus? {
+        guard let window = weeklyUsageWindow,
+              let used = window.usedPercent,
+              let resetsAt = window.resetsAt,
+              let durationMinutes = window.windowDurationMins,
+              durationMinutes > 0,
+              used.isFinite,
+              resetsAt.isFinite else { return nil }
+
+        let durationSeconds = Double(durationMinutes * 60)
+        let secondsRemaining = resetsAt - now.timeIntervalSince1970
+        guard secondsRemaining > 0, secondsRemaining <= durationSeconds else { return nil }
+
+        let actualRemaining = max(0, min(100, 100 - used))
+        let expectedRemaining = max(0, min(100, secondsRemaining / durationSeconds * 100))
+        let difference = actualRemaining - expectedRemaining
+        let actualLabel = Self.percentageLabel(actualRemaining)
+        let expectedLabel = Self.percentageLabel(expectedRemaining)
+
+        if difference > 0.5 {
+            let gap = Self.percentageLabel(difference)
+            return .init(
+                state: .behind,
+                compactLabel: "追赶",
+                label: "需追赶 \(gap)",
+                detail: "当前剩余 \(actualLabel)，按本周已过去的时间，理想剩余约 \(expectedLabel)。当前少用了 \(gap)，建议按24小时建议提高使用速度。"
+            )
+        }
+        if difference < -0.5 {
+            let lead = Self.percentageLabel(-difference)
+            return .init(
+                state: .ahead,
+                compactLabel: "超前",
+                label: "已超前 \(lead)",
+                detail: "当前剩余 \(actualLabel)，按本周已过去的时间，理想剩余约 \(expectedLabel)。当前已多使用 \(lead)，进度处于超前状态。"
+            )
+        }
+        return .init(
+            state: .onTrack,
+            compactLabel: "正常",
+            label: "进度正常",
+            detail: "当前剩余 \(actualLabel)，与按本周已过去时间计算的理想剩余 \(expectedLabel) 基本一致。"
         )
     }
 
@@ -161,7 +220,16 @@ struct AccountOverviewView: View {
                             quotaColumn("5小时剩余", value: value)
                         }
                         if let value = account.compactRemaining(minutes: 10_080) {
-                            quotaColumn("每周剩余", value: value)
+                            if let pace = account.weeklyPaceStatus(now: context.date) {
+                                quotaColumn(
+                                    "每周剩余",
+                                    value: "\(value) \(pace.compactLabel)",
+                                    help: pace.detail,
+                                    valueColor: paceColor(pace.state)
+                                )
+                            } else {
+                                quotaColumn("每周剩余", value: value)
+                            }
                         }
                         if account.weeklyUsageWindow?.usedPercent != nil {
                             if let rate = model.recentThirtyMinuteConsumptionRate {
@@ -173,9 +241,6 @@ struct AccountOverviewView: View {
                             } else {
                                 quotaColumn("30分钟消耗", value: "采集中", help: "需要连续采集满 30 分钟后显示。")
                             }
-                        }
-                        if let recommendation = account.weeklyUsageRecommendation(now: context.date) {
-                            quotaColumn(recommendation.title, value: recommendation.value, help: recommendation.detail)
                         }
                         if let value = account.compactResetCredits {
                             quotaColumn("可用重置", value: value)
@@ -224,16 +289,17 @@ struct AccountOverviewView: View {
                                 }
                             }
                             if account.usage.buckets.isEmpty { Text("当前账号未提供额度窗口。") }
-                            if let recommendation = account.weeklyUsageRecommendation() {
+                            if let pace = account.weeklyPaceStatus() {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text("\(recommendation.title)：\(recommendation.value)")
+                                    Text("每周使用进度：\(pace.label)")
                                         .fontWeight(.semibold)
-                                    Text(recommendation.detail)
+                                        .foregroundStyle(paceColor(pace.state))
+                                    Text(pace.detail)
                                         .foregroundStyle(.secondary)
                                 }
                                 .padding(10)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .background(paceColor(pace.state).opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             }
                             if account.weeklyUsageWindow?.usedPercent != nil {
                                 VStack(alignment: .leading, spacing: 4) {
@@ -326,13 +392,24 @@ struct AccountOverviewView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func quotaColumn(_ title: String, value: String, help: String? = nil) -> some View {
+    private func quotaColumn(_ title: String, value: String, help: String? = nil, valueColor: Color = .primary) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(valueColor)
+                .monospacedDigit()
         }
         .frame(minWidth: 48, alignment: .leading)
         .help(help ?? title + "：" + value)
+    }
+
+    private func paceColor(_ state: AccountOverview.WeeklyPaceStatus.State) -> Color {
+        switch state {
+        case .ahead: return .green
+        case .onTrack: return .blue
+        case .behind: return .orange
+        }
     }
 
     private func windowName(_ minutes: Int?) -> String {

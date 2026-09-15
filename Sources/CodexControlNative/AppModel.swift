@@ -38,6 +38,12 @@ final class AppModel: ObservableObject {
         saveUnreadCompletions()
     }
 
+    func markAllConversationsRead() {
+        guard !unreadCompletions.unread.isEmpty else { return }
+        unreadCompletions.markAllRead()
+        saveUnreadCompletions()
+    }
+
     func recordCompletedConversation(_ threadID: String, turnID: String, viewed: Bool) {
         unreadCompletions.complete(threadID: threadID, turnID: turnID, viewed: viewed)
         saveUnreadCompletions()
@@ -452,6 +458,7 @@ final class AppModel: ObservableObject {
     private var pendingAssistantDeltas: [PendingItemKey: [String]] = [:]
     private var pendingDeltaOrder: [PendingDeltaTarget] = []
     private var messagesByThread: [String: [ChatMessage]] = [:]
+    @Published private(set) var selectedCollaborationTasks: [CollaborationChildTask] = []
     private var threadSummaries: [String: CodexThread] = [:]
     private var selectionGeneration = 0
     private var turnEventRevision: [String: Int] = [:]
@@ -476,7 +483,13 @@ final class AppModel: ObservableObject {
     private func storeMessages(_ value: [ChatMessage], for threadID: String) {
         if eventThreadID == threadID { eventBuffer = value; return }
         messagesByThread[threadID] = value
-        if selectedThreadID == threadID, messages != value { messages = value }
+        if selectedThreadID == threadID {
+            let childTasks = ConversationTimeline.latestChildTasks(from: value)
+            if !childTasks.isEmpty, selectedCollaborationTasks != childTasks {
+                selectedCollaborationTasks = childTasks
+            }
+            if messages != value { messages = value }
+        }
     }
 
     private func preserveSelectedConversation() {
@@ -1105,6 +1118,7 @@ final class AppModel: ObservableObject {
         threadOwnershipNotice = nil
         threadInputAvailability = id == nil ? .available : .checking
         selectedThreadID = id
+        selectedCollaborationTasks = []
         syncFastModeFromSelectedThread()
         messages = id.flatMap { messagesByThread[$0] } ?? []
         // Publish loading together with the new selection so an uncached
@@ -1188,6 +1202,7 @@ final class AppModel: ObservableObject {
                 threads[index] = updated
             }
             if selectedThreadID == id {
+                selectedCollaborationTasks = ConversationTimeline.latestChildTasks(from: loadedMessages)
                 flushPendingDeltas()
                 storeMessages(ConversationHistory.merge(snapshot: loadedMessages, cached: messages), for: id)
                 scheduleTurnModelMetadataLoad(
@@ -2833,17 +2848,17 @@ final class AppModel: ObservableObject {
                !eventMessages.contains(where: { $0.id == image.id }) {
                 eventMessages.append(image)
             }
-        case "collabAgentToolCall":
-            let tool = item["tool"] as? String ?? "协作任务"
-            let prompt = item["prompt"] as? String ?? ""
-            let status = item["status"] as? String ?? (completed ? "completed" : "inProgress")
-            upsertActivity(id: id, kind: .collaboration, title: "协作 · \(tool)",
-                           text: prompt, status: localizedStatus(status), isStreaming: !completed)
-        case "subAgentActivity":
-            let path = item["agentPath"] as? String ?? "子任务"
-            let kind = item["kind"] as? String ?? "活动"
-            upsertActivity(id: id, kind: .collaboration, title: path,
-                           text: kind, status: runningStatus, isStreaming: !completed)
+        case "collabAgentToolCall", "subAgentActivity":
+            guard let presentation = CollaborationItemPresentation.parse(item, completed: completed) else { return }
+            upsertActivity(
+                id: id,
+                kind: .collaboration,
+                title: presentation.title,
+                text: presentation.text,
+                status: presentation.status,
+                isStreaming: presentation.isStreaming,
+                collaborationChildTasks: presentation.childTasks
+            )
         case "contextCompaction":
             upsertActivity(id: id, kind: .status, title: "整理会话上下文",
                            text: "Codex 正在压缩较早的上下文以继续工作。", status: "已完成",
@@ -2859,7 +2874,8 @@ final class AppModel: ObservableObject {
         title: String,
         text: String,
         status: String,
-        isStreaming: Bool
+        isStreaming: Bool,
+        collaborationChildTasks: [CollaborationChildTask] = []
     ) {
         let clipped = clippedActivityText(text)
         if let index = eventMessages.firstIndex(where: { $0.id == id }) {
@@ -2868,10 +2884,14 @@ final class AppModel: ObservableObject {
             if !clipped.isEmpty { eventMessages[index].text = clipped }
             eventMessages[index].activityStatus = status
             eventMessages[index].isStreaming = isStreaming
+            if !collaborationChildTasks.isEmpty {
+                eventMessages[index].collaborationChildTasks = collaborationChildTasks
+            }
         } else {
             eventMessages.append(.init(id: id, role: .activity, text: clipped, isStreaming: isStreaming,
                                   activityKind: kind, activityTitle: title, activityStatus: status,
-                                  turnID: (eventThreadID ?? selectedThreadID).flatMap { activeTurnIDsByThread[$0] }))
+                                  turnID: (eventThreadID ?? selectedThreadID).flatMap { activeTurnIDsByThread[$0] },
+                                  collaborationChildTasks: collaborationChildTasks))
         }
     }
 

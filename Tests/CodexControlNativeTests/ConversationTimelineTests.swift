@@ -66,6 +66,50 @@ final class ConversationTimelineTests: XCTestCase {
                        "completion removing synthetic progress must not reset expansion state")
     }
 
+    func testChildTaskSummaryMergesGenericSpawnStateWithNamedActivity() {
+        var spawn = activity("spawn")
+        spawn.activityKind = .collaboration
+        spawn.collaborationChildTasks = [
+            .init(threadID: "child-1", name: "子任务 1", status: "执行中", detail: "")
+        ]
+        var finished = activity("finished")
+        finished.activityKind = .collaboration
+        finished.collaborationChildTasks = [
+            .init(threadID: "child-1", name: "xili", status: "已完成", detail: "结果已返回")
+        ]
+
+        let group = ConversationProcessGroup(messages: [spawn, finished])
+        XCTAssertEqual(group.childTasks, [
+            .init(threadID: "child-1", name: "xili", status: "已完成", detail: "结果已返回")
+        ])
+    }
+
+    func testChildTasksStayOnFinalProcessCardWhenCommentarySplitsOneTurn() {
+        var started = activity("started", turn: "turn")
+        started.activityKind = .collaboration
+        started.collaborationChildTasks = [
+            .init(threadID: "child-1", name: "xili", status: "执行中", detail: "")
+        ]
+        let commentary = ChatMessage(id: "commentary", role: .assistant, text: "继续检查", turnID: "turn")
+        var completed = activity("completed", turn: "turn")
+        completed.activityKind = .collaboration
+        completed.collaborationChildTasks = [
+            .init(threadID: "child-1", name: "xili", status: "已完成", detail: "")
+        ]
+        let latest = activity("latest", turn: "turn")
+
+        let entries = ConversationTimeline.entries(from: [started, commentary, completed, latest])
+        guard case .process(let first) = entries[0],
+              case .process(let final) = entries[2] else { return XCTFail("missing split process cards") }
+        XCTAssertEqual(first.childTasks.map(\.name), ["xili"])
+        XCTAssertEqual(final.childTasks, [
+            .init(threadID: "child-1", name: "xili", status: "已完成", detail: "")
+        ], "the bottom process card should retain the whole turn's child-task summary")
+        XCTAssertEqual(ConversationTimeline.latestChildTasks(from: [started, commentary, completed, latest]), [
+            .init(threadID: "child-1", name: "xili", status: "已完成", detail: "")
+        ], "the persistent bottom summary should use the latest collaboration turn")
+    }
+
     func testThinkingUsesCurrentRuntimeStateNotHistoricalStreamingFlag() {
         var old = activity("old")
         old.isStreaming = true

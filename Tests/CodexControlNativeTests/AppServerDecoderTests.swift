@@ -107,4 +107,40 @@ final class AppServerDecoderTests: XCTestCase {
         )
     }
 
+    func testHistoricalCollaborationItemsPreserveEveryChildTask() {
+        let turns: [[String: Any]] = [[
+            "id": "turn-collab",
+            "items": [
+                [
+                    "id": "spawn",
+                    "type": "collabAgentToolCall",
+                    "tool": "spawnAgent",
+                    "status": "completed",
+                    "senderThreadId": "parent",
+                    "receiverThreadIds": ["child-xili", "child-guanlong"],
+                    "agentsStates": [
+                        "child-xili": ["status": "running"],
+                        "child-guanlong": ["status": "completed", "message": "已完成校区优化"]
+                    ]
+                ],
+                [
+                    "id": "xili-completed",
+                    "type": "subAgentActivity",
+                    "agentThreadId": "child-xili",
+                    "agentPath": "/root/xili",
+                    "kind": "completed"
+                ]
+            ]
+        ]]
+
+        let messages = AppServerClient.parseMessages(from: turns)
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertTrue(messages.allSatisfy { $0.activityKind == .collaboration })
+        let group = ConversationProcessGroup(messages: messages)
+        XCTAssertEqual(group.childTasks.count, 2)
+        XCTAssertEqual(group.childTasks.first { $0.threadID == "child-xili" }?.name, "xili")
+        XCTAssertEqual(group.childTasks.first { $0.threadID == "child-xili" }?.status, "已完成")
+        XCTAssertEqual(group.childTasks.first { $0.threadID == "child-guanlong" }?.status, "已完成")
+    }
+
 }

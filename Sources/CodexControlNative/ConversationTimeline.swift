@@ -19,18 +19,39 @@ struct ConversationProcessGroup: Identifiable, Equatable {
     let steps: [ChatMessage]
     let progress: ChatMessage?
     let failureCount: Int
+    private let summarizedChildTasks: [CollaborationChildTask]
 
-    init(messages: [ChatMessage]) {
+    init(messages: [ChatMessage], summarizedChildTasks: [CollaborationChildTask] = []) {
         self.messages = messages
         steps = messages.filter { $0.id != "turn-progress" }
         progress = messages.first { $0.id == "turn-progress" }
         failureCount = steps.filter(\.isFailedActivity).count
+        self.summarizedChildTasks = summarizedChildTasks
     }
 
     // External snapshots remove the synthetic progress row on completion.
     // Do not let that collapse a log the user currently has open.
     var id: String { "process:\(steps.first?.id ?? progress?.id ?? "empty")" }
     var latestStep: ChatMessage? { steps.last }
+    var childTasks: [CollaborationChildTask] {
+        var order: [String] = []
+        var merged: [String: CollaborationChildTask] = [:]
+        for tasks in steps.map(\.collaborationChildTasks) + [summarizedChildTasks] {
+            for task in tasks {
+                if merged[task.threadID] == nil { order.append(task.threadID) }
+                if var existing = merged[task.threadID] {
+                    if !task.name.hasPrefix("子任务 ") { existing.name = task.name }
+                    if task.status != "等待状态" { existing.status = task.status }
+                    if !task.detail.isEmpty { existing.detail = task.detail }
+                    merged[task.threadID] = existing
+                } else {
+                    merged[task.threadID] = task
+                }
+            }
+        }
+        return order.compactMap { merged[$0] }
+    }
+    var turnID: String? { messages.compactMap(\.turnID).last }
     var hasFailure: Bool { failureCount > 0 || progress?.isFailedActivity == true }
     var wasStopped: Bool { messages.contains { $0.activityStatus == "已停止" } }
 
@@ -49,6 +70,15 @@ extension ChatMessage {
 }
 
 enum ConversationTimeline {
+    static func latestChildTasks(from messages: [ChatMessage]) -> [CollaborationChildTask] {
+        guard let latestTurnID = messages.reversed().first(where: {
+            !$0.collaborationChildTasks.isEmpty && $0.turnID != nil
+        })?.turnID else { return [] }
+        return ConversationProcessGroup(
+            messages: messages.filter { $0.turnID == latestTurnID }
+        ).childTasks
+    }
+
     static func entries(from messages: [ChatMessage]) -> [ConversationTimelineEntry] {
         var entries: [ConversationTimelineEntry] = []
         var activities: [ChatMessage] = []
@@ -74,6 +104,27 @@ enum ConversationTimeline {
             }
         }
         flush()
+
+        // Assistant progress messages split one Codex turn into several compact
+        // process cards. Collaboration usually starts near the top of that turn,
+        // which can be outside the default viewport by the time work finishes.
+        // Summarize every child on the final process card for the same turn so
+        // the named tasks and current states remain visible at the bottom.
+        var tasksByTurn: [String: [CollaborationChildTask]] = [:]
+        for message in messages {
+            guard let turnID = message.turnID, !message.collaborationChildTasks.isEmpty else { continue }
+            tasksByTurn[turnID, default: []].append(contentsOf: message.collaborationChildTasks)
+        }
+        var finalProcessIndexByTurn: [String: Int] = [:]
+        for (index, entry) in entries.enumerated() {
+            guard case .process(let group) = entry, let turnID = group.turnID else { continue }
+            finalProcessIndexByTurn[turnID] = index
+        }
+        for (turnID, tasks) in tasksByTurn {
+            guard let index = finalProcessIndexByTurn[turnID],
+                  case .process(let group) = entries[index] else { continue }
+            entries[index] = .process(.init(messages: group.messages, summarizedChildTasks: tasks))
+        }
         return entries
     }
 }

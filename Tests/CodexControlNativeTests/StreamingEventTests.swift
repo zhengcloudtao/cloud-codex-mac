@@ -4,6 +4,41 @@ import XCTest
 
 @MainActor
 final class StreamingEventTests: XCTestCase {
+    func testLiveCollaborationEventsExposeNamedChildTaskStatus() {
+        let model = AppModel()
+        model.selectedThreadID = "parent"
+
+        model.handleEvent("item/started", [
+            "threadId": "parent",
+            "turnId": "turn-1",
+            "item": [
+                "id": "spawn",
+                "type": "collabAgentToolCall",
+                "tool": "spawnAgent",
+                "status": "inProgress",
+                "senderThreadId": "parent",
+                "receiverThreadIds": ["child-xili"],
+                "agentsStates": ["child-xili": ["status": "running"]]
+            ]
+        ])
+        model.handleEvent("item/completed", [
+            "threadId": "parent",
+            "turnId": "turn-1",
+            "item": [
+                "id": "xili-finished",
+                "type": "subAgentActivity",
+                "agentThreadId": "child-xili",
+                "agentPath": "/root/xili",
+                "kind": "completed"
+            ]
+        ])
+
+        let group = ConversationProcessGroup(messages: model.messages)
+        XCTAssertEqual(group.childTasks, [
+            CollaborationChildTask(threadID: "child-xili", name: "xili", status: "已完成", detail: "")
+        ])
+    }
+
     func testUnsupportedOptionalActivityEventDoesNotShowErrorDialog() {
         let model = AppModel()
 

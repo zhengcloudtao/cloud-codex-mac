@@ -118,7 +118,7 @@ final class AccountOverviewTests: XCTestCase {
                 "resetsAt": Int(now.addingTimeInterval(7 * 24 * 60 * 60).timeIntervalSince1970)
             ]]
         ])
-        XCTAssertEqual(try XCTUnwrap(account.weeklyUsageRecommendation(now: now)).value, "7.2%")
+        XCTAssertEqual(try XCTUnwrap(account.weeklyUsageRecommendation(now: now)).value, "14.3%")
 
         let unknownReset = AccountOverview.parse([
             "rateLimits": ["primary": ["usedPercent": 50, "windowDurationMins": 10_080]]
@@ -133,6 +133,60 @@ final class AccountOverviewTests: XCTestCase {
             ]]
         ])
         XCTAssertNil(expired.weeklyUsageRecommendation(now: now))
+    }
+
+    func testWeeklyRecommendationKeepsFullWeekBaselineWhenUsageIsAhead() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = AccountOverview.parse([
+            "rateLimits": ["primary": [
+                "usedPercent": 55,
+                "windowDurationMins": 10_080,
+                "resetsAt": Int(now.addingTimeInterval((4 * 24 + 7.0 + 22.0 / 60.0) * 60 * 60).timeIntervalSince1970)
+            ]]
+        ])
+
+        let recommendation = try XCTUnwrap(account.weeklyUsageRecommendation(now: now))
+        XCTAssertEqual(recommendation.value, "14.3%")
+        XCTAssertTrue(recommendation.detail.contains("基础保底速度为 14.3%/24小时"))
+        XCTAssertTrue(recommendation.detail.contains("两者中更高"))
+    }
+
+    func testWeeklyRecommendationRaisesBaselineWhenResetCatchUpIsHigher() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let account = AccountOverview.parse([
+            "rateLimits": ["primary": [
+                "usedPercent": 40,
+                "windowDurationMins": 10_080,
+                "resetsAt": Int(now.addingTimeInterval(2 * 24 * 60 * 60).timeIntervalSince1970)
+            ]]
+        ])
+
+        XCTAssertEqual(try XCTUnwrap(account.weeklyUsageRecommendation(now: now)).value, "30%")
+    }
+
+    func testWeeklyPaceShowsAheadBehindAndOnTrackFromElapsedWeek() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func account(used: Double) -> AccountOverview {
+            AccountOverview.parse([
+                "rateLimits": ["primary": [
+                    "usedPercent": used,
+                    "windowDurationMins": 10_080,
+                    "resetsAt": Int(now.addingTimeInterval(4 * 24 * 60 * 60).timeIntervalSince1970)
+                ]]
+            ])
+        }
+
+        let ahead = try XCTUnwrap(account(used: 55).weeklyPaceStatus(now: now))
+        XCTAssertEqual(ahead.state, .ahead)
+        XCTAssertEqual(ahead.compactLabel, "超前")
+        XCTAssertTrue(ahead.detail.contains("理想剩余约"))
+
+        let behind = try XCTUnwrap(account(used: 20).weeklyPaceStatus(now: now))
+        XCTAssertEqual(behind.state, .behind)
+        XCTAssertEqual(behind.compactLabel, "追赶")
+
+        let expectedUsed = 100 - 4.0 / 7.0 * 100
+        XCTAssertEqual(try XCTUnwrap(account(used: expectedUsed).weeklyPaceStatus(now: now)).state, .onTrack)
     }
 
     func testThirtyMinuteConsumptionUsesWeeklyQuotaSamples() throws {

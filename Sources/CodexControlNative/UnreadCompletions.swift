@@ -13,4 +13,6 @@ struct UnreadCompletions: Codable, Equatable {
     }
 
     mutating func markRead(_ threadID: String) { unread.remove(threadID) }
+
+    mutating func markAllRead() { unread.removeAll() }
 }

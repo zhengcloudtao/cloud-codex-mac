@@ -24,6 +24,18 @@ final class UnreadCompletionTests: XCTestCase {
         XCTAssertEqual(restored, state)
     }
 
+    func testOpeningRecentConversationsAcknowledgesEveryExistingCompletion() {
+        var state = UnreadCompletions()
+        state.complete(threadID: "one", turnID: "a", viewed: false)
+        state.complete(threadID: "two", turnID: "b", viewed: false)
+        state.markAllRead()
+        XCTAssertTrue(state.unread.isEmpty)
+
+        // A task that finishes later is still allowed to create a fresh badge.
+        state.complete(threadID: "three", turnID: "c", viewed: false)
+        XCTAssertEqual(state.unread, ["three"])
+    }
+
     @MainActor
     func testModelRestoresUnreadAndClickingSelectedConversationClearsIt() throws {
         let suite = "UnreadCompletionTests.\(UUID())"
@@ -37,6 +49,20 @@ final class UnreadCompletionTests: XCTestCase {
         restored.selectThread("one")
         XCTAssertTrue(restored.unreadCompletions.unread.isEmpty)
         restored.recordCompletedConversation("one", turnID: "a", viewed: false)
+        XCTAssertTrue(restored.unreadCompletions.unread.isEmpty)
+    }
+
+    @MainActor
+    func testModelPersistsMarkAllReadAcrossRestart() throws {
+        let suite = "UnreadCompletionTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(remoteDefaults: defaults)
+        model.recordCompletedConversation("one", turnID: "a", viewed: false)
+        model.recordCompletedConversation("two", turnID: "b", viewed: false)
+        model.markAllConversationsRead()
+
+        let restored = AppModel(remoteDefaults: defaults)
         XCTAssertTrue(restored.unreadCompletions.unread.isEmpty)
     }
 
