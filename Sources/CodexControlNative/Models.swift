@@ -442,6 +442,7 @@ struct ChatMessage: Identifiable, Hashable {
     var model: String? = nil
     var reasoningEffort: String? = nil
     var collaborationChildTasks: [CollaborationChildTask] = []
+    var fileChanges: [ConversationFileChange] = []
 
     var modelUsageLabel: String? {
         TurnModelMetadata(model: model, reasoningEffort: reasoningEffort).displayLabel

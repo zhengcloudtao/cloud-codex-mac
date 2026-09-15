@@ -822,19 +822,16 @@ final class AppServerClient {
                     }
                 case "fileChange":
                     let changes = item["changes"] as? [JSON] ?? []
-                    let paths = changes.compactMap { change -> String? in
-                        guard let path = change["path"] as? String else { return nil }
-                        let type = (change["kind"] as? JSON)?["type"] as? String ?? "update"
-                        let verb = type == "add" ? "新增" : (type == "delete" ? "删除" : "修改")
-                        return "\(verb)  \(path)"
-                    }
+                    let parsedChanges = changes.compactMap(ConversationFileChange.init(json:))
+                    let paths = parsedChanges.map { "\($0.kind.label)  \($0.path)" }
                     messages.append(.init(
                         id: id,
                         role: .activity,
                         text: paths.isEmpty ? "已更新工作区文件" : paths.joined(separator: "\n"),
                         activityKind: .file,
                         activityTitle: "文件变更",
-                        activityStatus: "已完成"
+                        activityStatus: "已完成",
+                        fileChanges: parsedChanges
                     ))
                 case "mcpToolCall":
                     let server = item["server"] as? String ?? "MCP"

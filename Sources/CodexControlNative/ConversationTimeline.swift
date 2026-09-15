@@ -5,11 +5,21 @@ import Foundation
 enum ConversationTimelineEntry: Identifiable, Equatable {
     case message(ChatMessage)
     case process(ConversationProcessGroup)
+    case fileChanges(ConversationFileChangeGroup)
 
     var id: String {
         switch self {
         case .message(let message): return "message:\(message.id)"
         case .process(let group): return group.id
+        case .fileChanges(let group): return group.id
+        }
+    }
+
+    var turnID: String? {
+        switch self {
+        case .message(let message): return message.turnID
+        case .process(let group): return group.turnID
+        case .fileChanges(let group): return group.turnID
         }
     }
 }
@@ -83,6 +93,8 @@ enum ConversationTimeline {
         var entries: [ConversationTimelineEntry] = []
         var activities: [ChatMessage] = []
         var activityTurnID: String?
+        var fileChangesByTurn: [String: [ConversationFileChange]] = [:]
+        var aggregateFileChangeTurns: Set<String> = []
 
         func flush() {
             guard !activities.isEmpty else { return }
@@ -92,6 +104,15 @@ enum ConversationTimeline {
         }
 
         for message in messages {
+            if let turnID = message.turnID, !message.fileChanges.isEmpty {
+                if message.id.hasPrefix("turn-diff-") {
+                    fileChangesByTurn[turnID] = message.fileChanges
+                    aggregateFileChangeTurns.insert(turnID)
+                } else if !aggregateFileChangeTurns.contains(turnID) {
+                    fileChangesByTurn[turnID, default: []].append(contentsOf: message.fileChanges)
+                }
+                continue
+            }
             if message.role != .activity || message.id.hasPrefix("connection-notice-") {
                 flush()
                 entries.append(.message(message))
@@ -125,6 +146,24 @@ enum ConversationTimeline {
                   case .process(let group) = entries[index] else { continue }
             entries[index] = .process(.init(messages: group.messages, summarizedChildTasks: tasks))
         }
-        return entries
+
+        guard !fileChangesByTurn.isEmpty else { return entries }
+        var lastEntryByTurn: [String: Int] = [:]
+        for (index, entry) in entries.enumerated() {
+            if let turnID = entry.turnID { lastEntryByTurn[turnID] = index }
+        }
+        var result: [ConversationTimelineEntry] = []
+        for (index, entry) in entries.enumerated() {
+            result.append(entry)
+            guard let turnID = entry.turnID,
+                  lastEntryByTurn[turnID] == index,
+                  let changes = fileChangesByTurn[turnID], !changes.isEmpty else { continue }
+            result.append(.fileChanges(.init(turnID: turnID, changes: changes)))
+        }
+        let representedTurns = Set(result.compactMap(\.turnID))
+        for (turnID, changes) in fileChangesByTurn where !representedTurns.contains(turnID) {
+            result.append(.fileChanges(.init(turnID: turnID, changes: changes)))
+        }
+        return result
     }
 }

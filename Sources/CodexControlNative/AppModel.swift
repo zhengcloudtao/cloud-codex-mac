@@ -30,7 +30,39 @@ final class AppModel: ObservableObject {
     private let unreadCompletionsKey = "cloudcodex.unreadCompletions.v1"
     private let favoriteConversationsKey = "cloudcodex.favoriteConversations.v1"
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
+    private let revertedFileChangesKey = "cloudcodex.revertedFileChanges.v1"
     private var quotaConsumptionTracker = QuotaConsumptionTracker()
+    @Published private(set) var revertedFileChanges: Set<String> = []
+    @Published private(set) var revertingFileChanges: String?
+
+    func isFileChangeTurnReverted(_ turnID: String) -> Bool {
+        guard let selectedThreadID else { return false }
+        return revertedFileChanges.contains(fileChangeKey(threadID: selectedThreadID, turnID: turnID))
+    }
+
+    func isRevertingFileChangeTurn(_ turnID: String) -> Bool {
+        guard let selectedThreadID else { return false }
+        return revertingFileChanges == fileChangeKey(threadID: selectedThreadID, turnID: turnID)
+    }
+
+    func revertFileChanges(_ group: ConversationFileChangeGroup) async {
+        guard let thread = selectedThread, thread.id == selectedThreadID else { return }
+        let key = fileChangeKey(threadID: thread.id, turnID: group.turnID)
+        guard revertingFileChanges == nil, !revertedFileChanges.contains(key) else { return }
+        revertingFileChanges = key
+        defer { revertingFileChanges = nil }
+        do {
+            try await FileChangePatchReverter.revert(group.changes, in: thread.cwd)
+            revertedFileChanges.insert(key)
+            remoteDefaults.set(Array(revertedFileChanges).sorted(), forKey: revertedFileChangesKey)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func fileChangeKey(threadID: String, turnID: String) -> String {
+        "\(threadID):\(turnID)"
+    }
 
     func markConversationRead(_ threadID: String) {
         guard unreadCompletions.unread.contains(threadID) else { return }
@@ -588,6 +620,7 @@ final class AppModel: ObservableObject {
             quotaConsumptionTracker = saved
             recentThirtyMinuteConsumptionRate = saved.consumptionRate(at: Date().timeIntervalSince1970)
         }
+        revertedFileChanges = Set(remoteDefaults.stringArray(forKey: revertedFileChangesKey) ?? [])
         isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
         remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
         remotePairingCode = remoteDefaults.string(forKey: remotePairingCodeKey) ?? ""
@@ -2673,6 +2706,20 @@ final class AppModel: ObservableObject {
                 status: planCompleted ? "已完成" : "进行中",
                 isStreaming: !planCompleted
             )
+        case "turn/diff/updated":
+            guard let turnID = params["turnId"] as? String,
+                  let diff = params["diff"] as? String else { return }
+            let changes = ConversationFileChange.parseUnifiedDiff(diff)
+            guard !changes.isEmpty else { return }
+            upsertActivity(
+                id: "turn-diff-\(turnID)",
+                kind: .file,
+                title: "文件修改汇总",
+                text: changes.map(\.path).joined(separator: "\n"),
+                status: "进行中",
+                isStreaming: true,
+                fileChanges: changes
+            )
         case "item/commandExecution/outputDelta":
             guard let delta = params["delta"] as? String else { return }
             enqueueActivityDelta(
@@ -2691,14 +2738,16 @@ final class AppModel: ObservableObject {
             )
         case "item/fileChange/patchUpdated":
             let changes = params["changes"] as? [[String: Any]] ?? []
-            let paths = changes.compactMap { $0["path"] as? String }
+            let parsedChanges = changes.compactMap(ConversationFileChange.init(json:))
+            let paths = parsedChanges.map(\.path)
             upsertActivity(
                 id: params["itemId"] as? String ?? "file-change",
                 kind: .file,
                 title: "修改文件",
                 text: paths.isEmpty ? "正在生成并应用文件补丁…" : paths.joined(separator: "\n"),
                 status: "进行中",
-                isStreaming: true
+                isStreaming: true,
+                fileChanges: parsedChanges
             )
         case "item/mcpToolCall/progress":
             guard let message = params["message"] as? String else { return }
@@ -2807,16 +2856,12 @@ final class AppModel: ObservableObject {
                            status: status, isStreaming: !completed)
         case "fileChange":
             let changes = item["changes"] as? [[String: Any]] ?? []
-            let paths = changes.compactMap { change -> String? in
-                guard let path = change["path"] as? String else { return nil }
-                let kindObject = change["kind"] as? [String: Any]
-                let kind = kindObject?["type"] as? String ?? "update"
-                let verb = kind == "add" ? "新增" : (kind == "delete" ? "删除" : "修改")
-                return "\(verb)  \(path)"
-            }
+            let parsedChanges = changes.compactMap(ConversationFileChange.init(json:))
+            let paths = parsedChanges.map { "\($0.kind.label)  \($0.path)" }
             upsertActivity(id: id, kind: .file, title: "文件变更",
                            text: paths.isEmpty ? "正在处理工作区文件…" : paths.joined(separator: "\n"),
-                           status: runningStatus, isStreaming: !completed)
+                           status: runningStatus, isStreaming: !completed,
+                           fileChanges: parsedChanges)
         case "mcpToolCall":
             let server = item["server"] as? String ?? "MCP"
             let tool = item["tool"] as? String ?? "工具"
@@ -2875,7 +2920,8 @@ final class AppModel: ObservableObject {
         text: String,
         status: String,
         isStreaming: Bool,
-        collaborationChildTasks: [CollaborationChildTask] = []
+        collaborationChildTasks: [CollaborationChildTask] = [],
+        fileChanges: [ConversationFileChange] = []
     ) {
         let clipped = clippedActivityText(text)
         if let index = eventMessages.firstIndex(where: { $0.id == id }) {
@@ -2887,11 +2933,13 @@ final class AppModel: ObservableObject {
             if !collaborationChildTasks.isEmpty {
                 eventMessages[index].collaborationChildTasks = collaborationChildTasks
             }
+            if !fileChanges.isEmpty { eventMessages[index].fileChanges = fileChanges }
         } else {
             eventMessages.append(.init(id: id, role: .activity, text: clipped, isStreaming: isStreaming,
                                   activityKind: kind, activityTitle: title, activityStatus: status,
                                   turnID: (eventThreadID ?? selectedThreadID).flatMap { activeTurnIDsByThread[$0] },
-                                  collaborationChildTasks: collaborationChildTasks))
+                                  collaborationChildTasks: collaborationChildTasks,
+                                  fileChanges: fileChanges))
         }
     }
 

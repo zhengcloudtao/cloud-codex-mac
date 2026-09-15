@@ -32,6 +32,28 @@ final class ConversationTimelineTests: XCTestCase {
         XCTAssertEqual(entries.map(\.id), ["process:c1", "message:commentary", "process:c2", "process:c3"])
     }
 
+    func testFileChangesBecomeOneTurnSummaryAfterTheAnswer() {
+        let question = ChatMessage(id: "u", role: .user, text: "修改", turnID: "turn")
+        var patchOne = activity("patch-one")
+        patchOne.activityKind = .file
+        patchOne.fileChanges = [
+            .init(path: "A.swift", diff: "@@ -1 +1 @@\n-old\n+new", kind: .update)
+        ]
+        var patchTwo = activity("patch-two")
+        patchTwo.activityKind = .file
+        patchTwo.fileChanges = [
+            .init(path: "B.swift", diff: "@@ -0,0 +1 @@\n+line", kind: .add)
+        ]
+        let answer = ChatMessage(id: "a", role: .assistant, text: "完成", turnID: "turn")
+
+        let entries = ConversationTimeline.entries(from: [question, patchOne, activity("command"), patchTwo, answer])
+        XCTAssertEqual(entries.map(\.id), ["message:u", "process:command", "message:a", "file-changes:turn"])
+        guard case .fileChanges(let group) = entries.last else { return XCTFail("missing file summary") }
+        XCTAssertEqual(group.changes.map(\.path), ["A.swift", "B.swift"])
+        XCTAssertEqual(group.addedLines, 2)
+        XCTAssertEqual(group.deletedLines, 1)
+    }
+
     func testUserMessagesSeparateLegacyActivitiesWithoutTurnIDs() {
         let user = ChatMessage(id: "u", role: .user, text: "下一轮")
         let entries = ConversationTimeline.entries(from: [activity("legacy1", turn: nil), user, activity("legacy2", turn: nil)])

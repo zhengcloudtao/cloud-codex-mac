@@ -1294,6 +1294,9 @@ private struct MessageList: View {
                                     ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
                                         .equatable()
                                         .background(messageEntryOffsetReader(id: entry.id))
+                                case .fileChanges(let group):
+                                    FileChangeSummaryCard(group: group)
+                                        .background(messageEntryOffsetReader(id: entry.id))
                                 }
                             }
                             .id(entry.id)
@@ -1823,6 +1826,228 @@ private struct MessageBubble: View, Equatable {
             .background(background, in: RoundedRectangle(cornerRadius: 13))
     }
 
+}
+
+private struct FileChangeSummaryCard: View {
+    @EnvironmentObject private var model: AppModel
+    let group: ConversationFileChangeGroup
+    @State private var showingReview = false
+    @State private var showingUndoConfirmation = false
+
+    private var isReverted: Bool { model.isFileChangeTurnReverted(group.turnID) }
+    private var isReverting: Bool { model.isRevertingFileChangeTurn(group.turnID) }
+    private var hasRevertableDiff: Bool { group.changes.contains { !$0.diff.isEmpty } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 42, height: 42)
+                    .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isReverted ? "已撤销 \(group.changes.count) 个文件的修改" : "已编辑 \(group.changes.count) 个文件")
+                        .font(.headline)
+                    HStack(spacing: 5) {
+                        Text("+\(group.addedLines)").foregroundStyle(.green)
+                        Text("−\(group.deletedLines)").foregroundStyle(.red)
+                    }
+                    .font(.callout.monospacedDigit())
+                }
+
+                Spacer(minLength: 12)
+
+                Button {
+                    showingUndoConfirmation = true
+                } label: {
+                    if isReverting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label(isReverted ? "已撤销" : "撤销", systemImage: "arrow.uturn.backward")
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(isReverted || isReverting || !hasRevertableDiff || model.isSelectedThreadProcessing)
+                .help(hasRevertableDiff ? "安全检查通过后反向应用本轮补丁" : "该会话没有返回可撤销的差异")
+
+                Button("审核") { showingReview = true }
+                    .buttonStyle(.bordered)
+            }
+            .padding(16)
+
+            Divider()
+
+            VStack(spacing: 0) {
+                ForEach(Array(group.changes.enumerated()), id: \.element.id) { index, change in
+                    Button { showingReview = true } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: change.kind == .add ? "doc.badge.plus" : (change.kind == .delete ? "doc.badge.minus" : "doc.text"))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 18)
+                            Text(change.path)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 12)
+                            Text("+\(change.addedLines)")
+                                .foregroundStyle(.green)
+                            Text("−\(change.deletedLines)")
+                                .foregroundStyle(.red)
+                        }
+                        .font(.callout.monospacedDigit())
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if index < group.changes.count - 1 { Divider().padding(.leading, 46) }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
+        .sheet(isPresented: $showingReview) {
+            FileChangeReviewSheet(group: group)
+        }
+        .confirmationDialog(
+            "撤销本轮文件修改？",
+            isPresented: $showingUndoConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("撤销 \(group.changes.count) 个文件的修改", role: .destructive) {
+                Task { await model.revertFileChanges(group) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("CloudCodex 会先确认所有文件仍与本轮补丁一致，再一次性反向应用；检查不通过时不会修改任何文件。")
+        }
+    }
+}
+
+private struct FileChangeReviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let group: ConversationFileChangeGroup
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.title2)
+                    .foregroundStyle(.blue)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("审核文件修改").font(.title3.weight(.semibold))
+                    Text("\(group.changes.count) 个文件 · +\(group.addedLines) −\(group.deletedLines)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(18)
+
+            Divider()
+
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(group.changes) { change in
+                        VStack(alignment: .leading, spacing: 0) {
+                            HStack {
+                                Text(change.path)
+                                    .font(.callout.weight(.semibold))
+                                    .textSelection(.enabled)
+                                Spacer(minLength: 20)
+                                Text("+\(change.addedLines)").foregroundStyle(.green)
+                                Text("−\(change.deletedLines)").foregroundStyle(.red)
+                            }
+                            .font(.caption.monospacedDigit())
+                            .padding(12)
+                            .frame(minWidth: 760, alignment: .leading)
+                            .background(.quaternary.opacity(0.55))
+
+                            if change.diff.isEmpty {
+                                Text("该文件没有返回可展示的文本差异。")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .padding(14)
+                            } else {
+                                UnifiedDiffCodeView(diff: change.diff)
+                            }
+                        }
+                        .background(Color.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+                    }
+                }
+                .padding(18)
+            }
+        }
+        .frame(width: 860, height: 520)
+    }
+}
+
+private struct UnifiedDiffCodeView: View {
+    let diff: String
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(UnifiedDiffPresentation.lines(from: diff)) { line in
+                    HStack(spacing: 0) {
+                        Text(line.oldLine.map(String.init) ?? "")
+                            .frame(width: 44, alignment: .trailing)
+                        Text(line.newLine.map(String.init) ?? "")
+                            .frame(width: 44, alignment: .trailing)
+                        Rectangle()
+                            .fill(markerColor(for: line.kind))
+                            .frame(width: 3)
+                            .padding(.horizontal, 8)
+                        Text(line.text.isEmpty ? " " : line.text)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 18)
+                    }
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(foregroundColor(for: line.kind))
+                    .frame(minWidth: 760, minHeight: 22, alignment: .leading)
+                    .background(backgroundColor(for: line.kind))
+                }
+            }
+            .fixedSize(horizontal: true, vertical: true)
+        }
+        .background(Color.black.opacity(0.08))
+    }
+
+    private func markerColor(for kind: DiffDisplayLine.Kind) -> Color {
+        switch kind {
+        case .addition: return .green
+        case .deletion: return .red
+        case .hunk: return .blue
+        case .metadata, .context: return .clear
+        }
+    }
+
+    private func foregroundColor(for kind: DiffDisplayLine.Kind) -> Color {
+        switch kind {
+        case .addition: return .green
+        case .deletion: return .red
+        case .hunk: return .blue
+        case .metadata: return .secondary
+        case .context: return .primary
+        }
+    }
+
+    private func backgroundColor(for kind: DiffDisplayLine.Kind) -> Color {
+        switch kind {
+        case .addition: return .green.opacity(0.12)
+        case .deletion: return .red.opacity(0.12)
+        case .hunk: return .blue.opacity(0.10)
+        case .metadata: return .secondary.opacity(0.035)
+        case .context: return .clear
+        }
+    }
 }
 
 private struct InterruptedMessageEditor: View {

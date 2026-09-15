@@ -350,11 +350,25 @@ final class StreamingEventTests: XCTestCase {
 
         model.handleEvent("item/fileChange/patchUpdated", [
             "threadId": "thread-1", "turnId": "turn-1", "itemId": "file-1",
-            "changes": [["path": "/tmp/project/App.swift"]]
+            "changes": [[
+                "path": "/tmp/project/App.swift",
+                "kind": ["type": "update"],
+                "diff": "@@ -1 +1 @@\n-old\n+new"
+            ]]
         ])
         let file = model.messages.first { $0.id == "file-1" }
         XCTAssertEqual(file?.activityKind, .file)
         XCTAssertEqual(file?.text, "/tmp/project/App.swift")
+        XCTAssertEqual(file?.fileChanges.first?.addedLines, 1)
+        XCTAssertEqual(file?.fileChanges.first?.deletedLines, 1)
+
+        model.handleEvent("turn/diff/updated", [
+            "threadId": "thread-1", "turnId": "turn-1",
+            "diff": "diff --git a/App.swift b/App.swift\n--- a/App.swift\n+++ b/App.swift\n@@ -1 +1 @@\n-old\n+new"
+        ])
+        let aggregate = model.messages.first { $0.id == "turn-diff-turn-1" }
+        XCTAssertEqual(aggregate?.fileChanges.first?.path, "App.swift")
+        XCTAssertEqual(aggregate?.fileChanges.first?.addedLines, 1)
 
         model.handleEvent("item/completed", [
             "threadId": "thread-1", "turnId": "turn-1",

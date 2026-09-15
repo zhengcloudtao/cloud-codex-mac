@@ -143,4 +143,28 @@ final class AppServerDecoderTests: XCTestCase {
         XCTAssertEqual(group.childTasks.first { $0.threadID == "child-guanlong" }?.status, "已完成")
     }
 
+    func testHistoricalFileChangesKeepDiffAndLineCounts() throws {
+        let turns: [[String: Any]] = [[
+            "id": "turn-files",
+            "items": [[
+                "id": "patch-1",
+                "type": "fileChange",
+                "status": "completed",
+                "changes": [[
+                    "path": "Sources/App.swift",
+                    "kind": ["type": "update"],
+                    "diff": "@@ -1,2 +1,3 @@\n-old\n+new\n keep\n+added"
+                ]]
+            ]]
+        ]]
+
+        let message = try XCTUnwrap(AppServerClient.parseMessages(from: turns).first)
+        let change = try XCTUnwrap(message.fileChanges.first)
+        XCTAssertEqual(message.turnID, "turn-files")
+        XCTAssertEqual(change.path, "Sources/App.swift")
+        XCTAssertEqual(change.kind, .update)
+        XCTAssertEqual(change.addedLines, 2)
+        XCTAssertEqual(change.deletedLines, 1)
+    }
+
 }
