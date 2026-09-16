@@ -31,6 +31,16 @@ final class MarkdownParserTests: XCTestCase {
         XCTAssertTrue(blocks.contains(.table(headers: ["名称", "状态"], rows: [["CloudCodex", "完成"]])))
     }
 
+    func testMarkdownTextDocumentCombinesBlocksIntoOneSelectableString() {
+        let blocks = MarkdownBlockParser.parse("## 标题\n\n第一段包含 **重点**。\n\n- 第一项\n- 第二项\n\n> 引用")
+        let document = MarkdownTextDocument.attributed(from: blocks)
+
+        XCTAssertEqual(
+            String(document.characters),
+            "标题\n\n第一段包含 重点。\n\n•  第一项\n•  第二项\n\n│  引用"
+        )
+    }
+
     func testUnclosedStreamingCodeFenceStillRendersAsCode() {
         let blocks = MarkdownBlockParser.parse("```swift\nlet value = 1")
         XCTAssertEqual(blocks, [.code(language: "swift", text: "let value = 1")])
@@ -57,6 +67,23 @@ final class MarkdownParserTests: XCTestCase {
         guard case .code = MarkdownBlockParser.parse(preview.markdown).first else {
             return XCTFail("Streaming code must not become plain Markdown after clipping")
         }
+    }
+
+    func testLongReplyPageRetainsMarkdownAcrossCodeFenceBoundary() {
+        let text = "```swift\n" + String(repeating: "let value = 1\n", count: 20) + "```\n\n### 结论\n\n- 保留列表"
+        let limit = 50
+        let pages = MarkdownPageWindow.pages(text, limit: limit)
+
+        let middlePage = pages[1]
+        XCTAssertTrue(middlePage.hasPrefix("```swift\n"))
+        XCTAssertTrue(middlePage.hasSuffix("\n```"))
+        guard case .code = MarkdownBlockParser.parse(middlePage).first else {
+            return XCTFail("A page beginning inside a code fence must still render as code")
+        }
+
+        let finalBlocks = MarkdownBlockParser.parse(pages.last ?? "")
+        XCTAssertTrue(finalBlocks.contains(.heading(level: 3, text: "结论")))
+        XCTAssertTrue(finalBlocks.contains(.bullet("保留列表")))
     }
 
     func testStandaloneLocalImageIsParsed() {

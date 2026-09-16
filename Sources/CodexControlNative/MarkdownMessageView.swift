@@ -68,6 +68,48 @@ enum StreamingMarkdownWindow {
     }
 }
 
+/// Returns one bounded page while carrying fenced-code state across raw page
+/// boundaries. Without this, a page that begins inside a code block can make a
+/// later closing fence look like a new opening fence and swallow all headings
+/// and lists that follow it.
+enum MarkdownPageWindow {
+    static func pages(_ text: String, limit: Int) -> [String] {
+        guard limit > 0, !text.isEmpty else { return [text] }
+        let lines = text.components(separatedBy: .newlines)
+        var result: [String] = []
+        var currentLines: [String] = []
+        var currentCount = 0
+        var fenceAtPageStart: String?
+        var openFence: String?
+
+        func finishPage() {
+            guard !currentLines.isEmpty else { return }
+            var page = currentLines.joined(separator: "\n")
+            if let fenceAtPageStart { page = fenceAtPageStart + "\n" + page }
+            if openFence != nil { page += "\n```" }
+            result.append(page)
+            currentLines.removeAll(keepingCapacity: true)
+            currentCount = 0
+            fenceAtPageStart = openFence
+        }
+
+        for line in lines {
+            let lineCost = line.count + (currentLines.isEmpty ? 0 : 1)
+            if !currentLines.isEmpty, currentCount + lineCost > limit {
+                finishPage()
+            }
+            currentLines.append(line)
+            currentCount += line.count + (currentLines.count == 1 ? 0 : 1)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                openFence = openFence == nil ? trimmed : nil
+            }
+        }
+        finishPage()
+        return result.isEmpty ? [""] : result
+    }
+}
+
 private struct MarkdownBlocksView: View, Equatable {
     let blocks: [MarkdownBlock]
     let expandsHorizontally: Bool
@@ -75,16 +117,17 @@ private struct MarkdownBlocksView: View, Equatable {
     @ViewBuilder
     var body: some View {
         let content = VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                blockView(block)
+            Text(MarkdownTextDocument.attributed(from: blocks))
+                .textSelection(.enabled)
+                .tint(Color(nsColor: .selectedTextBackgroundColor))
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(Array(imageBlocks.enumerated()), id: \.offset) { _, block in
+                if case .image(let alt, let target) = block {
+                    MarkdownImage(alt: alt, target: target)
+                }
             }
         }
-        .textSelection(.enabled)
-        // SwiftUI otherwise inherits the surrounding bubble's subdued tint,
-        // which can make a selected range nearly invisible in dark mode.
-        // Keep the normal text unchanged and use AppKit's adaptive selection
-        // color only for the native text-selection affordance.
-        .tint(Color(nsColor: .selectedTextBackgroundColor))
 
         if expandsHorizontally {
             content.frame(maxWidth: .infinity, alignment: .leading)
@@ -94,51 +137,98 @@ private struct MarkdownBlocksView: View, Equatable {
         }
     }
 
-    @ViewBuilder
-    private func blockView(_ block: MarkdownBlock) -> some View {
+    private var imageBlocks: [MarkdownBlock] {
+        blocks.filter {
+            if case .image = $0 { return true }
+            return false
+        }
+    }
+}
+
+enum MarkdownTextDocument {
+    static func attributed(from blocks: [MarkdownBlock]) -> AttributedString {
+        var document = AttributedString()
+        let textualBlocks = blocks.filter {
+            if case .image = $0 { return false }
+            return true
+        }
+
+        for (index, block) in textualBlocks.enumerated() {
+            if index > 0 {
+                let previous = textualBlocks[index - 1]
+                document.append(AttributedString(isList(previous) && isList(block) ? "\n" : "\n\n"))
+            }
+            document.append(attributed(block))
+        }
+        return document
+    }
+
+    private static func attributed(_ block: MarkdownBlock) -> AttributedString {
         switch block {
         case .heading(let level, let text):
-            InlineMarkdownText(text: text)
-                .font(headingFont(level))
-                .padding(.top, level <= 2 ? 4 : 1)
+            return inline(text, font: headingFont(level))
         case .paragraph(let text):
-            InlineMarkdownText(text: text)
-                .font(.body)
-                .fixedSize(horizontal: false, vertical: true)
+            return inline(text, font: .body)
         case .bullet(let text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("•").font(.body.weight(.semibold))
-                InlineMarkdownText(text: text).font(.body)
-            }
+            return prefix("•  ", followedBy: inline(text, font: .body), font: .body.weight(.semibold))
         case .numbered(let number, let text):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(number).")
-                    .font(.body.monospacedDigit().weight(.medium))
-                    .foregroundStyle(.secondary)
-                InlineMarkdownText(text: text).font(.body)
-            }
+            return prefix("\(number).  ", followedBy: inline(text, font: .body), font: .body.monospacedDigit().weight(.medium))
         case .quote(let text):
-            HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.accentColor.opacity(0.65))
-                    .frame(width: 3)
-                InlineMarkdownText(text: text)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.vertical, 2)
+            var value = prefix("│  ", followedBy: inline(text, font: .body), font: .body.weight(.semibold))
+            value.foregroundColor = .secondary
+            return value
         case .code(let language, let code):
-            MarkdownCodeBlock(language: language, code: code)
+            var value = AttributedString()
+            if let language, !language.isEmpty {
+                var label = AttributedString(language.uppercased() + "\n")
+                label.font = .caption2.weight(.semibold)
+                label.foregroundColor = .secondary
+                value.append(label)
+            }
+            var source = AttributedString(code)
+            source.font = .system(.callout, design: .monospaced)
+            source.backgroundColor = Color.black.opacity(0.18)
+            value.append(source)
+            return value
         case .rule:
-            Divider().padding(.vertical, 3)
+            var value = AttributedString("────────────────────────")
+            value.foregroundColor = .secondary
+            return value
         case .table(let headers, let rows):
-            MarkdownTable(headers: headers, rows: rows)
-        case .image(let alt, let target):
-            MarkdownImage(alt: alt, target: target)
+            let allRows = [headers] + rows
+            var value = AttributedString(allRows.map { $0.joined(separator: "  │  ") }.joined(separator: "\n"))
+            value.font = .system(.callout, design: .monospaced)
+            return value
+        case .image:
+            return AttributedString()
         }
     }
 
-    private func headingFont(_ level: Int) -> Font {
+    private static func inline(_ text: String, font: Font) -> AttributedString {
+        var value = (try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(text)
+        value.font = font
+        return value
+    }
+
+    private static func prefix(_ prefix: String, followedBy content: AttributedString, font: Font) -> AttributedString {
+        var marker = AttributedString(prefix)
+        marker.font = font
+        var value = marker
+        value.append(content)
+        return value
+    }
+
+    private static func isList(_ block: MarkdownBlock) -> Bool {
+        switch block {
+        case .bullet, .numbered: return true
+        default: return false
+        }
+    }
+
+    private static func headingFont(_ level: Int) -> Font {
         switch level {
         case 1: return .title2.weight(.bold)
         case 2: return .title3.weight(.bold)

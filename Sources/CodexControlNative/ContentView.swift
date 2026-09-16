@@ -2166,8 +2166,8 @@ private struct AssistantMessageContent: View {
 
 /// Very long final replies can contain hundreds of Markdown blocks. Building
 /// all of them at once causes a large one-off CPU and memory spike even though
-/// only a small part is visible. Page the raw text so every page has a strict
-/// layout ceiling while preserving access to the entire answer.
+/// only a small part is visible. Render one bounded Markdown page at a time so
+/// headings, lists, links and code retain their formatting without the spike.
 private struct LongAssistantMessageView: View {
     static let pageSize = 8_000
 
@@ -2182,9 +2182,7 @@ private struct LongAssistantMessageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(pageText)
-                .font(.body)
-                .textSelection(.enabled)
+            MarkdownMessageView(markdown: pageText)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider()
@@ -2224,7 +2222,7 @@ private struct LongAssistantMessageView: View {
     }
 
     private var totalPages: Int {
-        max(1, (text.count + Self.pageSize - 1) / Self.pageSize)
+        pages.count
     }
 
     private var boundedPage: Int {
@@ -2232,12 +2230,11 @@ private struct LongAssistantMessageView: View {
     }
 
     private var pageText: String {
-        let characterCount = text.count
-        let lowerOffset = min(characterCount, boundedPage * Self.pageSize)
-        let upperOffset = min(characterCount, lowerOffset + Self.pageSize)
-        let lower = text.index(text.startIndex, offsetBy: lowerOffset)
-        let upper = text.index(text.startIndex, offsetBy: upperOffset)
-        return String(text[lower..<upper])
+        pages[boundedPage]
+    }
+
+    private var pages: [String] {
+        MarkdownPageWindow.pages(text, limit: Self.pageSize)
     }
 }
 
@@ -2797,46 +2794,40 @@ private struct Composer: View {
                 }
 
                 if mode == .conversation, !model.selectedWaitingMessages.isEmpty {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("等待发送 · \(model.selectedWaitingMessages.count)").font(.caption.weight(.semibold))
-                                .help("当前任务结束后按顺序发送。等待消息仅保留在本次应用运行期间，退出应用前请先处理。")
-                            ForEach(model.selectedWaitingMessages) { item in
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(item.text.isEmpty ? "附件消息" : item.text).lineLimit(2)
-                                        if !item.attachments.isEmpty {
-                                            Text("\(item.attachments.count) 个附件").foregroundStyle(.secondary)
-                                        }
-                                        if let error = item.error {
-                                            Text(error).foregroundStyle(.orange).lineLimit(3)
-                                        }
-                                    }
-                                    Spacer()
-                                    Button("编辑") { model.beginEditingWaitingMessage(item.id) }
-                                        .help("修改待发送文字，保留附件和排队位置")
-                                    if model.isSelectedThreadProcessing {
-                                        Button("立即引导") {
-                                            Task { await model.deliverWaitingMessage(item.id, steer: true) }
-                                        }
-                                        .help("将这条消息补充给正在执行的任务，沿用当前任务的模型。")
-                                    } else if item.error != nil {
-                                        Button("重试") {
-                                            Task { await model.deliverWaitingMessage(item.id, steer: false) }
-                                        }
-                                    }
-                                    Button { model.removeWaitingMessage(item.id) } label: {
-                                        Image(systemName: "xmark")
-                                    }.help("删除等待消息")
-                                }
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .foregroundStyle(.blue)
+                            Text("等待队列")
+                                .font(.callout.weight(.semibold))
+                            Text("\(model.selectedWaitingMessages.count)")
+                                .font(.caption2.weight(.bold).monospacedDigit())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.blue, in: Capsule())
+                            Spacer(minLength: 8)
+                            Text("任务结束后从上到下发送")
                                 .font(.caption)
-                                .padding(8)
-                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                                .disabled(model.deliveringWaitingMessages.contains(item.id))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(model.selectedWaitingMessages.enumerated()), id: \.element.id) { index, item in
+                                    WaitingMessageQueueRow(item: item, position: index + 1)
+                                }
                             }
                         }
+                        .frame(height: min(CGFloat(model.selectedWaitingMessages.count * 66), 146))
                     }
-                    .frame(maxHeight: 150)
+                    .padding(10)
+                    .background(Color.blue.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.blue.opacity(0.30), lineWidth: 1)
+                    )
+                    .help("当前任务结束后按顺序发送。等待消息仅保留在本次应用运行期间，退出应用前请先处理。")
                 }
 
                 ComposerTextEditor(
@@ -3173,6 +3164,108 @@ private struct Composer: View {
 
     private func effortCompactName(_ effort: String) -> String {
         ReasoningEffortLabel.name(effort)
+    }
+}
+
+private struct WaitingMessageQueueRow: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var isHovered = false
+    let item: AppModel.WaitingMessage
+    let position: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            editButton
+            actionButtons
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            isHovered ? Color.blue.opacity(0.12) : Color.primary.opacity(0.045),
+            in: RoundedRectangle(cornerRadius: 9)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(isHovered ? Color.blue.opacity(0.55) : Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .onHover { isHovered = $0 }
+        .disabled(model.deliveringWaitingMessages.contains(item.id))
+    }
+
+    private var editButton: some View {
+        Button {
+            model.beginEditingWaitingMessage(item.id)
+        } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Text("\(position)")
+                    .font(.caption2.weight(.bold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(Color.blue, in: Circle())
+                    .accessibilityLabel("排队第 \(position) 位")
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.text.isEmpty ? "附件消息" : item.text)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    HStack(spacing: 8) {
+                        Text("第 \(position) 位")
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.blue)
+                        Label("点击编辑", systemImage: "pencil")
+                        if !item.attachments.isEmpty {
+                            Label("\(item.attachments.count) 个附件", systemImage: "paperclip")
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    if let error = item.error {
+                        Text(error)
+                            .foregroundStyle(.orange)
+                            .lineLimit(3)
+                    }
+                }
+                Spacer(minLength: 6)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("点击编辑待发送内容，保留附件和排队位置")
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: 6) {
+            if model.isSelectedThreadProcessing {
+                Button {
+                    Task { await model.deliverWaitingMessage(item.id, steer: true) }
+                } label: {
+                    Label("立即引导", systemImage: "arrow.turn.up.right")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .help("将这条消息补充给正在执行的任务，沿用当前任务的模型。")
+            } else if item.error != nil {
+                Button {
+                    Task { await model.deliverWaitingMessage(item.id, steer: false) }
+                } label: {
+                    Label("重试", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+
+            Button {
+                model.removeWaitingMessage(item.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(.red)
+            .help("从等待队列移除")
+        }
     }
 }
 
