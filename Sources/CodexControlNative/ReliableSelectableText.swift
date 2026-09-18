@@ -46,11 +46,11 @@ struct ReliableSelectableText: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView textView: NSTextView, context: Context) -> CGSize? {
         let font = textView.font ?? .preferredFont(forTextStyle: .body)
         let naturalWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width) + 1
-        let maximumWidth = Self.resolvedMaximumWidth(
+        let width = Self.resolvedWidth(
             proposedWidth: proposal.width,
-            naturalWidth: naturalWidth
+            naturalWidth: naturalWidth,
+            hasExplicitLineBreak: text.contains("\n")
         )
-        let width = text.contains("\n") ? maximumWidth : min(maximumWidth, max(1, naturalWidth))
 
         textView.frame.size.width = width
         textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
@@ -70,5 +70,28 @@ struct ReliableSelectableText: NSViewRepresentable {
             return min(UserMessagePresentation.maximumContentWidth, proposedWidth)
         }
         return min(UserMessagePresentation.maximumContentWidth, max(80, naturalWidth))
+    }
+
+    static func resolvedWidth(
+        proposedWidth: CGFloat?,
+        naturalWidth: CGFloat,
+        hasExplicitLineBreak: Bool
+    ) -> CGFloat {
+        let maximumWidth = resolvedMaximumWidth(
+            proposedWidth: proposedWidth,
+            naturalWidth: naturalWidth
+        )
+
+        // SwiftUI can first offer an artificially narrow width while the
+        // trailing user-message row is being measured. A short, single-line
+        // question should use its real text width instead of permanently
+        // wrapping inside that provisional proposal. Long or explicitly
+        // multiline messages still honor the container width so they remain
+        // safe in a narrow detail column.
+        if !hasExplicitLineBreak,
+           naturalWidth <= UserMessagePresentation.maximumContentWidth {
+            return max(1, naturalWidth)
+        }
+        return maximumWidth
     }
 }

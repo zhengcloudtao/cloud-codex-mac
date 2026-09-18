@@ -1306,6 +1306,12 @@ private struct MessageList: View {
                                         .background(messageEntryOffsetReader(id: entry.id))
                                 }
                             }
+                            // A vertical ScrollView must not derive its document
+                            // width from a long Markdown line or a process row's
+                            // intrinsic size. Keep every timeline entry inside
+                            // the detail viewport so icons, text and controls do
+                            // not slide underneath the conversation-list divider.
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .id(entry.id)
                         }
 
@@ -1320,6 +1326,10 @@ private struct MessageList: View {
                         }
                     }
                         .padding(22)
+                        // Apply the width outside the padding. The padded
+                        // timeline then receives the viewport width minus its
+                        // insets instead of expanding the scroll document.
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             ScrollLatestObserver(
                                 isAtLatest: $isAtLatest,

@@ -56,4 +56,34 @@ final class UserMessagePresentationTests: XCTestCase {
             692
         )
     }
+
+    func testShortSingleLineUsesNaturalWidthInsteadOfProvisionalNarrowProposal() {
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedWidth(
+                proposedWidth: 260,
+                naturalWidth: 345,
+                hasExplicitLineBreak: false
+            ),
+            345
+        )
+    }
+
+    func testLongOrMultilineTextStillHonorsNarrowContainerProposal() {
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedWidth(
+                proposedWidth: 260,
+                naturalWidth: 1_200,
+                hasExplicitLineBreak: false
+            ),
+            260
+        )
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedWidth(
+                proposedWidth: 260,
+                naturalWidth: 345,
+                hasExplicitLineBreak: true
+            ),
+            260
+        )
+    }
 }
