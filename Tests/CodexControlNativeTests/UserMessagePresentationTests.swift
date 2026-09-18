@@ -21,4 +21,39 @@ final class UserMessagePresentationTests: XCTestCase {
         let text = (1...8).map { "第 \($0) 行" }.joined(separator: "\n")
         XCTAssertFalse(UserMessagePresentation.shouldCollapse(text))
     }
+
+    func testCollapsedTextKeepsOnlyTheVisibleEightLines() {
+        let text = (1...10).map { "第 \($0) 行" }.joined(separator: "\n")
+        let collapsed = UserMessagePresentation.collapsedText(text)
+        XCTAssertTrue(collapsed.hasSuffix("…"))
+        XCTAssertTrue(collapsed.contains("第 8 行"))
+        XCTAssertFalse(collapsed.contains("第 9 行"))
+    }
+
+    func testCollapsedTextDoesNotAlterShortMessages() {
+        let text = "这条短消息应当保持原样"
+        XCTAssertEqual(UserMessagePresentation.collapsedText(text), text)
+    }
+
+    func testSelectableTextRejectsNearZeroLayoutProposal() {
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedMaximumWidth(proposedWidth: 1, naturalWidth: 360),
+            360
+        )
+    }
+
+    func testSelectableTextCapsLongMessageWidth() {
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedMaximumWidth(proposedWidth: nil, naturalWidth: 1_200),
+            UserMessagePresentation.maximumContentWidth
+        )
+    }
+
+    func testSelectableTextLeavesRoomForBubblePadding() {
+        XCTAssertEqual(UserMessagePresentation.maximumContentWidth, 692)
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedMaximumWidth(proposedWidth: 700, naturalWidth: 1_200),
+            692
+        )
+    }
 }

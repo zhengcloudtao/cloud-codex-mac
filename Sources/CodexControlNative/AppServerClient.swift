@@ -10,7 +10,7 @@ final class AppServerClient {
     private var input: FileHandle?
     private var output: FileHandle?
     private var errorOutput: FileHandle?
-    private let decodingWorker = JSONLineDecodingWorker()
+    private var decodingWorker = JSONLineDecodingWorker()
     private let turnMetadataReader = TurnMetadataReader()
     private var nextID = 1
     private struct PendingRequest {
@@ -46,6 +46,9 @@ final class AppServerClient {
 
     func start() async throws {
         if connected { return }
+        output?.readabilityHandler = nil
+        errorOutput?.readabilityHandler = nil
+        decodingWorker = JSONLineDecodingWorker()
         let executable = try locateCodex()
         let process = Process()
         let stdin = Pipe()
@@ -114,6 +117,12 @@ final class AppServerClient {
             try await request("account/rateLimits/read", params: [:]),
             subscriptionPeriodEnd: subscriptionPeriodEnd
         )
+    }
+
+    func readUsageInsights() async throws -> CodexUsageInsights {
+        let account = try await request("account/read", params: ["refreshToken": false])
+        let usage = try await request("account/usage/read", params: [:])
+        return CodexUsageInsights.parse(account: account, usage: usage, profile: CodexProfileReader().read())
     }
 
     func consumeRemoteReset(_ attempt: RemoteResetAttempt) async throws -> String {
@@ -682,6 +691,12 @@ final class AppServerClient {
 
     private func handleTermination(_ status: Int32) {
         connected = false
+        output?.readabilityHandler = nil
+        errorOutput?.readabilityHandler = nil
+        input = nil
+        output = nil
+        errorOutput = nil
+        process = nil
         loadedThreadIDs.removeAll()
         serviceTierByThreadID.removeAll()
         let error = CodexClientError.process("Codex 本地服务已退出（状态码 \(status)）")

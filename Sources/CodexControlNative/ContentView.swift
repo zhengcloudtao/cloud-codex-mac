@@ -57,6 +57,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
         .sheet(isPresented: $model.showingThreadNameEditor) { threadNameEditorSheet }
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
+        .sheet(isPresented: $model.showingUsageInsights) { CodexUsageInsightsSheet() }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -660,6 +661,12 @@ struct ContentView: View {
                 Label("个性设置", systemImage: "paintpalette")
             }
             .help("个性设置：选择外观模式")
+            Button {
+                model.showingUsageInsights = true
+            } label: {
+                Label("使用统计", systemImage: "chart.xyaxis.line")
+            }
+            .help("查看 Codex Token 活动与连续使用情况")
             Button {
                 openWindow(id: "about-cloudcodex")
             } label: {
@@ -2241,11 +2248,24 @@ private struct LongAssistantMessageView: View {
 enum UserMessagePresentation {
     static let collapsedLineLimit = 8
     static let collapsedCharacterLimit = 600
+    static let maximumBubbleWidth: CGFloat = 720
+    static let bubbleHorizontalPadding: CGFloat = 14
+    static let maximumContentWidth = maximumBubbleWidth - bubbleHorizontalPadding * 2
 
     static func shouldCollapse(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
         let lineCount = text.lazy.filter { $0 == "\n" }.count + 1
         return text.count > collapsedCharacterLimit || lineCount > collapsedLineLimit
+    }
+
+    static func collapsedText(_ text: String) -> String {
+        guard shouldCollapse(text) else { return text }
+        let lines = text.components(separatedBy: .newlines)
+        var value = lines.prefix(collapsedLineLimit).joined(separator: "\n")
+        if value.count > collapsedCharacterLimit {
+            value = String(value.prefix(collapsedCharacterLimit))
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines) + "…"
     }
 }
 
@@ -2253,10 +2273,8 @@ private struct UserMessageContent: View {
     let message: ChatMessage
     @State private var isExpanded = false
 
-    private var usesCompactWidth: Bool {
-        message.attachments.isEmpty
-            && !message.text.contains("\n")
-            && message.text.count <= 80
+    private var displayedText: String {
+        isExpanded ? message.text : UserMessagePresentation.collapsedText(message.text)
     }
 
     @ViewBuilder
@@ -2275,17 +2293,8 @@ private struct UserMessageContent: View {
 
             if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(verbatim: message.text)
-                        .font(.body)
-                        .textSelection(.enabled)
-                        .tint(Color(nsColor: .selectedTextBackgroundColor))
-                        .lineLimit(
-                            isExpanded || !UserMessagePresentation.shouldCollapse(message.text)
-                                ? nil
-                                : UserMessagePresentation.collapsedLineLimit
-                        )
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ReliableSelectableText(text: displayedText)
+                        .frame(maxWidth: UserMessagePresentation.maximumContentWidth, alignment: .leading)
 
                     if UserMessagePresentation.shouldCollapse(message.text) {
                         Button {
@@ -2308,13 +2317,7 @@ private struct UserMessageContent: View {
             }
         }
 
-        if usesCompactWidth {
-            // Compact does not mean unbounded: even 80 Chinese characters can
-            // be wider than the detail pane. Accept its proposal and wrap.
-            content.fixedSize(horizontal: false, vertical: true)
-        } else {
-            content.frame(maxWidth: .infinity, alignment: .leading)
-        }
+        content.fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -2753,6 +2756,10 @@ private enum ComposerMode {
 private struct Composer: View {
     @EnvironmentObject private var model: AppModel
     let mode: ComposerMode
+    @State private var showingModelPicker = false
+    @State private var draftModelID: String?
+    @State private var draftEffort: String?
+    @State private var draftFastMode = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2807,7 +2814,7 @@ private struct Composer: View {
                                 .padding(.vertical, 2)
                                 .background(Color.blue, in: Capsule())
                             Spacer(minLength: 8)
-                            Text("任务结束后从上到下发送")
+                            Text("拖动把手排序 · 任务结束后从上到下发送")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -2945,6 +2952,10 @@ private struct Composer: View {
         .padding(.top, 10)
         .padding(.bottom, 14)
         .background(.bar)
+        .sheet(isPresented: $showingModelPicker) {
+            modelSelectionPanel
+                .interactiveDismissDisabled()
+        }
     }
 
     private var isEditingWaiting: Bool {
@@ -3077,69 +3088,160 @@ private struct Composer: View {
     }
 
     private var modelMenu: some View {
-        Menu {
-            Section("模型") {
-                ForEach(model.modelOptions) { option in
-                    Button {
-                        model.selectModel(option.id)
-                    } label: {
-                        HStack {
-                            Text(option.displayName)
-                            if model.selectedModelID == option.id { Image(systemName: "checkmark") }
-                        }
-                    }
-                }
-            }
-
-            if !model.availableEfforts.isEmpty {
-                Section("推理强度") {
-                    ForEach(model.availableEfforts, id: \.self) { effort in
-                        Button {
-                            model.selectedEffort = effort
-                        } label: {
-                            HStack {
-                                Text(effortDisplayName(effort))
-                                if model.selectedEffort == effort { Image(systemName: "checkmark") }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Section("响应速度") {
-                Button {
-                    model.setFastModeEnabled(false)
-                } label: {
-                    HStack {
-                        Text("标准")
-                        if !model.isFastModeEnabled || !model.supportsFastMode {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-
-                Button {
-                    model.setFastModeEnabled(true)
-                } label: {
-                    HStack {
-                        Text(model.supportsFastMode ? "加速" : "加速（当前模型不支持）")
-                        if model.isFastModeEnabled && model.supportsFastMode {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-                .disabled(!model.supportsFastMode)
-            }
+        Button {
+            beginModelSelection()
         } label: {
-            Text(modelAndEffortCompactLabel)
-                .font(.callout)
-                .lineLimit(1)
-                .layoutPriority(1)
+            HStack(spacing: 5) {
+                Text(modelAndEffortCompactLabel)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                Image(systemName: showingModelPicker ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.plain)
         .frame(minWidth: 0, maxWidth: 240, alignment: .trailing)
         .accessibilityLabel(modelAndEffortAccessibilityLabel)
         .help("选择模型、推理强度和响应速度")
+    }
+
+    private var draftModel: CodexModelOption? {
+        model.modelOptions.first { $0.id == draftModelID }
+    }
+
+    private var modelSelectionPanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("模型设置").font(.headline)
+                Spacer()
+                Button {
+                    showingModelPicker = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("取消并关闭")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .top, spacing: 18) {
+                    selectionSection("模型") {
+                        ForEach(model.modelOptions) { option in
+                            selectionRow(option.displayName, selected: draftModelID == option.id) {
+                                draftModelID = option.id
+                                if !option.composerEfforts.contains(draftEffort ?? "") {
+                                    draftEffort = option.defaultComposerEffort
+                                }
+                                if option.fastServiceTierID == nil { draftFastMode = false }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                    Divider()
+
+                    selectionSection("推理强度") {
+                        if let draftModel, !draftModel.composerEfforts.isEmpty {
+                            ForEach(draftModel.composerEfforts, id: \.self) { effort in
+                                selectionRow(effortDisplayName(effort), selected: draftEffort == effort) {
+                                    draftEffort = effort
+                                }
+                            }
+                        } else {
+                            Text("当前模型无需设置")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 8)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                Divider()
+
+                selectionSection("响应速度") {
+                    HStack(spacing: 12) {
+                        selectionRow("标准", selected: !draftFastMode) {
+                            draftFastMode = false
+                        }
+                        selectionRow(
+                            draftModel?.fastServiceTierID == nil ? "加速（当前模型不支持）" : "加速",
+                            selected: draftFastMode
+                        ) {
+                            if draftModel?.fastServiceTierID != nil { draftFastMode = true }
+                        }
+                        .disabled(draftModel?.fastServiceTierID == nil)
+                    }
+                }
+            }
+            .padding(18)
+
+            Divider()
+            HStack {
+                Text("选择后点击确定才会应用")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("确定", action: applyModelSelection)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(draftModelID == nil)
+            }
+            .padding(12)
+        }
+        .frame(width: 560, height: 460)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(.quaternary))
+        .shadow(color: .black.opacity(0.3), radius: 18, y: 7)
+    }
+
+    private func selectionSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    private func selectionRow(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                Text(title).foregroundStyle(.primary)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(selected ? Color.accentColor.opacity(0.12) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func beginModelSelection() {
+        if showingModelPicker { return }
+        draftModelID = model.selectedModelID
+        draftEffort = model.selectedEffort
+        draftFastMode = model.isFastModeEnabled && model.supportsFastMode
+        showingModelPicker = true
+    }
+
+    private func applyModelSelection() {
+        guard let draftModelID else { return }
+        model.selectModel(draftModelID, preferredEffort: draftEffort)
+        model.setFastModeEnabled(draftFastMode && model.supportsFastMode)
+        showingModelPicker = false
     }
 
     private var modelAndEffortCompactLabel: String {
@@ -3170,26 +3272,49 @@ private struct Composer: View {
 private struct WaitingMessageQueueRow: View {
     @EnvironmentObject private var model: AppModel
     @State private var isHovered = false
+    @State private var isDropTarget = false
     let item: AppModel.WaitingMessage
     let position: Int
 
     var body: some View {
         HStack(spacing: 10) {
+            dragHandle
             editButton
             actionButtons
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
-            isHovered ? Color.blue.opacity(0.12) : Color.primary.opacity(0.045),
+            isDropTarget ? Color.blue.opacity(0.20) : (isHovered ? Color.blue.opacity(0.12) : Color.primary.opacity(0.045)),
             in: RoundedRectangle(cornerRadius: 9)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9)
-                .stroke(isHovered ? Color.blue.opacity(0.55) : Color.primary.opacity(0.08), lineWidth: 1)
+                .stroke(isDropTarget ? Color.blue : (isHovered ? Color.blue.opacity(0.55) : Color.primary.opacity(0.08)), lineWidth: isDropTarget ? 1.5 : 1)
         )
         .onHover { isHovered = $0 }
+        .dropDestination(for: String.self) { values, location in
+            guard let rawID = values.first, let sourceID = UUID(uuidString: rawID) else { return false }
+            return model.moveWaitingMessage(sourceID, relativeTo: item.id, placeAfter: location.y > 30)
+        } isTargeted: { isDropTarget = $0 }
         .disabled(model.deliveringWaitingMessages.contains(item.id))
+    }
+
+    private var dragHandle: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(isHovered ? Color.blue : Color.secondary)
+            .frame(width: 20, height: 32)
+            .contentShape(Rectangle())
+            .draggable(item.id.uuidString) {
+                Label("第 \(position) 位", systemImage: "line.3.horizontal")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+            }
+            .help("按住拖动，调整这条消息的发送顺序")
+            .accessibilityLabel("拖动调整第 \(position) 位消息的顺序")
     }
 
     private var editButton: some View {

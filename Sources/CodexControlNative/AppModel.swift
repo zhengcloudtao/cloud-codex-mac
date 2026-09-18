@@ -15,6 +15,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var accountOverview: AccountOverview?
     @Published private(set) var accountOverviewError: String?
     @Published private(set) var recentThirtyMinuteConsumptionRate: Double?
+    @Published private(set) var usageInsights: CodexUsageInsights?
+    @Published private(set) var usageInsightsError: String?
+    @Published private(set) var isLoadingUsageInsights = false
+    @Published var showingUsageInsights = false
     @Published var threads: [CodexThread] = []
     @Published var folderCatalog: [WorkspaceFolder] = []
     @Published var selectedFolder: String?
@@ -149,7 +153,7 @@ final class AppModel: ObservableObject {
         storeMessages(rows, for: threadID)
     }
     struct WaitingMessage: Identifiable {
-        let id = UUID()
+        let id: UUID
         let threadID: String
         var text: String
         let attachments: [ComposerAttachment]
@@ -158,11 +162,55 @@ final class AppModel: ObservableObject {
         let permissions: String?
         let serviceTier: String?
         var error: String?
+
+        init(id: UUID = UUID(), threadID: String, text: String, attachments: [ComposerAttachment],
+             model: String?, effort: String?, permissions: String?, serviceTier: String?, error: String? = nil) {
+            self.id = id
+            self.threadID = threadID
+            self.text = text
+            self.attachments = attachments
+            self.model = model
+            self.effort = effort
+            self.permissions = permissions
+            self.serviceTier = serviceTier
+            self.error = error
+        }
     }
-    @Published var waitingMessages: [WaitingMessage] = []
+    @Published var waitingMessages: [WaitingMessage] = [] {
+        didSet { persistWaitingMessagesIfReady() }
+    }
     @Published private(set) var deliveringWaitingMessages: Set<UUID> = []
     @Published private(set) var editingWaitingMessageID: UUID?
     @Published var waitingMessageEditText = ""
+    private var waitingPersistenceReady = false
+
+    private struct PersistedWaitingMessage: Codable {
+        let id: UUID
+        let threadID: String
+        let text: String
+        let attachmentURLs: [String]
+        let model: String?
+        let effort: String?
+        let permissions: String?
+        let serviceTier: String?
+
+        init(_ message: WaitingMessage) {
+            id = message.id
+            threadID = message.threadID
+            text = message.text
+            attachmentURLs = message.attachments.map { $0.url.absoluteString }
+            model = message.model
+            effort = message.effort
+            permissions = message.permissions
+            serviceTier = message.serviceTier
+        }
+
+        var message: WaitingMessage {
+            WaitingMessage(id: id, threadID: threadID, text: text,
+                attachments: attachmentURLs.compactMap(URL.init(string:)).map(ComposerAttachment.init(url:)),
+                model: model, effort: effort, permissions: permissions, serviceTier: serviceTier)
+        }
+    }
 
     struct InterruptedMessageEdit {
         let threadID: String
@@ -337,25 +385,17 @@ final class AppModel: ObservableObject {
     }
     private var waitingMonitor: Task<Void, Never>?
 
-    var selectedWaitingMessages: [WaitingMessage] {
-        waitingMessages.filter { $0.threadID == selectedThreadID }
+    private func persistWaitingMessagesIfReady() {
+        guard waitingPersistenceReady else { return }
+        if waitingMessages.isEmpty {
+            remoteDefaults.removeObject(forKey: waitingMessagesKey)
+        } else if let data = try? JSONEncoder().encode(waitingMessages.map(PersistedWaitingMessage.init)) {
+            remoteDefaults.set(data, forKey: waitingMessagesKey)
+        }
     }
 
-    func removeWaitingMessage(_ id: UUID) {
-        guard !deliveringWaitingMessages.contains(id) else { return }
-        if editingWaitingMessageID == id { cancelWaitingMessageEdit() }
-        waitingMessages.removeAll { $0.id == id }
-    }
-
-    private func enqueueComposerMessage(threadID: String) {
-        waitingMessages.append(WaitingMessage(threadID: threadID,
-            text: composerText.trimmingCharacters(in: .whitespacesAndNewlines),
-            attachments: attachments, model: selectedModel?.model, effort: selectedEffort,
-            permissions: selectedPermissionID, serviceTier: selectedServiceTier))
-        composerText = ""
-        attachments = []
-        speech.stop()
-        guard waitingMonitor == nil else { return }
+    private func startWaitingMonitorIfNeeded() {
+        guard waitingMonitor == nil, !waitingMessages.isEmpty else { return }
         waitingMonitor = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, !self.waitingMessages.isEmpty else { break }
@@ -372,6 +412,46 @@ final class AppModel: ObservableObject {
             }
             self?.waitingMonitor = nil
         }
+    }
+
+    var selectedWaitingMessages: [WaitingMessage] {
+        waitingMessages.filter { $0.threadID == selectedThreadID }
+    }
+
+    func removeWaitingMessage(_ id: UUID) {
+        guard !deliveringWaitingMessages.contains(id) else { return }
+        if editingWaitingMessageID == id { cancelWaitingMessageEdit() }
+        waitingMessages.removeAll { $0.id == id }
+    }
+
+    @discardableResult
+    func moveWaitingMessage(_ sourceID: UUID, relativeTo targetID: UUID, placeAfter: Bool) -> Bool {
+        guard sourceID != targetID,
+              !deliveringWaitingMessages.contains(sourceID),
+              !deliveringWaitingMessages.contains(targetID),
+              let sourceIndex = waitingMessages.firstIndex(where: { $0.id == sourceID }),
+              let originalTargetIndex = waitingMessages.firstIndex(where: { $0.id == targetID }),
+              waitingMessages[sourceIndex].threadID == waitingMessages[originalTargetIndex].threadID else { return false }
+
+        let message = waitingMessages.remove(at: sourceIndex)
+        guard let targetIndex = waitingMessages.firstIndex(where: { $0.id == targetID }) else {
+            waitingMessages.insert(message, at: min(sourceIndex, waitingMessages.endIndex))
+            return false
+        }
+        let destination = min(waitingMessages.endIndex, targetIndex + (placeAfter ? 1 : 0))
+        waitingMessages.insert(message, at: destination)
+        return true
+    }
+
+    private func enqueueComposerMessage(threadID: String) {
+        waitingMessages.append(WaitingMessage(threadID: threadID,
+            text: composerText.trimmingCharacters(in: .whitespacesAndNewlines),
+            attachments: attachments, model: selectedModel?.model, effort: selectedEffort,
+            permissions: selectedPermissionID, serviceTier: selectedServiceTier))
+        composerText = ""
+        attachments = []
+        speech.stop()
+        startWaitingMonitorIfNeeded()
     }
 
     func deliverWaitingMessage(_ messageID: UUID, steer: Bool) async {
@@ -484,6 +564,7 @@ final class AppModel: ObservableObject {
     private var selectedThreadMonitorTask: Task<Void, Never>?
     private var selectedThreadMetadataTask: Task<Void, Never>?
     private var threadStatusMonitorTask: Task<Void, Never>?
+    private var clientReconnectTask: Task<Void, Never>?
     private var turnProgressHintTask: Task<Void, Never>?
     private var pendingDeltaFlushTask: Task<Void, Never>?
     private var pendingActivityDeltas: [PendingItemKey: PendingActivityDelta] = [:]
@@ -539,6 +620,8 @@ final class AppModel: ObservableObject {
     /// next and makes an idle task look as if it were still thinking.
     private var locallyRunningThreadIDs: Set<String> = []
     private var activeTurnIDsByThread: [String: String] = [:]
+    private var localTurnStartedAtByThread: [String: Date] = [:]
+    static let localTurnReconciliationGrace: TimeInterval = 30
     private var liveTurnMetadataByThread: [String: TurnModelMetadata] = [:]
     private var remoteControlLoopTask: Task<Void, Never>?
     private var remoteHistoryTask: Task<Void, Never>?
@@ -562,6 +645,7 @@ final class AppModel: ObservableObject {
     private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
     private let remoteControlEnabledKey = "CloudCodex.remoteControl.enabled.v1"
     private let remotePairingCodeKey = "CloudCodex.remoteControl.pairingCode.v1"
+    private let waitingMessagesKey = "CloudCodex.waitingMessages.v1"
 
     private struct RemoteExecution {
         let taskID: String
@@ -628,6 +712,10 @@ final class AppModel: ObservableObject {
            let saved = try? JSONDecoder().decode(WorkspaceOrganization.self, from: data) {
             workspaceOrganization = saved
         }
+        if let data = remoteDefaults.data(forKey: waitingMessagesKey),
+           let saved = try? JSONDecoder().decode([PersistedWaitingMessage].self, from: data) {
+            waitingMessages = saved.map(\.message)
+        }
         speech.onTranscript = { [weak self] transcript in
             guard let self else { return }
             if self.speechTargetsNewThread {
@@ -643,6 +731,8 @@ final class AppModel: ObservableObject {
             return self.speechTargetsNewThread ? self.newThreadPrompt : self.composerText
         }
         speech.onError = { [weak self] message in self?.errorMessage = message }
+        waitingPersistenceReady = true
+        startWaitingMonitorIfNeeded()
     }
 
     var folders: [WorkspaceFolder] {
@@ -914,8 +1004,8 @@ final class AppModel: ObservableObject {
             self?.handleServerRequest(requestID, method: method, params: params)
         }
         client.onDisconnect = { [weak self] message in
-            self?.connectionText = "未连接"
-            self?.errorMessage = message
+            self?.handleClientDisconnect(message)
+            self?.scheduleClientReconnect()
         }
         do {
             try await client.start()
@@ -937,6 +1027,18 @@ final class AppModel: ObservableObject {
         recentThirtyMinuteConsumptionRate = quotaConsumptionTracker.record(account: overview)
         if let data = try? JSONEncoder().encode(quotaConsumptionTracker) {
             remoteDefaults.set(data, forKey: quotaConsumptionHistoryKey)
+        }
+    }
+
+    func refreshUsageInsights() async {
+        guard !isLoadingUsageInsights else { return }
+        isLoadingUsageInsights = true
+        defer { isLoadingUsageInsights = false }
+        do {
+            usageInsights = try await client.readUsageInsights()
+            usageInsightsError = nil
+        } catch {
+            usageInsightsError = AccountOverviewRefreshIssue.parse(error.localizedDescription).message
         }
     }
 
@@ -1076,6 +1178,9 @@ final class AppModel: ObservableObject {
     private func setLocalTurnRunning(_ threadID: String, turnID: String? = nil) {
         threadOutcomes.removeValue(forKey: threadID)
         locallyRunningThreadIDs.insert(threadID)
+        if localTurnStartedAtByThread[threadID] == nil {
+            localTurnStartedAtByThread[threadID] = Date()
+        }
         if let turnID { activeTurnIDsByThread[threadID] = turnID }
         syncSelectedLocalTurnState()
     }
@@ -1083,7 +1188,94 @@ final class AppModel: ObservableObject {
     private func clearLocalTurn(_ threadID: String) {
         locallyRunningThreadIDs.remove(threadID)
         activeTurnIDsByThread.removeValue(forKey: threadID)
+        localTurnStartedAtByThread.removeValue(forKey: threadID)
         syncSelectedLocalTurnState()
+    }
+
+    /// A terminated app-server cannot deliver the terminal turn event. Clear
+    /// every optimistic local run so the UI does not remain "thinking"
+    /// forever, while keeping the conversation and a durable inline reason.
+    func handleClientDisconnect(_ message: String) {
+        connectionText = "未连接"
+        errorMessage = message
+        flushPendingDeltas()
+        let interruptedThreadIDs = locallyRunningThreadIDs
+        for threadID in interruptedThreadIDs {
+            markLocalTurnInterrupted(threadID: threadID, message: message)
+            setThreadRunning(threadID, running: false)
+            threadOutcomes[threadID] = .interrupted
+        }
+        locallyRunningThreadIDs.removeAll()
+        activeTurnIDsByThread.removeAll()
+        localTurnStartedAtByThread.removeAll()
+        syncSelectedLocalTurnState()
+        if let selectedThreadID, interruptedThreadIDs.contains(selectedThreadID) {
+            isExternalThreadProcessing = false
+        }
+    }
+
+    private func scheduleClientReconnect() {
+        guard hasStarted, clientReconnectTask == nil else { return }
+        clientReconnectTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.clientReconnectTask = nil }
+            for delay in [2, 5, 10, 20, 30] as [UInt64] {
+                do {
+                    try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                    try Task.checkCancellation()
+                    try await self.client.start()
+                    self.connectionText = "已重新连接本机 Codex"
+                    self.errorMessage = nil
+                    await self.loadComposerOptions(cwd: self.selectedFolder)
+                    await self.loadFolderCatalog()
+                    await self.refreshThreads()
+                    self.startThreadStatusMonitor()
+                    if let threadID = self.selectedThreadID {
+                        await self.claimSelectedThreadForInput(threadID: threadID)
+                        await self.syncLatestExternalActivity(threadID: threadID)
+                    }
+                    Task { await self.connectionHealth.check() }
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.connectionText = "正在重新连接 Codex…"
+                    self.errorMessage = "Codex 本地服务暂时不可用，CloudCodex 将继续自动重试。"
+                }
+            }
+            self.connectionText = "未连接"
+            self.errorMessage = "Codex 本地服务多次重连失败，请重启 CloudCodex。"
+        }
+    }
+
+    private func markLocalTurnInterrupted(threadID: String, message: String) {
+        var history = conversationMessages(for: threadID)
+        for index in history.indices where history[index].isStreaming {
+            history[index].isStreaming = false
+            if history[index].role == .activity {
+                history[index].activityStatus = "失败"
+                history[index].completedAt = Date()
+            }
+        }
+        if let index = history.firstIndex(where: { $0.id == "turn-progress" }) {
+            history[index].activityTitle = "连接中断"
+            history[index].text = message
+            history[index].activityStatus = "失败"
+            history[index].isStreaming = false
+            history[index].completedAt = Date()
+        } else {
+            history.append(.init(
+                id: "connection-ended-\(UUID().uuidString)",
+                role: .activity,
+                text: message,
+                isStreaming: false,
+                activityKind: .warning,
+                activityTitle: "连接中断",
+                activityStatus: "失败",
+                completedAt: Date()
+            ))
+        }
+        storeMessages(history, for: threadID)
     }
 
     private func syncSelectedLocalTurnState() {
@@ -1419,14 +1611,14 @@ final class AppModel: ObservableObject {
     }
 
     private func syncLatestExternalActivity(threadID: String) async {
-        guard selectedThreadID == threadID, !isSending else { return }
+        guard selectedThreadID == threadID else { return }
         let generation = selectionGeneration
         let revision = turnEventRevision[threadID, default: 0]
         do {
             let thread = try await client.readThreadState(threadID)
-            guard selectedThreadID == threadID, !isSending else { return }
+            guard selectedThreadID == threadID else { return }
             let snapshot: ThreadActivitySnapshot
-            if thread.status == "active" || isExternalThreadProcessing || client.shouldRefreshActivity(thread) {
+            if thread.status == "active" || isSending || isExternalThreadProcessing || client.shouldRefreshActivity(thread) {
                 snapshot = try await client.readLatestThreadActivity(
                     threadID,
                     knownThread: thread
@@ -1434,14 +1626,53 @@ final class AppModel: ObservableObject {
             } else {
                 snapshot = ThreadActivitySnapshot(thread: thread, turn: nil, messages: [])
             }
-            guard !Task.isCancelled, selectedThreadID == threadID, !isSending,
+            guard !Task.isCancelled, selectedThreadID == threadID,
                   generation == selectionGeneration,
                   revision == turnEventRevision[threadID, default: 0] else { return }
+            if locallyRunningThreadIDs.contains(threadID) {
+                _ = reconcileLocalTurnSnapshot(snapshot, threadID: threadID)
+                return
+            }
             applyExternalActivitySnapshot(snapshot, threadID: threadID)
         } catch {
             // Monitoring is best-effort. The primary app-server connection and
             // manual refresh remain available if another Codex process is busy.
         }
+    }
+
+    /// Repairs a missed `turn/completed` notification from persisted state.
+    /// Exact matching terminal turns are accepted immediately. An idle thread
+    /// without the expected turn is only released after a grace period so a
+    /// freshly submitted turn is never cleared before app-server persists it.
+    @discardableResult
+    func reconcileLocalTurnSnapshot(
+        _ snapshot: ThreadActivitySnapshot,
+        threadID: String,
+        now: Date = Date()
+    ) -> Bool {
+        guard locallyRunningThreadIDs.contains(threadID) else { return false }
+        let activeTurnID = activeTurnIDsByThread[threadID]
+        let exactTerminalTurn = activeTurnID != nil
+            && snapshot.turn?.id == activeTurnID
+            && snapshot.turn?.isActive == false
+        let startedAt = localTurnStartedAtByThread[threadID] ?? now
+        let staleIdleThread = snapshot.thread.status != "active"
+            && now.timeIntervalSince(startedAt) >= Self.localTurnReconciliationGrace
+            && (snapshot.turn == nil || snapshot.turn?.id != activeTurnID)
+        guard exactTerminalTurn || staleIdleThread else { return false }
+
+        clearLocalTurn(threadID)
+        setThreadRunning(threadID, running: false)
+        if exactTerminalTurn {
+            applyExternalActivitySnapshot(snapshot, threadID: threadID)
+        } else {
+            threadOutcomes[threadID] = .interrupted
+            markLocalTurnInterrupted(
+                threadID: threadID,
+                message: "没有收到任务结束事件，且 Codex 已报告该会话空闲。CloudCodex 已自动解除卡住状态。"
+            )
+        }
+        return true
     }
 
     func applyExternalActivitySnapshot(_ snapshot: ThreadActivitySnapshot, threadID: String) {

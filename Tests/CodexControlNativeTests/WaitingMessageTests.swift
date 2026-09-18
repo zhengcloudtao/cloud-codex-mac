@@ -3,8 +3,30 @@ import XCTest
 
 @MainActor
 final class WaitingMessageTests: XCTestCase {
+    private var defaults: UserDefaults!
+    private var defaultsSuiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        defaultsSuiteName = "CloudCodexTests.waiting.case.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: defaultsSuiteName)!
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defaults = nil
+        defaultsSuiteName = nil
+        super.tearDown()
+    }
+
+    private func message(_ text: String, threadID: String = "one") -> AppModel.WaitingMessage {
+        .init(threadID: threadID, text: text, attachments: [], model: nil,
+              effort: nil, permissions: nil, serviceTier: nil)
+    }
+
     func testRunningConversationQueuesInOrderAndKeepsAttachments() async {
-        let model = AppModel()
+        let model = AppModel(remoteDefaults: defaults)
         model.selectedThreadID = "one"
         model.handleEvent("turn/started", ["threadId": "one", "turn": ["id": "running"]])
         model.composerText = "补充要求"
@@ -27,7 +49,7 @@ final class WaitingMessageTests: XCTestCase {
     }
 
     func testFailedDeliveryKeepsQueuedMessageAndNewDraft() async {
-        let model = AppModel()
+        let model = AppModel(remoteDefaults: defaults)
         model.selectedThreadID = "one"
         model.isExternalThreadProcessing = true
         model.composerText = "保留我"
@@ -40,5 +62,57 @@ final class WaitingMessageTests: XCTestCase {
         XCTAssertEqual(model.composerText, "尚未发送的新草稿")
         XCTAssertTrue(model.deliveringWaitingMessages.isEmpty)
         model.removeWaitingMessage(item.id)
+    }
+
+    func testWaitingMessagesCanMoveBeforeAndAfterWithinTheSameThread() {
+        let model = AppModel(remoteDefaults: defaults)
+        let first = message("第一条")
+        let second = message("第二条")
+        let third = message("第三条")
+        model.waitingMessages = [first, second, third]
+
+        XCTAssertTrue(model.moveWaitingMessage(third.id, relativeTo: first.id, placeAfter: false))
+        XCTAssertEqual(model.waitingMessages.map(\.text), ["第三条", "第一条", "第二条"])
+
+        XCTAssertTrue(model.moveWaitingMessage(third.id, relativeTo: second.id, placeAfter: true))
+        XCTAssertEqual(model.waitingMessages.map(\.text), ["第一条", "第二条", "第三条"])
+    }
+
+    func testWaitingMessagesCannotMoveAcrossThreads() {
+        let model = AppModel(remoteDefaults: defaults)
+        let first = message("第一条", threadID: "one")
+        let other = message("另一会话", threadID: "two")
+        model.waitingMessages = [first, other]
+
+        XCTAssertFalse(model.moveWaitingMessage(first.id, relativeTo: other.id, placeAfter: false))
+        XCTAssertEqual(model.waitingMessages.map(\.id), [first.id, other.id])
+    }
+
+    func testWaitingMessagesRestoreAfterAppModelRestartWithOrderAndSettings() {
+        let suiteName = "CloudCodexTests.waiting.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let model = AppModel(remoteDefaults: defaults)
+        let first = AppModel.WaitingMessage(threadID: "thread-a", text: "第一条",
+            attachments: [ComposerAttachment(url: URL(fileURLWithPath: "/tmp/queue image.png"))],
+            model: "gpt-6-astra", effort: "high", permissions: "full", serviceTier: "fast")
+        let second = AppModel.WaitingMessage(threadID: "thread-a", text: "第二条", attachments: [],
+            model: "gpt-5.6-sol", effort: "medium", permissions: "workspace", serviceTier: nil)
+        model.waitingMessages = [first, second]
+        XCTAssertTrue(model.moveWaitingMessage(second.id, relativeTo: first.id, placeAfter: false))
+
+        let restored = AppModel(remoteDefaults: defaults)
+        XCTAssertEqual(restored.waitingMessages.map(\.id), [second.id, first.id])
+        XCTAssertEqual(restored.waitingMessages.map(\.text), ["第二条", "第一条"])
+        XCTAssertEqual(restored.waitingMessages[1].attachments.map(\.url.path), ["/tmp/queue image.png"])
+        XCTAssertEqual(restored.waitingMessages[1].model, "gpt-6-astra")
+        XCTAssertEqual(restored.waitingMessages[1].effort, "high")
+        XCTAssertEqual(restored.waitingMessages[1].permissions, "full")
+        XCTAssertEqual(restored.waitingMessages[1].serviceTier, "fast")
+
+        model.waitingMessages = []
+        restored.waitingMessages = []
     }
 }
