@@ -68,6 +68,17 @@ final class UserMessagePresentationTests: XCTestCase {
         )
     }
 
+    func testShortChineseMessageUsesAvailableBubbleWidthInsteadOfWrappingLastGlyphs() {
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedWidth(
+                proposedWidth: 520,
+                naturalWidth: 345,
+                hasExplicitLineBreak: false
+            ),
+            520
+        )
+    }
+
     func testLongOrMultilineTextStillHonorsNarrowContainerProposal() {
         XCTAssertEqual(
             ReliableSelectableText.resolvedWidth(

@@ -38,7 +38,7 @@ struct AboutCloudCodexView: View {
                         item("远程能力是额外入口", "Codex 仍在这台 Mac 上执行。CloudCodex 只是把经过配对的手机请求转交给本机 Codex，再将任务状态和结果同步回小程序。")
                     }
                     section("远程控制：手机发起，Mac 执行", symbol: "antenna.radiowaves.left.and.right") {
-                        item("配对后使用", "在 Mac 上主动开启“允许远程任务”，再使用限时配对码连接 AI 小程序。没有开启或没有完成配对时，CloudCodex 不会领取远程任务。")
+                        item("扫码后使用", "在 Mac 上主动开启“允许远程任务”，再使用 AI 小程序扫描限时二维码完成配对。没有开启或没有完成配对时，CloudCodex 不会领取远程任务。")
                         item("远程发起与查看", "可在小程序中选择这台 Mac 已授权的工作区和会话，发送新任务，并查看排队状态、执行进度、完成结果、Codex 额度与设备状态。")
                         item("执行仍受本机控制", "任务由这台 Mac 上正在运行的 CloudCodex 领取，并交给本机 Codex 执行；使用的模型和权限以任务设置及本机可用能力为准。关闭远程任务后不再领取新任务，已经开始的任务会继续完成。")
                         item("不开放公网端口", "CloudCodex 主动通过 HTTPS 与远程服务同步，不在 Mac 上开放公网监听端口。设备凭据保存在 macOS 钥匙串中，远程服务只负责配对、转发和状态同步。")

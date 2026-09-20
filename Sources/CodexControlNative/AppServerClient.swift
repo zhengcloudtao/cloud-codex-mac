@@ -94,7 +94,11 @@ final class AppServerClient {
                     "title": "CloudCodex",
                     "version": "0.1.0"
                 ],
-                "capabilities": ["experimentalApi": true]
+                "capabilities": [
+                    "experimentalApi": true,
+                    "mcpServerOpenaiFormElicitation": true,
+                    "extensions": ["openai/form": [:]]
+                ]
             ]
         )
         guard response["platformOs"] as? String == "macos" else {
@@ -587,8 +591,14 @@ final class AppServerClient {
     func interruptTurn(threadID: String, turnID: String) async throws {
         _ = try await request(
             "turn/interrupt",
-            params: ["threadId": threadID, "turnId": turnID]
+            params: ["threadId": threadID, "turnId": turnID],
+            timeoutSeconds: 3
         )
+    }
+
+    func terminateUnresponsiveServer() {
+        guard process?.isRunning == true else { return }
+        process?.terminate()
     }
 
     func revertThread(_ threadID: String, beforeTurnID: String) async throws {
@@ -613,7 +623,7 @@ final class AppServerClient {
         ])
     }
 
-    private func request(_ method: String, params: JSON) async throws -> JSON {
+    private func request(_ method: String, params: JSON, timeoutSeconds: UInt64 = 12) async throws -> JSON {
         guard process?.isRunning == true, input != nil else {
             throw CodexClientError.notRunning
         }
@@ -621,7 +631,7 @@ final class AppServerClient {
         nextID += 1
         return try await withCheckedThrowingContinuation { continuation in
             let timeoutTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 12_000_000_000)
+                try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 self?.timeoutRequest(id, method: method)
             }

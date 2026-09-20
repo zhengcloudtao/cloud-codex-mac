@@ -223,10 +223,12 @@ struct AccountOverviewView: View {
                             if let pace = account.weeklyPaceStatus(now: context.date) {
                                 quotaColumn(
                                     "每周剩余",
-                                    value: "\(value) \(pace.compactLabel)",
+                                    value: value,
+                                    status: pace.compactLabel,
                                     help: pace.detail,
                                     valueColor: paceColor(pace.state)
                                 )
+                                .layoutPriority(2)
                             } else {
                                 quotaColumn("每周剩余", value: value)
                             }
@@ -392,16 +394,21 @@ struct AccountOverviewView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func quotaColumn(_ title: String, value: String, help: String? = nil, valueColor: Color = .primary) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func quotaColumn(
+        _ title: String,
+        value: String,
+        status: String? = nil,
+        help: String? = nil,
+        valueColor: Color = .primary
+    ) -> some View {
+        let fallbackHelp = title + "：" + value + (status.map { " · \($0)" } ?? "")
+        return VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(valueColor)
-                .monospacedDigit()
+            CompactQuotaValue(value: value, status: status, color: valueColor)
         }
         .frame(minWidth: 48, alignment: .leading)
-        .help(help ?? title + "：" + value)
+        .fixedSize(horizontal: true, vertical: false)
+        .help(help ?? fallbackHelp)
     }
 
     private func paceColor(_ state: AccountOverview.WeeklyPaceStatus.State) -> Color {
@@ -419,5 +426,31 @@ struct AccountOverviewView: View {
         case .some(let value): return "\(value) 分钟额度"
         case nil: return "额度窗口（周期未提供）"
         }
+    }
+}
+
+private struct CompactQuotaValue: View {
+    let value: String
+    let status: String?
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(color)
+                .monospacedDigit()
+                .fixedSize(horizontal: true, vertical: false)
+            if let status {
+                Text(status)
+                    .font(.system(size: 8, weight: .bold, design: .rounded))
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(color.opacity(0.12), in: Capsule())
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 }

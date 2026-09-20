@@ -182,6 +182,14 @@ final class RemoteControlAPI: @unchecked Sendable {
         )
     }
 
+    func unpair() async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/unpair", method: "POST", bodyData: nil)
+        let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard envelope.status == 0 else {
+            throw RemoteControlError.server(envelope.msg.isEmpty ? "解除配对失败。" : envelope.msg)
+        }
+    }
+
     func heartbeat(_ body: RemoteHeartbeatBody) async throws -> RemoteHeartbeatResponse {
         try await request(path: "/api/cloud-codex/agent/heartbeat", method: "POST", body: body)
     }

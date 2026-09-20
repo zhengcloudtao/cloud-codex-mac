@@ -33,6 +33,21 @@ final class RemoteControlAPITests: XCTestCase {
         XCTAssertFalse(value.paired)
     }
 
+    func testAgentUnpairUsesDeviceAuthenticatedEndpoint() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RemoteUnpairFixtureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = RemoteControlAPI(
+            deviceSecret: "local-test-only-device-secret-with-32-characters",
+            baseURL: URL(string: "https://example.com/ai")!,
+            session: session,
+            defaults: UserDefaults(suiteName: "CloudCodex.remote-unpair.tests.\(UUID())")!
+        )
+
+        try await api.unpair()
+    }
+
     func testEmptyTaskEnvelopeDecodesAsNil() throws {
         let data = Data(#"{"status":0,"msg":"操作成功","data":null}"#.utf8)
         let value = try RemoteControlAPI.decodeOptionalEnvelope(RemoteTask.self, data: data)
@@ -58,4 +73,30 @@ final class RemoteControlAPITests: XCTestCase {
         XCTAssertEqual(AppModel.remoteWaitReason(RemoteControlError.server("thread already has an active writer")), "writer_busy")
         XCTAssertEqual(AppModel.remoteWaitReason(RemoteControlError.server("这个会话正在执行其他任务")), "thread_busy")
     }
+}
+
+private final class RemoteUnpairFixtureProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/ai/api/cloud-codex/agent/unpair")
+        XCTAssertNotNil(request.value(forHTTPHeaderField: "X-CloudCodex-Device"))
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "X-CloudCodex-Token"),
+            "local-test-only-device-secret-with-32-characters"
+        )
+        XCTAssertNil(request.httpBody)
+        let data = Data(#"{"status":0,"msg":"操作成功","data":null}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

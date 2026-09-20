@@ -142,6 +142,24 @@ final class ConversationTimelineTests: XCTestCase {
         XCTAssertEqual(ConversationProcessGroup(messages: [old]).status(isCurrent: true), "思考中")
     }
 
+    func testActivityWaitLabelHighlightsLongRunningTools() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(
+            ActivityWaitPresentation.label(startedAt: start, now: start.addingTimeInterval(8)),
+            "已等待 8 秒"
+        )
+        XCTAssertFalse(
+            ActivityWaitPresentation.isLongWait(startedAt: start, now: start.addingTimeInterval(29))
+        )
+        XCTAssertEqual(
+            ActivityWaitPresentation.label(startedAt: start, now: start.addingTimeInterval(65)),
+            "等待较久 1:05"
+        )
+        XCTAssertTrue(
+            ActivityWaitPresentation.isLongWait(startedAt: start, now: start.addingTimeInterval(65))
+        )
+    }
+
     func testQuietTurnFailureAndStopRemainVisibleWithoutSteps() {
         let progress = ChatMessage(id: "turn-progress", role: .activity, text: "连接失败", activityStatus: "失败")
         let failed = ConversationProcessGroup(messages: [progress])
@@ -189,6 +207,9 @@ final class ConversationTimelineTests: XCTestCase {
         rows[3].activityTitle = "文件变更"
         rows[5].activityKind = .tool
         rows[5].activityTitle = "查看图片"
+        rows[6].isStreaming = true
+        rows[6].activityStatus = "进行中"
+        rows[6].startedAt = Date().addingTimeInterval(-45)
         let group = ConversationProcessGroup(messages: rows)
         let preview = VStack(alignment: .leading, spacing: 20) {
             Text("执行过程 · 默认收起").font(.headline)
@@ -200,6 +221,7 @@ final class ConversationTimelineTests: XCTestCase {
         .frame(width: 660)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(.dark)
+        .environmentObject(AppModel())
         let view = NSHostingView(rootView: preview)
         let size = view.fittingSize
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: .borderless, backing: .buffered, defer: false)

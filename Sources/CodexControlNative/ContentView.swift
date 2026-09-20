@@ -591,6 +591,12 @@ struct ContentView: View {
                         model.submitUserInput(requestID: requestID, answers: answers)
                     }
                 }
+                if !model.selectedComputerUseApprovalRequests.isEmpty {
+                    Divider()
+                    ComputerUseApprovalRequestsPanel(requests: model.selectedComputerUseApprovalRequests) { requestID, decision in
+                        model.submitComputerUseApproval(requestID: requestID, decision: decision)
+                    }
+                }
                 Divider()
                 switch model.threadInputAvailability {
                 case .checking, .occupied:
@@ -854,6 +860,7 @@ private struct ConnectionHealthView: View {
 private struct RemoteControlSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmingRemoteUnpair = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -927,40 +934,59 @@ private struct RemoteControlSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     } else if model.remoteControlEnabled && !model.remoteControlPaired {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("在 AI 小程序中输入配对码")
+                        VStack(alignment: .center, spacing: 12) {
+                            Text("使用 AI 小程序扫码配对")
+                                .font(.subheadline.weight(.semibold))
+                            Text("打开 CloudCodex → 设备管理 → 扫一扫配对")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            if model.remotePairingCode.isEmpty {
-                                ProgressView()
-                                    .controlSize(.small)
+                            if let payload = model.remotePairingQRCodePayload,
+                               let image = RemotePairingQRCode.image(payload: payload) {
+                                Image(nsImage: image)
+                                    .interpolation(.none)
+                                    .resizable()
+                                    .frame(width: 190, height: 190)
+                                    .padding(14)
+                                    .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                                    .accessibilityLabel("CloudCodex 小程序配对二维码")
                             } else {
-                                HStack {
-                                    Text(model.remotePairingCode)
-                                        .font(.system(size: 34, weight: .bold, design: .monospaced))
-                                        .tracking(5)
-                                        .textSelection(.enabled)
-                                    Spacer()
-                                    Button {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(model.remotePairingCode, forType: .string)
-                                    } label: {
-                                        Label("复制", systemImage: "doc.on.doc")
-                                    }
-                                }
+                                ProgressView("正在生成配对二维码…")
+                                    .controlSize(.small)
+                                    .frame(height: 218)
                             }
                             HStack {
-								Text("配对码仅 20 秒内有效")
+                                Text("二维码临近过期时会自动更新")
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                                 Spacer()
-                                Button("生成新配对码") { model.resetRemotePairingCode() }
+                                Button("刷新二维码") { model.resetRemotePairingCode() }
                                     .buttonStyle(.link)
                             }
                         }
+                        .frame(maxWidth: .infinity)
                         .padding(18)
                         .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.blue.opacity(0.22)))
+                    } else if model.remoteControlEnabled && model.remoteControlPaired {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("这台 Mac 已完成配对", systemImage: "checkmark.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.green)
+                            Text("解除后，当前小程序账号将不能再控制这台 Mac。CloudCodex 会立即生成新的二维码，供原账号或其他账号重新绑定。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack {
+                                Spacer()
+                                Button("解绑并重新绑定", role: .destructive) {
+                                    confirmingRemoteUnpair = true
+                                }
+                                .disabled(model.isRemoteUnpairing)
+                            }
+                        }
+                        .padding(16)
+                        .background(.green.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.green.opacity(0.18)))
                     }
 
                     VStack(alignment: .leading, spacing: 11) {
@@ -986,6 +1012,18 @@ private struct RemoteControlSheet: View {
             }
         }
         .frame(width: 520, height: 510)
+        .confirmationDialog(
+            "解除这台 Mac 的远程控制配对？",
+            isPresented: $confirmingRemoteUnpair,
+            titleVisibility: .visible
+        ) {
+            Button("解绑并生成新二维码", role: .destructive) {
+                model.unpairAndPrepareRemoteRebinding()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("存在排队或执行中的远程任务时不会解绑。成功后需重新扫码，Mac 文件、本地会话和历史任务不会删除。")
+        }
     }
 
     private var statusColor: Color {
@@ -2484,6 +2522,7 @@ private struct ProcessingBubble: View {
 
 /// One compact, bounded log instead of a full-height card for every tool event.
 struct ConversationProcessView: View, Equatable {
+    @EnvironmentObject private var model: AppModel
     let group: ConversationProcessGroup
     let isCurrent: Bool
     @State private var isExpanded = false
@@ -2537,9 +2576,24 @@ struct ConversationProcessView: View, Equatable {
                         }
                     }
                     Spacer(minLength: 8)
+                    if isCurrent, let startedAt = group.latestStep?.startedAt ?? group.progress?.startedAt {
+                        ActivityElapsedLabel(startedAt: startedAt)
+                    }
                     Text(group.status(isCurrent: isCurrent))
                         .font(.caption)
                         .foregroundStyle(isCurrent ? Color.blue : group.hasFailure ? .orange : .secondary)
+                    if isCurrent {
+                        Button {
+                            Task { await model.cancelTurn() }
+                        } label: {
+                            Label("停止", systemImage: "stop.fill")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .foregroundStyle(.orange)
+                        .help("停止当前任务；已经完成的文件修改不会自动回滚")
+                    }
                 }
                 .contentShape(Rectangle())
                 .padding(.horizontal, 13)
@@ -2640,6 +2694,42 @@ struct ConversationProcessView: View, Equatable {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
     }
 
+}
+
+enum ActivityWaitPresentation {
+    static let longWaitThreshold: TimeInterval = 30
+
+    static func label(startedAt: Date, now: Date) -> String {
+        let elapsed = max(0, Int(now.timeIntervalSince(startedAt)))
+        let duration = elapsed >= 60
+            ? String(format: "%d:%02d", elapsed / 60, elapsed % 60)
+            : "\(elapsed) 秒"
+        return elapsed >= Int(longWaitThreshold) ? "等待较久 \(duration)" : "已等待 \(duration)"
+    }
+
+    static func isLongWait(startedAt: Date, now: Date) -> Bool {
+        now.timeIntervalSince(startedAt) >= longWaitThreshold
+    }
+}
+
+private struct ActivityElapsedLabel: View {
+    let startedAt: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            content(at: context.date)
+        }
+    }
+
+    private func content(at date: Date) -> some View {
+        let isLongWait = ActivityWaitPresentation.isLongWait(startedAt: startedAt, now: date)
+        return Text(ActivityWaitPresentation.label(startedAt: startedAt, now: date))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(isLongWait ? Color.orange : Color.secondary.opacity(0.7))
+            .help(isLongWait
+                  ? "工具仍在运行；如果长时间没有新进度，可以点击停止后重试"
+                  : "当前步骤已经运行的时间")
+    }
 }
 
 private struct ProcessContentHeightKey: PreferenceKey {
@@ -2919,7 +3009,7 @@ private struct Composer: View {
                             Image(systemName: "stop.fill")
                         }
                         .help("停止当前任务")
-                        .disabled(model.activeTurnID == nil)
+                        .disabled(model.activeTurnID == nil && !model.selectedHasCapacityRetry)
                     }
 
                     Button {

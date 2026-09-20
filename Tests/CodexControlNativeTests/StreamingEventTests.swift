@@ -4,6 +4,92 @@ import XCTest
 
 @MainActor
 final class StreamingEventTests: XCTestCase {
+    func testOnlyInterruptTimeoutUsesForcedStopRecovery() {
+        XCTAssertTrue(AppModel.isInterruptTimeout(CodexClientError.timeout("turn/interrupt")))
+        XCTAssertFalse(AppModel.isInterruptTimeout(CodexClientError.timeout("thread/read")))
+        XCTAssertFalse(AppModel.isInterruptTimeout(CodexClientError.server("turn/interrupt failed")))
+    }
+
+    func testLiveToolCallRecordsStartAndCompletionTimes() throws {
+        let model = AppModel()
+        model.selectedThreadID = "thread-tool"
+
+        let startedItem: [String: Any] = [
+            "id": "cua-call",
+            "type": "dynamicToolCall",
+            "namespace": "cua_repl",
+            "tool": "js",
+            "status": "inProgress",
+            "arguments": ["code": "await cua.getApp(\"CloudCodex\")"]
+        ]
+        model.handleEvent("item/started", [
+            "threadId": "thread-tool", "turnId": "turn-tool", "item": startedItem
+        ])
+
+        let started = try XCTUnwrap(model.messages.first { $0.id == "cua-call" })
+        XCTAssertTrue(started.isStreaming)
+        XCTAssertNotNil(started.startedAt)
+        XCTAssertNil(started.completedAt)
+
+        var completedItem = startedItem
+        completedItem["status"] = "completed"
+        model.handleEvent("item/completed", [
+            "threadId": "thread-tool", "turnId": "turn-tool", "item": completedItem
+        ])
+
+        let completed = try XCTUnwrap(model.messages.first { $0.id == "cua-call" })
+        XCTAssertFalse(completed.isStreaming)
+        XCTAssertEqual(completed.startedAt, started.startedAt)
+        XCTAssertNotNil(completed.completedAt)
+    }
+
+    func testOnlyComputerControlDynamicToolsUseBoundedTimeout() {
+        XCTAssertTrue(AppModel.isComputerControlItem([
+            "type": "dynamicToolCall", "namespace": "cua_repl", "tool": "js"
+        ]))
+        XCTAssertTrue(AppModel.isComputerControlItem([
+            "type": "dynamicToolCall", "namespace": "computer-use", "tool": "run"
+        ]))
+        XCTAssertFalse(AppModel.isComputerControlItem([
+            "type": "dynamicToolCall", "namespace": "browser", "tool": "open"
+        ]))
+        XCTAssertFalse(AppModel.isComputerControlItem([
+            "type": "mcpToolCall", "server": "wechat", "tool": "preview"
+        ]))
+    }
+
+    func testStalledComputerControlStopsTurnAndShowsSpecificReason() async throws {
+        let defaults = UserDefaults(suiteName: "computer-timeout-\(UUID().uuidString)")!
+        let model = AppModel(remoteDefaults: defaults, computerControlTimeoutSeconds: 0.02)
+        model.selectedThreadID = "thread-cua-timeout"
+
+        model.handleEvent("turn/started", [
+            "threadId": "thread-cua-timeout",
+            "turn": ["id": "turn-cua-timeout", "status": "inProgress"]
+        ])
+        model.handleEvent("item/started", [
+            "threadId": "thread-cua-timeout",
+            "turnId": "turn-cua-timeout",
+            "item": [
+                "id": "cua-timeout",
+                "type": "dynamicToolCall",
+                "namespace": "cua_repl",
+                "tool": "js",
+                "status": "inProgress",
+                "arguments": ["code": "await cua.getApp(\"/Applications/wechatwebdevtools.app\")"]
+            ]
+        ])
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let activity = try XCTUnwrap(model.messages.first { $0.id == "cua-timeout" })
+        XCTAssertFalse(activity.isStreaming)
+        XCTAssertEqual(activity.activityStatus, "超时")
+        XCTAssertTrue(activity.text.contains("电脑控制步骤超过"))
+        XCTAssertEqual(model.threadOutcomes["thread-cua-timeout"], .interrupted)
+        XCTAssertFalse(model.isSending)
+    }
+
     func testLiveCollaborationEventsExposeNamedChildTaskStatus() {
         let model = AppModel()
         model.selectedThreadID = "parent"

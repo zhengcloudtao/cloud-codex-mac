@@ -30,7 +30,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var favoriteConversations = FavoriteConversations()
     @Published private(set) var userInputRequests: [UserInputRequest] = []
     private var userInputTimeoutTasks: [String: Task<Void, Never>] = [:]
+    @Published private(set) var computerUseApprovalRequests: [ComputerUseApprovalRequest] = []
+    private var computerUseApprovalTimeoutTasks: [String: Task<Void, Never>] = [:]
     private let userInputTimeoutSeconds: TimeInterval
+    private var computerControlTimeoutTasks: [PendingItemKey: Task<Void, Never>] = [:]
+    private let computerControlTimeoutSeconds: TimeInterval
     private let unreadCompletionsKey = "cloudcodex.unreadCompletions.v1"
     private let favoriteConversationsKey = "cloudcodex.favoriteConversations.v1"
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
@@ -122,6 +126,41 @@ final class AppModel: ObservableObject {
     var selectedUserInputRequests: [UserInputRequest] {
         guard let selectedThreadID else { return [] }
         return userInputRequests.filter { $0.threadID == selectedThreadID }
+    }
+
+    var selectedComputerUseApprovalRequests: [ComputerUseApprovalRequest] {
+        guard let selectedThreadID else { return [] }
+        return computerUseApprovalRequests.filter { $0.threadID == selectedThreadID }
+    }
+
+    func submitComputerUseApproval(
+        requestID: String,
+        decision: ComputerUseApprovalRequest.Decision
+    ) {
+        guard let index = computerUseApprovalRequests.firstIndex(where: { $0.id == requestID }) else { return }
+        if decision == .allowAlways, !computerUseApprovalRequests[index].allowsAlways { return }
+        computerUseApprovalRequests[index].isSubmitting = true
+        computerUseApprovalRequests[index].error = nil
+        let request = computerUseApprovalRequests[index]
+        do {
+            try client.respond(to: request.requestID, result: request.responsePayload(for: decision))
+            computerUseApprovalTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+            computerUseApprovalRequests.removeAll { $0.id == requestID }
+            let allowed = decision == .allowSession || decision == .allowAlways
+            upsertConversationActivity(
+                threadID: request.threadID,
+                id: "computer-use-approval-\(request.id)",
+                title: allowed ? "已授权电脑控制" : "已拒绝电脑控制",
+                text: allowed
+                    ? "CloudCodex 可以在所选范围内控制 \(request.applicationName)，正在继续执行。"
+                    : "CloudCodex 已拒绝本次对 \(request.applicationName) 的控制请求。",
+                status: allowed ? "已允许" : "已拒绝"
+            )
+        } catch {
+            guard let retryIndex = computerUseApprovalRequests.firstIndex(where: { $0.id == requestID }) else { return }
+            computerUseApprovalRequests[retryIndex].isSubmitting = false
+            computerUseApprovalRequests[retryIndex].error = error.localizedDescription
+        }
     }
 
     func submitUserInput(requestID: String, answers: [String: String]) {
@@ -473,8 +512,15 @@ final class AppModel: ObservableObject {
                 let state = try await client.readThreadState(item.threadID)
                 guard state.status == "idle", !locallyRunningThreadIDs.contains(item.threadID) else { return }
                 guard waitingMessages.first(where: { $0.threadID == item.threadID })?.id == messageID else { return }
+                rememberTurnLaunch(
+                    threadID: item.threadID,
+                    model: item.model,
+                    effort: item.effort,
+                    permissions: item.permissions,
+                    serviceTier: item.serviceTier
+                )
                 liveTurnMetadataByThread[item.threadID] = TurnModelMetadata(model: item.model, reasoningEffort: item.effort)
-                setLocalTurnRunning(item.threadID)
+                setLocalTurnRunning(item.threadID, permissions: item.permissions)
                 do {
                     try await client.resumeThread(item.threadID)
                     let turnID = try await client.startTurn(threadID: item.threadID,
@@ -548,7 +594,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var remoteControlEnabled: Bool
     @Published private(set) var remoteControlStatus = "远程控制已关闭"
     @Published private(set) var remotePairingCode = ""
+    @Published private(set) var remotePairingExpiresAt: Date?
     @Published private(set) var remoteControlPaired = false
+    @Published private(set) var isRemoteUnpairing = false
     @Published private(set) var remoteLastSyncAt: Date?
     @Published private(set) var remoteCredentialIssue: String?
     @Published private(set) var isLoadingRemoteCredential = false
@@ -570,6 +618,11 @@ final class AppModel: ObservableObject {
     private var pendingActivityDeltas: [PendingItemKey: PendingActivityDelta] = [:]
     private var pendingAssistantDeltas: [PendingItemKey: [String]] = [:]
     private var pendingDeltaOrder: [PendingDeltaTarget] = []
+    private var forceStoppingThreadID: String?
+    private var activePermissionByThreadID: [String: String] = [:]
+    private var turnLaunchSettingsByThreadID: [String: TurnLaunchSettings] = [:]
+    private var capacityRetryStates: [String: CapacityRetryState] = [:]
+    private var capacityRetryTasks: [String: Task<Void, Never>] = [:]
     private var messagesByThread: [String: [ChatMessage]] = [:]
     @Published private(set) var selectedCollaborationTasks: [CollaborationChildTask] = []
     private var threadSummaries: [String: CodexThread] = [:]
@@ -623,6 +676,21 @@ final class AppModel: ObservableObject {
     private var localTurnStartedAtByThread: [String: Date] = [:]
     static let localTurnReconciliationGrace: TimeInterval = 30
     private var liveTurnMetadataByThread: [String: TurnModelMetadata] = [:]
+
+    private struct TurnLaunchSettings: Codable {
+        var model: String?
+        var effort: String?
+        var permissions: String?
+        var serviceTier: String?
+        var approvalPolicy: String?
+        var approvalsReviewer: String?
+    }
+
+    private struct CapacityRetryState: Codable {
+        var attempt: Int
+        var failedTurnID: String
+        var settings: TurnLaunchSettings
+    }
     private var remoteControlLoopTask: Task<Void, Never>?
     private var remoteHistoryTask: Task<Void, Never>?
     private var remoteUsageTask: Task<Void, Never>?
@@ -646,6 +714,7 @@ final class AppModel: ObservableObject {
     private let remoteControlEnabledKey = "CloudCodex.remoteControl.enabled.v1"
     private let remotePairingCodeKey = "CloudCodex.remoteControl.pairingCode.v1"
     private let waitingMessagesKey = "CloudCodex.waitingMessages.v1"
+    private let capacityRetriesKey = "CloudCodex.capacityRetries.v1"
 
     private struct RemoteExecution {
         let taskID: String
@@ -683,12 +752,14 @@ final class AppModel: ObservableObject {
     init(
         remoteDefaults: UserDefaults = .standard,
         userInputTimeoutSeconds: TimeInterval = 60,
+        computerControlTimeoutSeconds: TimeInterval = 120,
         remoteAPILoader: @escaping @Sendable (Bool) async throws -> RemoteControlAPI = {
             try await RemoteControlAPI.connect(allowInteraction: $0)
         }
     ) {
         self.remoteDefaults = remoteDefaults
         self.userInputTimeoutSeconds = userInputTimeoutSeconds
+        self.computerControlTimeoutSeconds = computerControlTimeoutSeconds
         self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
         if let data = remoteDefaults.data(forKey: unreadCompletionsKey),
@@ -715,6 +786,13 @@ final class AppModel: ObservableObject {
         if let data = remoteDefaults.data(forKey: waitingMessagesKey),
            let saved = try? JSONDecoder().decode([PersistedWaitingMessage].self, from: data) {
             waitingMessages = saved.map(\.message)
+        }
+        if let data = remoteDefaults.data(forKey: capacityRetriesKey),
+           let saved = try? JSONDecoder().decode([String: CapacityRetryState].self, from: data) {
+            capacityRetryStates = saved
+            for (threadID, state) in saved {
+                turnLaunchSettingsByThreadID[threadID] = state.settings
+            }
         }
         speech.onTranscript = { [weak self] transcript in
             guard let self else { return }
@@ -1004,8 +1082,14 @@ final class AppModel: ObservableObject {
             self?.handleServerRequest(requestID, method: method, params: params)
         }
         client.onDisconnect = { [weak self] message in
-            self?.handleClientDisconnect(message)
-            self?.scheduleClientReconnect()
+            guard let self else { return }
+            if let threadID = self.forceStoppingThreadID {
+                self.forceStoppingThreadID = nil
+                self.handleForcedStopDisconnect(threadID: threadID)
+            } else {
+                self.handleClientDisconnect(message)
+            }
+            self.scheduleClientReconnect()
         }
         do {
             try await client.start()
@@ -1014,6 +1098,7 @@ final class AppModel: ObservableObject {
             await loadComposerOptions(cwd: nil)
             await loadFolderCatalog()
             await refreshThreads()
+            resumePersistedCapacityRetries()
             startThreadStatusMonitor()
             startRemoteControlIfNeeded()
         } catch {
@@ -1175,9 +1260,14 @@ final class AppModel: ObservableObject {
         if threads[index].status != status { threads[index].status = status }
     }
 
-    private func setLocalTurnRunning(_ threadID: String, turnID: String? = nil) {
+    private func setLocalTurnRunning(
+        _ threadID: String,
+        turnID: String? = nil,
+        permissions: String? = nil
+    ) {
         threadOutcomes.removeValue(forKey: threadID)
         locallyRunningThreadIDs.insert(threadID)
+        if let permissions { activePermissionByThreadID[threadID] = permissions }
         if localTurnStartedAtByThread[threadID] == nil {
             localTurnStartedAtByThread[threadID] = Date()
         }
@@ -1185,9 +1275,30 @@ final class AppModel: ObservableObject {
         syncSelectedLocalTurnState()
     }
 
+    private func rememberTurnLaunch(
+        threadID: String,
+        model: String?,
+        effort: String?,
+        permissions: String?,
+        serviceTier: String?,
+        approvalPolicy: String? = nil,
+        approvalsReviewer: String? = nil
+    ) {
+        turnLaunchSettingsByThreadID[threadID] = TurnLaunchSettings(
+            model: model,
+            effort: effort,
+            permissions: permissions,
+            serviceTier: serviceTier,
+            approvalPolicy: approvalPolicy,
+            approvalsReviewer: approvalsReviewer
+        )
+    }
+
     private func clearLocalTurn(_ threadID: String) {
+        cancelComputerControlTimeouts(threadID: threadID)
         locallyRunningThreadIDs.remove(threadID)
         activeTurnIDsByThread.removeValue(forKey: threadID)
+        activePermissionByThreadID.removeValue(forKey: threadID)
         localTurnStartedAtByThread.removeValue(forKey: threadID)
         syncSelectedLocalTurnState()
     }
@@ -1199,7 +1310,8 @@ final class AppModel: ObservableObject {
         connectionText = "未连接"
         errorMessage = message
         flushPendingDeltas()
-        let interruptedThreadIDs = locallyRunningThreadIDs
+        let retryingThreadIDs = locallyRunningThreadIDs.filter { capacityRetryStates[$0] != nil }
+        let interruptedThreadIDs = locallyRunningThreadIDs.subtracting(retryingThreadIDs)
         for threadID in interruptedThreadIDs {
             markLocalTurnInterrupted(threadID: threadID, message: message)
             setThreadRunning(threadID, running: false)
@@ -1211,6 +1323,17 @@ final class AppModel: ObservableObject {
         syncSelectedLocalTurnState()
         if let selectedThreadID, interruptedThreadIDs.contains(selectedThreadID) {
             isExternalThreadProcessing = false
+        }
+        // A capacity retry may itself have been in flight when app-server
+        // disconnected. Keep its recovery loop alive instead of converting it
+        // to a terminal interruption.
+        for threadID in retryingThreadIDs {
+            guard let state = capacityRetryStates[threadID] else { continue }
+            scheduleCapacityRetry(
+                threadID: threadID,
+                failedTurnID: "\(state.failedTurnID)-disconnect-\(state.attempt)",
+                message: "连接暂时中断；CloudCodex 重连后会继续尝试。"
+            )
         }
     }
 
@@ -1248,19 +1371,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func markLocalTurnInterrupted(threadID: String, message: String) {
+    private func markLocalTurnInterrupted(
+        threadID: String,
+        message: String,
+        title: String = "连接中断",
+        status: String = "失败"
+    ) {
         var history = conversationMessages(for: threadID)
         for index in history.indices where history[index].isStreaming {
             history[index].isStreaming = false
             if history[index].role == .activity {
-                history[index].activityStatus = "失败"
+                history[index].activityStatus = status
                 history[index].completedAt = Date()
             }
         }
         if let index = history.firstIndex(where: { $0.id == "turn-progress" }) {
-            history[index].activityTitle = "连接中断"
+            history[index].activityTitle = title
             history[index].text = message
-            history[index].activityStatus = "失败"
+            history[index].activityStatus = status
             history[index].isStreaming = false
             history[index].completedAt = Date()
         } else {
@@ -1270,12 +1398,28 @@ final class AppModel: ObservableObject {
                 text: message,
                 isStreaming: false,
                 activityKind: .warning,
-                activityTitle: "连接中断",
-                activityStatus: "失败",
+                activityTitle: title,
+                activityStatus: status,
                 completedAt: Date()
             ))
         }
         storeMessages(history, for: threadID)
+    }
+
+    private func handleForcedStopDisconnect(threadID: String) {
+        connectionText = "正在重新连接本机 Codex…"
+        errorMessage = nil
+        flushPendingDeltas()
+        markLocalTurnInterrupted(
+            threadID: threadID,
+            message: "正常停止请求未及时返回，CloudCodex 已重启卡住的本地服务并强制结束当前任务。已经完成的文件修改不会自动回滚。",
+            title: "任务已强制停止",
+            status: "已停止"
+        )
+        clearLocalTurn(threadID)
+        setThreadRunning(threadID, running: false)
+        threadOutcomes[threadID] = .interrupted
+        if selectedThreadID == threadID { isExternalThreadProcessing = false }
     }
 
     private func syncSelectedLocalTurnState() {
@@ -1515,8 +1659,15 @@ final class AppModel: ObservableObject {
         permissions: String?,
         serviceTier: String?
     ) async throws {
+        rememberTurnLaunch(
+            threadID: threadID,
+            model: model,
+            effort: effort,
+            permissions: permissions,
+            serviceTier: serviceTier
+        )
         liveTurnMetadataByThread[threadID] = TurnModelMetadata(model: model, reasoningEffort: effort)
-        setLocalTurnRunning(threadID)
+        setLocalTurnRunning(threadID, permissions: permissions)
         if selectedThreadID == threadID {
             isExternalThreadProcessing = false
             threadOwnershipNotice = nil
@@ -1602,12 +1753,43 @@ final class AppModel: ObservableObject {
     static let occupiedThreadMessage = "请先在另一个应用中关闭此会话，才能在这里继续。"
 
     func cancelTurn() async {
-        guard let threadID = selectedThreadID, let turnID = activeTurnID else { return }
+        guard let threadID = selectedThreadID else { return }
+        let cancelledCapacityRetry = cancelCapacityRetry(threadID: threadID)
+        if let cancelledCapacityRetry {
+            updateCapacityRetryActivity(
+                threadID: threadID,
+                failedTurnID: cancelledCapacityRetry.failedTurnID,
+                title: "已停止自动重试",
+                text: "已按你的操作停止模型容量不足后的持续重试；此前的执行记录和文件修改均保留。",
+                status: "已停止",
+                isStreaming: false
+            )
+        }
+        guard let turnID = activeTurnID else {
+            guard cancelledCapacityRetry != nil else { return }
+            clearLocalTurn(threadID)
+            setThreadRunning(threadID, running: false)
+            threadOutcomes[threadID] = .interrupted
+            finishTurnProgress(status: "已停止")
+            return
+        }
         do {
             try await client.interruptTurn(threadID: threadID, turnID: turnID)
         } catch {
-            errorMessage = error.localizedDescription
+            guard Self.isInterruptTimeout(error) else {
+                errorMessage = error.localizedDescription
+                return
+            }
+            errorMessage = nil
+            connectionText = "停止无响应，正在重启本机 Codex…"
+            forceStoppingThreadID = threadID
+            client.terminateUnresponsiveServer()
         }
+    }
+
+    static func isInterruptTimeout(_ error: Error) -> Bool {
+        guard case CodexClientError.timeout(let method) = error else { return false }
+        return method == "turn/interrupt"
     }
 
     private func syncLatestExternalActivity(threadID: String) async {
@@ -1652,6 +1834,9 @@ final class AppModel: ObservableObject {
     ) -> Bool {
         guard locallyRunningThreadIDs.contains(threadID) else { return false }
         let activeTurnID = activeTurnIDsByThread[threadID]
+        // Between capacity attempts there is intentionally no active server
+        // turn. Do not let the generic stale-idle repair cancel that wait.
+        if capacityRetryStates[threadID] != nil, activeTurnID == nil { return false }
         let exactTerminalTurn = activeTurnID != nil
             && snapshot.turn?.id == activeTurnID
             && snapshot.turn?.isActive == false
@@ -2114,15 +2299,48 @@ final class AppModel: ObservableObject {
 
     func resetRemotePairingCode() {
         guard remoteControlEnabled, !remoteControlPaired, let api = remoteControlAPI else { return }
-        remoteControlStatus = "正在生成新配对码…"
+        remoteControlStatus = "正在生成新配对二维码…"
         Task { [weak self] in
             do {
                 let registration = try await api.register(resetPairing: true)
                 self?.applyRemoteRegistration(registration)
             } catch {
-                self?.remoteControlStatus = "生成配对码失败：\(error.localizedDescription)"
+                self?.remoteControlStatus = "生成配对二维码失败：\(error.localizedDescription)"
             }
         }
+    }
+
+    func unpairAndPrepareRemoteRebinding() {
+        guard remoteControlEnabled, remoteControlPaired, !isRemoteUnpairing,
+              let api = remoteControlAPI else { return }
+        isRemoteUnpairing = true
+        remoteControlStatus = "正在解除配对…"
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isRemoteUnpairing = false }
+            do {
+                try await api.unpair()
+                self.remoteControlPaired = false
+                self.remoteUsageSnapshot = nil
+                self.remoteUsageLastAttempt = nil
+                self.remotePairingCode = ""
+                self.remotePairingExpiresAt = nil
+                self.remoteDefaults.removeObject(forKey: self.remotePairingCodeKey)
+                self.remoteControlStatus = "正在生成重新绑定二维码…"
+                do {
+                    self.applyRemoteRegistration(try await api.register(resetPairing: true))
+                } catch {
+                    self.remoteControlStatus = "已解除配对，生成新二维码失败：\(error.localizedDescription)"
+                }
+            } catch {
+                self.remoteControlStatus = "解除配对失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    var remotePairingQRCodePayload: String? {
+        guard let expiresAt = remotePairingExpiresAt, expiresAt > Date() else { return nil }
+        return RemotePairingQRCode.payload(code: remotePairingCode)
     }
 
     private func startRemoteControlIfNeeded() {
@@ -2204,6 +2422,7 @@ final class AppModel: ObservableObject {
                     }
                     if response.paired {
                         remotePairingCode = ""
+                        remotePairingExpiresAt = nil
                         remoteDefaults.removeObject(forKey: remotePairingCodeKey)
                         if remoteExecutions.isEmpty {
                             remoteControlStatus = remoteStatusOutbox.pending(deviceID: api.deviceID).isEmpty
@@ -2212,9 +2431,10 @@ final class AppModel: ObservableObject {
                                 : "任务状态待补传，正在自动重试"
                         }
                     } else {
-                        remoteControlStatus = remotePairingCode.isEmpty
-                            ? "等待生成配对码…"
-                            : "等待小程序输入配对码"
+                        await refreshRemotePairingQRCodeIfNeeded(api: api)
+                        remoteControlStatus = remotePairingQRCodePayload == nil
+                            ? "等待生成配对二维码…"
+                            : "等待小程序扫码配对"
                     }
                 } catch {
                     if !Task.isCancelled { remoteControlStatus = "状态同步失败：\(error.localizedDescription)" }
@@ -2328,14 +2548,29 @@ final class AppModel: ObservableObject {
         remoteControlPaired = registration.paired
         if !registration.pairingCode.isEmpty {
             remotePairingCode = registration.pairingCode
+            remotePairingExpiresAt = RemotePairingQRCode.expirationDate(registration.pairingExpiresAt)
             remoteDefaults.set(registration.pairingCode, forKey: remotePairingCodeKey)
         }
         if registration.paired {
             remotePairingCode = ""
+            remotePairingExpiresAt = nil
             remoteDefaults.removeObject(forKey: remotePairingCodeKey)
             remoteControlStatus = "已配对，正在等待远程任务"
         } else {
-            remoteControlStatus = remotePairingCode.isEmpty ? "等待生成配对码…" : "等待小程序输入配对码"
+            remoteControlStatus = remotePairingQRCodePayload == nil ? "等待生成配对二维码…" : "等待小程序扫码配对"
+        }
+    }
+
+    private func refreshRemotePairingQRCodeIfNeeded(api: RemoteControlAPI, now: Date = Date()) async {
+        guard !remoteControlPaired else { return }
+        let needsRefresh = remotePairingCode.isEmpty
+            || remotePairingExpiresAt == nil
+            || remotePairingExpiresAt!.timeIntervalSince(now) <= 4
+        guard needsRefresh else { return }
+        do {
+            applyRemoteRegistration(try await api.register(resetPairing: true))
+        } catch {
+            remoteControlStatus = "刷新配对二维码失败：\(error.localizedDescription)"
         }
     }
 
@@ -2494,7 +2729,16 @@ final class AppModel: ObservableObject {
 
             remoteExecutions[threadID] = RemoteExecution(taskID: task.taskId, threadID: threadID, turnID: nil, responseText: "")
             remoteControlStatus = "正在执行 \(remoteExecutions.count) 个远程任务"
-            setLocalTurnRunning(threadID)
+            rememberTurnLaunch(
+                threadID: threadID,
+                model: modelOption?.model,
+                effort: effort,
+                permissions: permission,
+                serviceTier: tier,
+                approvalPolicy: approval,
+                approvalsReviewer: reviewer
+            )
+            setLocalTurnRunning(threadID, permissions: permission)
             setThreadRunning(threadID, running: true)
             // Capture this remote request, never the visible composer's model.
             liveTurnMetadataByThread[threadID] = TurnModelMetadata(
@@ -2652,6 +2896,15 @@ final class AppModel: ObservableObject {
         let eventTurnID = params["turnId"] as? String ?? (params["turn"] as? [String: Any])?["id"] as? String
         if let expected = execution.turnID, let eventTurnID, expected != eventTurnID { return }
         execution.progress.consume(method, params)
+        if let message = Self.capacityFailure(method: method, params: params) {
+            // Keep the remote claim alive. The replacement turn will receive a
+            // new id, while all progress collected before capacity exhaustion
+            // remains attached to this same remote task.
+            execution.turnID = nil
+            remoteExecutions[threadID] = execution
+            remoteControlStatus = "远程任务模型繁忙，CloudCodex 将持续重试：\(message)"
+            return
+        }
         remoteExecutions[threadID] = execution
         switch method {
         case "turn/diff/updated":
@@ -2742,6 +2995,62 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        if method == "mcpServer/elicitation/request" {
+            guard var request = ComputerUseApprovalRequest(
+                requestID: requestID,
+                params: params,
+                timeout: userInputTimeoutSeconds
+            ) else {
+                do {
+                    try client.respond(to: requestID, result: [
+                        "action": "cancel", "content": NSNull(), "_meta": NSNull()
+                    ])
+                } catch {
+                    errorMessage = "无法取消不受支持的授权请求：\(error.localizedDescription)"
+                }
+                return
+            }
+            if Self.automaticallyApprovesComputerUse(
+                permissionID: activePermissionByThreadID[request.threadID]
+            ) {
+                do {
+                    try client.respond(
+                        to: request.requestID,
+                        result: request.responsePayload(for: .allowSession)
+                    )
+                    upsertConversationActivity(
+                        threadID: request.threadID,
+                        id: "computer-use-approval-\(request.id)",
+                        title: "完全访问已自动授权电脑控制",
+                        text: "当前任务为完全访问，CloudCodex 已自动允许本次会话控制 \(request.applicationName)。",
+                        status: "已自动允许"
+                    )
+                    return
+                } catch {
+                    request.error = "自动授权失败：\(error.localizedDescription)"
+                }
+            }
+            computerUseApprovalTimeoutTasks.removeValue(forKey: request.id)?.cancel()
+            if let index = computerUseApprovalRequests.firstIndex(where: { $0.id == request.id }) {
+                computerUseApprovalRequests[index] = request
+            } else {
+                computerUseApprovalRequests.append(request)
+            }
+            upsertConversationActivity(
+                threadID: request.threadID,
+                id: "computer-use-approval-\(request.id)",
+                title: "电脑控制需要授权",
+                text: "等待确认是否允许 CloudCodex 控制 \(request.applicationName)。",
+                status: "待授权"
+            )
+            let delay = max(0, request.expiresAt.timeIntervalSinceNow)
+            computerUseApprovalTimeoutTasks[request.id] = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.expireComputerUseApprovalRequest(request.id)
+            }
+            return
+        }
         guard method == "item/tool/requestUserInput",
               let request = UserInputRequest(requestID: requestID, params: params, timeout: userInputTimeoutSeconds) else { return }
         userInputTimeoutTasks.removeValue(forKey: request.id)?.cancel()
@@ -2761,6 +3070,31 @@ final class AppModel: ObservableObject {
         }
     }
 
+    static func automaticallyApprovesComputerUse(permissionID: String?) -> Bool {
+        permissionID == ":danger-full-access"
+    }
+
+    private func expireComputerUseApprovalRequest(_ requestID: String) {
+        guard let request = computerUseApprovalRequests.first(where: { $0.id == requestID }),
+              !request.isSubmitting else { return }
+        do {
+            try client.respond(to: request.requestID, result: request.responsePayload(for: .cancel))
+            computerUseApprovalTimeoutTasks.removeValue(forKey: requestID)
+            computerUseApprovalRequests.removeAll { $0.id == requestID }
+            upsertConversationActivity(
+                threadID: request.threadID,
+                id: "computer-use-approval-\(request.id)",
+                title: "电脑控制授权已取消",
+                text: "60 秒内未收到确认，CloudCodex 已取消对 \(request.applicationName) 的控制请求。",
+                status: "已取消"
+            )
+        } catch {
+            computerUseApprovalTimeoutTasks.removeValue(forKey: requestID)
+            guard let index = computerUseApprovalRequests.firstIndex(where: { $0.id == requestID }) else { return }
+            computerUseApprovalRequests[index].error = "自动取消失败：\(error.localizedDescription)"
+        }
+    }
+
     private func expireUserInputRequest(_ requestID: String) {
         guard let request = userInputRequests.first(where: { $0.id == requestID }), !request.isSubmitting else { return }
         do {
@@ -2775,6 +3109,79 @@ final class AppModel: ObservableObject {
             guard let index = userInputRequests.firstIndex(where: { $0.id == requestID }) else { return }
             userInputRequests[index].error = "自动跳过失败：\(error.localizedDescription)"
         }
+    }
+
+    static func isComputerControlItem(_ item: [String: Any]) -> Bool {
+        guard item["type"] as? String == "dynamicToolCall" else { return false }
+        let namespace = (item["namespace"] as? String)?.lowercased() ?? ""
+        return namespace == "cua_repl" || namespace.contains("computer-use")
+    }
+
+    private func scheduleComputerControlTimeout(
+        item: [String: Any],
+        threadID: String,
+        turnID: String?
+    ) {
+        guard Self.isComputerControlItem(item), let itemID = item["id"] as? String else { return }
+        let key = PendingItemKey(threadID: threadID, itemID: itemID)
+        computerControlTimeoutTasks.removeValue(forKey: key)?.cancel()
+        computerControlTimeoutTasks[key] = Task { [weak self] in
+            guard let self else { return }
+            let nanoseconds = UInt64(max(0, self.computerControlTimeoutSeconds) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            await self.expireComputerControl(key: key, turnID: turnID)
+        }
+    }
+
+    private func cancelComputerControlTimeout(itemID: String, threadID: String) {
+        let key = PendingItemKey(threadID: threadID, itemID: itemID)
+        computerControlTimeoutTasks.removeValue(forKey: key)?.cancel()
+    }
+
+    private func cancelComputerControlTimeouts(threadID: String) {
+        let keys = computerControlTimeoutTasks.keys.filter { $0.threadID == threadID }
+        keys.forEach { computerControlTimeoutTasks.removeValue(forKey: $0)?.cancel() }
+    }
+
+    private func expireComputerControl(key: PendingItemKey, turnID: String?) async {
+        computerControlTimeoutTasks.removeValue(forKey: key)
+        var history = conversationMessages(for: key.threadID)
+        guard let index = history.firstIndex(where: { $0.id == key.itemID && $0.isStreaming }) else { return }
+
+        history[index].isStreaming = false
+        history[index].activityStatus = "超时"
+        history[index].completedAt = Date()
+        let timeoutText = "电脑控制步骤超过 \(Int(computerControlTimeoutSeconds)) 秒没有返回，CloudCodex 已自动停止本轮任务。可直接继续并让 Codex 重新连接微信开发者工具。"
+        history[index].text = history[index].text.isEmpty ? timeoutText : history[index].text + "\n\n" + timeoutText
+        storeMessages(history, for: key.threadID)
+
+        guard locallyRunningThreadIDs.contains(key.threadID),
+              let activeTurnID = activeTurnIDsByThread[key.threadID],
+              turnID == nil || turnID == activeTurnID else { return }
+
+        do {
+            try await client.interruptTurn(threadID: key.threadID, turnID: activeTurnID)
+        } catch {
+            // A wedged computer-control request can also prevent turn/interrupt
+            // from being answered. Restart the local app-server as the bounded
+            // fallback; completed file edits remain on disk.
+            if client.connected {
+                forceStoppingThreadID = key.threadID
+                client.terminateUnresponsiveServer()
+            }
+        }
+
+        markLocalTurnInterrupted(
+            threadID: key.threadID,
+            message: timeoutText,
+            title: "电脑控制超时",
+            status: "已停止"
+        )
+        clearLocalTurn(key.threadID)
+        setThreadRunning(key.threadID, running: false)
+        threadOutcomes[key.threadID] = .interrupted
+        if selectedThreadID == key.threadID { isExternalThreadProcessing = false }
     }
 
     func handleEvent(_ method: String, _ params: [String: Any]) {
@@ -2794,14 +3201,23 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        let capacityFailure = Self.capacityFailure(method: method, params: params)
         if method == "serverRequest/resolved",
-           let rawID = params["requestId"], let requestID = AppServerRequestID(rawID),
-           let resolved = userInputRequests.first(where: { $0.id == requestID.stableID }) {
-            userInputTimeoutTasks.removeValue(forKey: requestID.stableID)?.cancel()
-            userInputRequests.removeAll { $0.id == requestID.stableID }
-            upsertConversationActivity(threadID: eventThreadID,
-                id: "user-input-\(resolved.itemID)", title: "输入请求已结束",
-                text: "该请求已由 Codex 处理或随任务状态变化而取消。", status: "已处理")
+           let rawID = params["requestId"], let requestID = AppServerRequestID(rawID) {
+            if let resolved = userInputRequests.first(where: { $0.id == requestID.stableID }) {
+                userInputTimeoutTasks.removeValue(forKey: requestID.stableID)?.cancel()
+                userInputRequests.removeAll { $0.id == requestID.stableID }
+                upsertConversationActivity(threadID: eventThreadID,
+                    id: "user-input-\(resolved.itemID)", title: "输入请求已结束",
+                    text: "该请求已由 Codex 处理或随任务状态变化而取消。", status: "已处理")
+            }
+            if let resolved = computerUseApprovalRequests.first(where: { $0.id == requestID.stableID }) {
+                computerUseApprovalTimeoutTasks.removeValue(forKey: requestID.stableID)?.cancel()
+                computerUseApprovalRequests.removeAll { $0.id == requestID.stableID }
+                upsertConversationActivity(threadID: eventThreadID,
+                    id: "computer-use-approval-\(resolved.id)", title: "电脑控制授权已结束",
+                    text: "该授权请求已由 Codex 处理或随任务状态变化而取消。", status: "已处理")
+            }
         }
         if method == "turn/started" || method == "turn/completed" || method == "error" {
             turnEventRevision[eventThreadID, default: 0] += 1
@@ -2822,13 +3238,16 @@ final class AppModel: ObservableObject {
             setLocalTurnRunning(eventThreadID, turnID: turn?["id"] as? String)
             setThreadRunning(eventThreadID, running: true)
         } else if method == "turn/completed" {
+            cancelComputerControlTimeouts(threadID: eventThreadID)
             let turn = params["turn"] as? [String: Any]
             if let incomingID = turn?["id"] as? String,
                let activeID = activeTurnIDsByThread[eventThreadID], incomingID != activeID { return }
             clearLocalTurn(eventThreadID)
             setThreadRunning(eventThreadID, running: false)
             if let status = turn?["status"] as? String {
-                threadOutcomes[eventThreadID] = ConversationOutcome(rawValue: status)
+                threadOutcomes[eventThreadID] = capacityFailure == nil
+                    ? ConversationOutcome(rawValue: status)
+                    : .running
                 if status == "completed", let turnID = turn?["id"] as? String {
                     recordCompletedConversation(eventThreadID, turnID: turnID,
                         viewed: selectedThreadID == eventThreadID)
@@ -2850,8 +3269,12 @@ final class AppModel: ObservableObject {
             self.eventThreadID = nil
             self.eventBuffer = nil
             storeMessages(updated, for: eventThreadID)
-            if method == "turn/completed" || (method == "error" && params["willRetry"] as? Bool != true) {
+            let terminal = method == "turn/completed"
+                || (method == "error" && params["willRetry"] as? Bool != true)
+            if terminal, capacityFailure == nil {
                 liveTurnMetadataByThread.removeValue(forKey: eventThreadID)
+                turnLaunchSettingsByThreadID.removeValue(forKey: eventThreadID)
+                cancelCapacityRetry(threadID: eventThreadID)
             }
         }
 
@@ -2887,6 +3310,11 @@ final class AppModel: ObservableObject {
         case "item/started":
             guard let item = params["item"] as? [String: Any] else { return }
             updateActivityItem(item, completed: false)
+            scheduleComputerControlTimeout(
+                item: item,
+                threadID: eventThreadID,
+                turnID: params["turnId"] as? String
+            )
         case "item/reasoning/summaryTextDelta":
             guard let delta = params["delta"] as? String else { return }
             enqueueActivityDelta(
@@ -2995,6 +3423,9 @@ final class AppModel: ObservableObject {
         case "item/completed":
             flushPendingDeltas()
             guard let item = params["item"] as? [String: Any] else { return }
+            if let itemID = item["id"] as? String {
+                cancelComputerControlTimeout(itemID: itemID, threadID: eventThreadID)
+            }
             if item["type"] as? String == "agentMessage",
                let id = item["id"] as? String,
                let text = item["text"] as? String {
@@ -3025,6 +3456,14 @@ final class AppModel: ObservableObject {
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String ?? "completed"
             applyCompletedTurnTimestamp(turn)
+            if let capacityFailure {
+                scheduleCapacityRetry(
+                    threadID: eventThreadID,
+                    failedTurnID: turn?["id"] as? String ?? "current",
+                    message: capacityFailure
+                )
+                break
+            }
             finishTurnProgress(status: localizedTurnStatus(status))
             Task {
                 await refreshThreads()
@@ -3036,11 +3475,20 @@ final class AppModel: ObservableObject {
             guard !Self.isOptionalActivityCapabilityError(message) else { break }
             let retrying = params["willRetry"] as? Bool == true
             let turnID = params["turnId"] as? String ?? activeTurnIDsByThread[eventThreadID] ?? "current"
+            if let capacityFailure, !retrying {
+                scheduleCapacityRetry(
+                    threadID: eventThreadID,
+                    failedTurnID: turnID,
+                    message: capacityFailure
+                )
+                break
+            }
             upsertActivity(id: "connection-notice-\(turnID)", kind: .warning,
                            title: retrying ? "连接中断，正在重试" : "任务发生错误",
                            text: message, status: retrying ? "重连中" : "失败",
                            isStreaming: retrying)
             if retrying { break }
+            cancelComputerControlTimeouts(threadID: eventThreadID)
             clearLocalTurn(eventThreadID)
             if selectedThreadID == eventThreadID { isExternalThreadProcessing = false }
             setThreadRunning(eventThreadID, running: false)
@@ -3054,6 +3502,193 @@ final class AppModel: ObservableObject {
     private static func isOptionalActivityCapabilityError(_ message: String) -> Bool {
         message.localizedCaseInsensitiveContains("thread/items/list")
             && message.localizedCaseInsensitiveContains("not supported")
+    }
+
+    private static func capacityFailure(method: String, params: [String: Any]) -> String? {
+        let error: [String: Any]?
+        switch method {
+        case "turn/completed":
+            guard let turn = params["turn"] as? [String: Any],
+                  turn["status"] as? String == "failed" else { return nil }
+            error = turn["error"] as? [String: Any]
+        case "error":
+            guard params["willRetry"] as? Bool != true else { return nil }
+            error = params["error"] as? [String: Any]
+        default:
+            return nil
+        }
+        guard CapacityRetryPolicy.isRetryable(error: error) else { return nil }
+        return error?["message"] as? String ?? "所选模型当前容量不足。"
+    }
+
+    private func scheduleCapacityRetry(threadID: String, failedTurnID: String, message: String) {
+        if capacityRetryStates[threadID]?.failedTurnID == failedTurnID,
+           capacityRetryTasks[threadID] != nil,
+           let state = capacityRetryStates[threadID] {
+            setLocalTurnRunning(threadID, permissions: state.settings.permissions)
+            setThreadRunning(threadID, running: true)
+            threadOutcomes[threadID] = .running
+            return
+        }
+        capacityRetryTasks.removeValue(forKey: threadID)?.cancel()
+
+        var settings = turnLaunchSettingsByThreadID[threadID] ?? TurnLaunchSettings(
+            model: nil,
+            effort: nil,
+            permissions: activePermissionByThreadID[threadID],
+            serviceTier: threadSummaries[threadID]?.serviceTier,
+            approvalPolicy: nil,
+            approvalsReviewer: nil
+        )
+        if let metadata = liveTurnMetadataByThread[threadID] {
+            settings.model = metadata.model ?? settings.model
+            settings.effort = metadata.reasoningEffort ?? settings.effort
+        }
+        let attempt = (capacityRetryStates[threadID]?.attempt ?? 0) + 1
+        let delay = CapacityRetryPolicy.delay(attempt: attempt)
+        let state = CapacityRetryState(
+            attempt: attempt,
+            failedTurnID: failedTurnID,
+            settings: settings
+        )
+        capacityRetryStates[threadID] = state
+        persistCapacityRetries()
+        turnLaunchSettingsByThreadID[threadID] = settings
+        setLocalTurnRunning(threadID, permissions: settings.permissions)
+        setThreadRunning(threadID, running: true)
+        threadOutcomes[threadID] = .running
+        if selectedThreadID == threadID { isExternalThreadProcessing = false }
+        updateCapacityRetryActivity(
+            threadID: threadID,
+            failedTurnID: failedTurnID,
+            title: "模型繁忙，持续重试",
+            text: "第 \(attempt) 次检测到模型容量不足：\(message)\n约 \(max(1, Int(delay.rounded()))) 秒后自动继续。现有回复、执行过程、错误记录和文件修改都会保留。",
+            status: "等待重试",
+            isStreaming: true
+        )
+        if selectedThreadID == threadID { finishTurnProgress(status: "等待重试") }
+
+        capacityRetryTasks[threadID] = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(delay, 0.01) * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            await self.performCapacityRetry(threadID: threadID, expectedAttempt: attempt)
+        }
+    }
+
+    private func performCapacityRetry(threadID: String, expectedAttempt: Int) async {
+        guard let state = capacityRetryStates[threadID], state.attempt == expectedAttempt else { return }
+        capacityRetryTasks.removeValue(forKey: threadID)
+        updateCapacityRetryActivity(
+            threadID: threadID,
+            failedTurnID: state.failedTurnID,
+            title: "正在自动重试",
+            text: "正在发起第 \(state.attempt) 次继续请求。此前已完成的修改和外部操作不会被撤回，Codex 会先核对现状再继续未完成部分。",
+            status: "重试中",
+            isStreaming: true
+        )
+        let continuation = "上一轮因所选模型临时容量不足而中断。请从当前会话和工作区现状继续完成原任务：先核对已经完成的内容，不要重复文件修改、提交、推送、部署、发送或其他已经执行过的外部操作；只补齐未完成部分并给出最终结果。"
+        do {
+            try await client.resumeThread(threadID)
+            rememberTurnLaunch(
+                threadID: threadID,
+                model: state.settings.model,
+                effort: state.settings.effort,
+                permissions: state.settings.permissions,
+                serviceTier: state.settings.serviceTier,
+                approvalPolicy: state.settings.approvalPolicy,
+                approvalsReviewer: state.settings.approvalsReviewer
+            )
+            let turnID = try await client.startTurn(
+                threadID: threadID,
+                text: continuation,
+                attachments: [],
+                model: state.settings.model,
+                effort: state.settings.effort,
+                permissions: state.settings.permissions,
+                serviceTier: state.settings.serviceTier,
+                approvalPolicy: state.settings.approvalPolicy,
+                approvalsReviewer: state.settings.approvalsReviewer
+            )
+            setLocalTurnRunning(threadID, turnID: turnID, permissions: state.settings.permissions)
+            setThreadRunning(threadID, running: true)
+        } catch {
+            guard capacityRetryStates[threadID]?.attempt == expectedAttempt else { return }
+            scheduleCapacityRetry(
+                threadID: threadID,
+                failedTurnID: "\(state.failedTurnID)-submit-\(expectedAttempt)",
+                message: "自动继续请求暂时未能发出：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    @discardableResult
+    private func cancelCapacityRetry(threadID: String) -> CapacityRetryState? {
+        let state = capacityRetryStates.removeValue(forKey: threadID)
+        capacityRetryTasks.removeValue(forKey: threadID)?.cancel()
+        if state != nil { persistCapacityRetries() }
+        return state
+    }
+
+    private func persistCapacityRetries() {
+        if capacityRetryStates.isEmpty {
+            remoteDefaults.removeObject(forKey: capacityRetriesKey)
+        } else if let data = try? JSONEncoder().encode(capacityRetryStates) {
+            remoteDefaults.set(data, forKey: capacityRetriesKey)
+        }
+    }
+
+    private func resumePersistedCapacityRetries() {
+        for (threadID, state) in capacityRetryStates where capacityRetryTasks[threadID] == nil {
+            scheduleCapacityRetry(
+                threadID: threadID,
+                failedTurnID: "\(state.failedTurnID)-app-restart-\(state.attempt)",
+                message: "CloudCodex 已恢复上次未结束的模型容量重试。"
+            )
+        }
+    }
+
+    private func updateCapacityRetryActivity(
+        threadID: String,
+        failedTurnID: String,
+        title: String,
+        text: String,
+        status: String,
+        isStreaming: Bool
+    ) {
+        var rows = conversationMessages(for: threadID)
+        let id = "capacity-retry-\(failedTurnID)"
+        if let index = rows.firstIndex(where: { $0.id == id }) {
+            rows[index].activityTitle = title
+            rows[index].text = text
+            rows[index].activityStatus = status
+            rows[index].isStreaming = isStreaming
+            rows[index].timestamp = Date()
+        } else {
+            rows.append(.init(
+                id: id,
+                role: .activity,
+                text: text,
+                isStreaming: isStreaming,
+                activityKind: .warning,
+                activityTitle: title,
+                activityStatus: status,
+                timestamp: Date(),
+                turnID: failedTurnID == "current" ? nil : failedTurnID
+            ))
+        }
+        storeMessages(rows, for: threadID)
+    }
+
+    var selectedHasCapacityRetry: Bool {
+        selectedThreadID.map { capacityRetryStates[$0] != nil } ?? false
+    }
+
+    func capacityRetryAttempt(for threadID: String) -> Int? {
+        capacityRetryStates[threadID]?.attempt
     }
 
     private func updateActivityItem(_ item: [String: Any], completed: Bool) {
@@ -3161,6 +3796,12 @@ final class AppModel: ObservableObject {
             if !clipped.isEmpty { eventMessages[index].text = clipped }
             eventMessages[index].activityStatus = status
             eventMessages[index].isStreaming = isStreaming
+            if isStreaming, eventMessages[index].startedAt == nil {
+                eventMessages[index].startedAt = Date()
+            }
+            if !isStreaming, eventMessages[index].completedAt == nil {
+                eventMessages[index].completedAt = Date()
+            }
             if !collaborationChildTasks.isEmpty {
                 eventMessages[index].collaborationChildTasks = collaborationChildTasks
             }
@@ -3168,6 +3809,7 @@ final class AppModel: ObservableObject {
         } else {
             eventMessages.append(.init(id: id, role: .activity, text: clipped, isStreaming: isStreaming,
                                   activityKind: kind, activityTitle: title, activityStatus: status,
+                                  startedAt: Date(), completedAt: isStreaming ? nil : Date(),
                                   turnID: (eventThreadID ?? selectedThreadID).flatMap { activeTurnIDsByThread[$0] },
                                   collaborationChildTasks: collaborationChildTasks,
                                   fileChanges: fileChanges))

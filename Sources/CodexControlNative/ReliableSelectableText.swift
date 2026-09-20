@@ -90,7 +90,15 @@ struct ReliableSelectableText: NSViewRepresentable {
         // safe in a narrow detail column.
         if !hasExplicitLineBreak,
            naturalWidth <= UserMessagePresentation.maximumContentWidth {
-            return max(1, naturalWidth)
+            // Once the row has a useful final proposal, let the native text
+            // container use that available width as well. Returning only the
+            // natural measurement leaves NSTextView narrower than its SwiftUI
+            // background and can wrap the final one or two CJK glyphs even
+            // though the bubble has plenty of empty space.
+            return min(
+                UserMessagePresentation.maximumContentWidth,
+                max(1, naturalWidth, maximumWidth)
+            )
         }
         return maximumWidth
     }
