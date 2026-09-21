@@ -195,6 +195,15 @@ final class ConversationTimelineTests: XCTestCase {
         let failure = ChatMessage(id: "turn-progress", role: .activity, text: String(repeating: "错误详情\n", count: 1_000), activityStatus: "失败")
         let failed = NSHostingView(rootView: ConversationProcessView(group: .init(messages: [failure]), isCurrent: false, initiallyExpanded: true).frame(width: 600))
         XCTAssertLessThan(failed.fittingSize.height, 260, "long connection errors also need a bounded viewport")
+
+        let failedSteps = (0..<26).map { index in
+            activity("failed-\(index)", status: index < 2 ? "失败" : "已完成")
+        }
+        let collapsedFailure = NSHostingView(rootView: ConversationProcessView(
+            group: .init(messages: failedSteps), isCurrent: false
+        ).frame(width: 600))
+        XCTAssertLessThan(collapsedFailure.fittingSize.height, 60,
+                          "a finished process with failures should use one compact summary row")
     }
 
     @MainActor
@@ -211,9 +220,14 @@ final class ConversationTimelineTests: XCTestCase {
         rows[6].activityStatus = "进行中"
         rows[6].startedAt = Date().addingTimeInterval(-45)
         let group = ConversationProcessGroup(messages: rows)
+        let failedRows = (0..<26).map { index in
+            activity("preview-failed-\(index)", status: index < 2 ? "失败" : "已完成")
+        }
         let preview = VStack(alignment: .leading, spacing: 20) {
             Text("执行过程 · 默认收起").font(.headline)
             ConversationProcessView(group: group, isCurrent: true)
+            Text("失败摘要 · 单行状态").font(.headline).padding(.top, 4)
+            ConversationProcessView(group: .init(messages: failedRows), isCurrent: false)
             Text("展开后 · 内部滚动").font(.headline).padding(.top, 10)
             ConversationProcessView(group: group, isCurrent: false, initiallyExpanded: true)
         }

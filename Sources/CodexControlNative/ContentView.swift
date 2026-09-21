@@ -3084,6 +3084,10 @@ struct ConversationProcessView: View, Equatable {
         lhs.group == rhs.group && lhs.isCurrent == rhs.isCurrent
     }
 
+    private var statusPresentation: ConversationProcessStatusPresentation {
+        .init(group: group, isCurrent: isCurrent)
+    }
+
     var body: some View {
         let steps = group.steps
         VStack(alignment: .leading, spacing: 0) {
@@ -3129,19 +3133,22 @@ struct ConversationProcessView: View, Equatable {
                                 }
                             }
 
-                            if group.failureCount > 0 {
-                                Label("\(group.failureCount) 项失败或被拒绝", systemImage: "exclamationmark.triangle")
-                                    .foregroundStyle(.orange)
-                            } else if group.hasFailure {
-                                Text("任务未成功，展开查看原因")
-                                    .foregroundStyle(.orange)
-                            } else if isCurrent {
-                                Text(group.latestStep?.isStreaming == true
-                                     ? "当前：\(group.latestStep?.activityTitle ?? "正在处理")"
-                                     : "正在继续思考，等待下一步…")
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
+                            if isCurrent {
+                                if group.hasFailure {
+                                    Text(group.failureCount > 0
+                                         ? "已记录 \(group.failureCount) 项失败，任务仍在继续"
+                                         : "已记录失败详情，任务仍在继续")
+                                        .foregroundStyle(.orange)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                } else {
+                                    Text(group.latestStep?.isStreaming == true
+                                         ? "当前：\(group.latestStep?.activityTitle ?? "正在处理")"
+                                         : "正在继续思考，等待下一步…")
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3153,16 +3160,19 @@ struct ConversationProcessView: View, Equatable {
                                 .fixedSize(horizontal: true, vertical: false)
                         }
 
-                        Text(group.status(isCurrent: isCurrent))
+                        Label(statusPresentation.label, systemImage: statusPresentation.systemImage)
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(isCurrent ? Color.blue : group.hasFailure ? .orange : .secondary)
+                            .foregroundStyle(statusPresentation.color)
                             .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
+                            .padding(.vertical, 4)
                             .background(
-                                (isCurrent ? Color.blue : group.hasFailure ? Color.orange : Color.secondary)
-                                    .opacity(0.10),
+                                statusPresentation.color.opacity(0.11),
                                 in: Capsule()
                             )
+                            .overlay {
+                                Capsule()
+                                    .stroke(statusPresentation.color.opacity(0.24), lineWidth: 0.75)
+                            }
                             .fixedSize(horizontal: true, vertical: false)
                     }
                     .contentShape(Rectangle())
@@ -3258,15 +3268,48 @@ struct ConversationProcessView: View, Equatable {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            (isCurrent ? Color.blue.opacity(0.045) : Color.secondary.opacity(0.035)),
+            (isCurrent ? Color.blue.opacity(0.045) : group.hasFailure ? Color.orange.opacity(0.025) : Color.secondary.opacity(0.035)),
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isCurrent ? Color.blue.opacity(0.18) : Color.primary.opacity(0.08), lineWidth: 1)
+                .stroke(
+                    isCurrent ? Color.blue.opacity(0.18) : group.hasFailure ? Color.orange.opacity(0.16) : Color.primary.opacity(0.08),
+                    lineWidth: 1
+                )
         }
     }
 
+}
+
+private struct ConversationProcessStatusPresentation {
+    let label: String
+    let systemImage: String
+    let color: Color
+
+    init(group: ConversationProcessGroup, isCurrent: Bool) {
+        if isCurrent {
+            label = group.latestStep?.isStreaming == true ? "执行中" : "思考中"
+            systemImage = group.latestStep?.isStreaming == true ? "bolt.fill" : "ellipsis"
+            color = .blue
+        } else if group.failureCount > 0 {
+            label = "\(group.failureCount) 项失败或被拒绝"
+            systemImage = "exclamationmark.triangle.fill"
+            color = .orange
+        } else if group.hasFailure {
+            label = "任务未成功"
+            systemImage = "exclamationmark.triangle.fill"
+            color = .orange
+        } else if group.wasStopped {
+            label = "已停止"
+            systemImage = "stop.fill"
+            color = .secondary
+        } else {
+            label = "已结束"
+            systemImage = "checkmark"
+            color = .secondary
+        }
+    }
 }
 
 enum ActivityWaitPresentation {
@@ -3426,6 +3469,19 @@ private enum ComposerMode {
     case newThread
 }
 
+enum WaitingQueueLayout {
+    static let rowHeight: CGFloat = 58
+    static let rowSpacing: CGFloat = 8
+    static let maximumVisibleRows = 3
+
+    static func viewportHeight(for itemCount: Int) -> CGFloat {
+        let visibleRows = min(max(0, itemCount), maximumVisibleRows)
+        guard visibleRows > 0 else { return 0 }
+        return CGFloat(visibleRows) * rowHeight
+            + CGFloat(visibleRows - 1) * rowSpacing
+    }
+}
+
 private struct Composer: View {
     @EnvironmentObject private var model: AppModel
     let mode: ComposerMode
@@ -3474,38 +3530,47 @@ private struct Composer: View {
                 }
 
                 if mode == .conversation, !model.selectedWaitingMessages.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 8) {
                             Image(systemName: "clock.arrow.circlepath")
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.blue)
+                                .frame(width: 26, height: 26)
+                                .background(Color.blue.opacity(0.12), in: Circle())
                             Text("等待队列")
                                 .font(.callout.weight(.semibold))
-                            Text("\(model.selectedWaitingMessages.count)")
-                                .font(.caption2.weight(.bold).monospacedDigit())
+                            Text("\(model.selectedWaitingMessages.count) 项")
+                                .font(.caption.weight(.semibold).monospacedDigit())
                                 .foregroundStyle(.white)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
                                 .background(Color.blue, in: Capsule())
                             Spacer(minLength: 8)
-                            Text("拖动把手排序 · 任务结束后从上到下发送")
+                            Label("拖动排序 · 结束后依次发送", systemImage: "arrow.up.arrow.down")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.85)
                         }
 
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 8) {
+                        ScrollView(.vertical) {
+                            LazyVStack(alignment: .leading, spacing: WaitingQueueLayout.rowSpacing) {
                                 ForEach(Array(model.selectedWaitingMessages.enumerated()), id: \.element.id) { index, item in
                                     WaitingMessageQueueRow(item: item, position: index + 1)
                                 }
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.trailing, model.selectedWaitingMessages.count > WaitingQueueLayout.maximumVisibleRows ? 5 : 0)
                         }
-                        .frame(height: min(CGFloat(model.selectedWaitingMessages.count * 66), 146))
+                        .scrollIndicators(.visible)
+                        .frame(height: WaitingQueueLayout.viewportHeight(for: model.selectedWaitingMessages.count))
+                        .clipped()
                     }
-                    .padding(10)
-                    .background(Color.blue.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                    .padding(12)
+                    .background(Color.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.blue.opacity(0.30), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.blue.opacity(0.34), lineWidth: 1)
                     )
                     .help("当前任务结束后按顺序发送。等待消息仅保留在本次应用运行期间，退出应用前请先处理。")
                 }
@@ -3956,28 +4021,35 @@ private struct WaitingMessageQueueRow: View {
             actionButtons
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, minHeight: WaitingQueueLayout.rowHeight, alignment: .leading)
         .background(
-            isDropTarget ? Color.blue.opacity(0.20) : (isHovered ? Color.blue.opacity(0.12) : Color.primary.opacity(0.045)),
-            in: RoundedRectangle(cornerRadius: 9)
+            isDropTarget ? Color.blue.opacity(0.20) : (isHovered ? Color.blue.opacity(0.11) : Color.primary.opacity(0.055)),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .stroke(isDropTarget ? Color.blue : (isHovered ? Color.blue.opacity(0.55) : Color.primary.opacity(0.08)), lineWidth: isDropTarget ? 1.5 : 1)
         )
+        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .animation(.easeOut(duration: 0.14), value: isDropTarget)
         .onHover { isHovered = $0 }
         .dropDestination(for: String.self) { values, location in
             guard let rawID = values.first, let sourceID = UUID(uuidString: rawID) else { return false }
-            return model.moveWaitingMessage(sourceID, relativeTo: item.id, placeAfter: location.y > 30)
+            return model.moveWaitingMessage(
+                sourceID,
+                relativeTo: item.id,
+                placeAfter: location.y > WaitingQueueLayout.rowHeight / 2
+            )
         } isTargeted: { isDropTarget = $0 }
         .disabled(model.deliveringWaitingMessages.contains(item.id))
     }
 
     private var dragHandle: some View {
         Image(systemName: "line.3.horizontal")
-            .font(.callout.weight(.semibold))
+            .font(.caption.weight(.semibold))
             .foregroundStyle(isHovered ? Color.blue : Color.secondary)
-            .frame(width: 20, height: 32)
+            .frame(width: 26, height: 34)
+            .background(Color.primary.opacity(isHovered ? 0.07 : 0.035), in: RoundedRectangle(cornerRadius: 7))
             .contentShape(Rectangle())
             .draggable(item.id.uuidString) {
                 Label("第 \(position) 位", systemImage: "line.3.horizontal")
@@ -3994,11 +4066,11 @@ private struct WaitingMessageQueueRow: View {
         Button {
             model.beginEditingWaitingMessage(item.id)
         } label: {
-            HStack(alignment: .top, spacing: 9) {
+            HStack(alignment: .center, spacing: 10) {
                 Text("\(position)")
                     .font(.caption2.weight(.bold).monospacedDigit())
                     .foregroundStyle(.white)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 24, height: 24)
                     .background(Color.blue, in: Circle())
                     .accessibilityLabel("排队第 \(position) 位")
 
@@ -4006,7 +4078,8 @@ private struct WaitingMessageQueueRow: View {
                     Text(item.text.isEmpty ? "附件消息" : item.text)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.primary)
-                        .lineLimit(2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     HStack(spacing: 8) {
                         Text("第 \(position) 位")
                             .fontWeight(.semibold)
@@ -4026,6 +4099,7 @@ private struct WaitingMessageQueueRow: View {
                 }
                 Spacer(minLength: 6)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -4062,13 +4136,15 @@ private struct WaitingMessageQueueRow: View {
                 model.removeWaitingMessage(item.id)
             } label: {
                 Image(systemName: "xmark")
-                    .frame(width: 16, height: 16)
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 28, height: 28)
+                    .background(Color.secondary.opacity(0.14), in: RoundedRectangle(cornerRadius: 7))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(.red)
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
             .help("从等待队列移除")
         }
+        .fixedSize()
     }
 }
 

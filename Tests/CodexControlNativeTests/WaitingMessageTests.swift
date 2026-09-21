@@ -25,6 +25,23 @@ final class WaitingMessageTests: XCTestCase {
               effort: nil, permissions: nil, serviceTier: nil)
     }
 
+    func testQueueViewportShowsCompleteRowsAndCapsAtThree() {
+        XCTAssertEqual(WaitingQueueLayout.viewportHeight(for: 0), 0)
+        XCTAssertEqual(
+            WaitingQueueLayout.viewportHeight(for: 1),
+            WaitingQueueLayout.rowHeight
+        )
+        XCTAssertEqual(
+            WaitingQueueLayout.viewportHeight(for: 3),
+            WaitingQueueLayout.rowHeight * 3 + WaitingQueueLayout.rowSpacing * 2
+        )
+        XCTAssertEqual(
+            WaitingQueueLayout.viewportHeight(for: 5),
+            WaitingQueueLayout.viewportHeight(for: 3),
+            "Additional queued tasks should scroll instead of clipping a partial fourth row"
+        )
+    }
+
     func testRunningConversationQueuesInOrderAndKeepsAttachments() async {
         let model = AppModel(remoteDefaults: defaults)
         model.selectedThreadID = "one"
