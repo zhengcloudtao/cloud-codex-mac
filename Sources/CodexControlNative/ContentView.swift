@@ -3088,6 +3088,10 @@ struct ConversationProcessView: View, Equatable {
         .init(group: group, isCurrent: isCurrent)
     }
 
+    private var currentStepPresentation: ConversationCurrentStepPresentation {
+        .init(group: group)
+    }
+
     var body: some View {
         let steps = group.steps
         VStack(alignment: .leading, spacing: 0) {
@@ -3134,21 +3138,25 @@ struct ConversationProcessView: View, Equatable {
                             }
 
                             if isCurrent {
-                                if group.hasFailure {
-                                    Text(group.failureCount > 0
-                                         ? "已记录 \(group.failureCount) 项失败，任务仍在继续"
-                                         : "已记录失败详情，任务仍在继续")
-                                        .foregroundStyle(.orange)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                } else {
-                                    Text(group.latestStep?.isStreaming == true
-                                         ? "当前：\(group.latestStep?.activityTitle ?? "正在处理")"
-                                         : "正在继续思考，等待下一步…")
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
+                                Label(
+                                    currentStepPresentation.label,
+                                    systemImage: currentStepPresentation.systemImage
+                                )
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(currentStepPresentation.color)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(
+                                    currentStepPresentation.color.opacity(0.08),
+                                    in: Capsule()
+                                )
+                                .overlay {
+                                    Capsule()
+                                        .stroke(currentStepPresentation.color.opacity(0.16), lineWidth: 0.75)
                                 }
+                                .accessibilityLabel(currentStepPresentation.accessibilityLabel)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3280,6 +3288,51 @@ struct ConversationProcessView: View, Equatable {
         }
     }
 
+}
+
+struct ConversationCurrentStepPresentation {
+    enum Tone: Equatable {
+        case active
+        case warning
+        case waiting
+    }
+
+    let label: String
+    let accessibilityLabel: String
+    let systemImage: String
+    let tone: Tone
+
+    init(group: ConversationProcessGroup) {
+        if group.hasFailure {
+            label = group.failureCount > 0
+                ? "\(group.failureCount) 项失败 · 仍在继续"
+                : "已记录失败 · 仍在继续"
+            accessibilityLabel = group.failureCount > 0
+                ? "已记录 \(group.failureCount) 项失败，任务仍在继续"
+                : "已记录失败详情，任务仍在继续"
+            systemImage = "exclamationmark.triangle.fill"
+            tone = .warning
+        } else if let step = group.latestStep, step.isStreaming {
+            let title = step.activityTitle ?? "正在处理"
+            label = "正在处理 · \(title)"
+            accessibilityLabel = "当前步骤：\(title)"
+            systemImage = step.activityKind?.iconName ?? "gearshape.2"
+            tone = .active
+        } else {
+            label = "等待下一步"
+            accessibilityLabel = "正在继续思考，等待下一步"
+            systemImage = "ellipsis"
+            tone = .waiting
+        }
+    }
+
+    var color: Color {
+        switch tone {
+        case .active: return .blue
+        case .warning: return .orange
+        case .waiting: return .secondary
+        }
+    }
 }
 
 private struct ConversationProcessStatusPresentation {
@@ -3525,8 +3578,14 @@ private struct Composer: View {
                                 }
                             }
                         }
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .id(currentAttachments.map(\.id))
+                    .defaultScrollAnchor(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: 82)
+                    .clipped()
                 }
 
                 if mode == .conversation, !model.selectedWaitingMessages.isEmpty {

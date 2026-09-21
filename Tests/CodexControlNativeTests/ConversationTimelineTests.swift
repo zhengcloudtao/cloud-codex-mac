@@ -142,6 +142,26 @@ final class ConversationTimelineTests: XCTestCase {
         XCTAssertEqual(ConversationProcessGroup(messages: [old]).status(isCurrent: true), "思考中")
     }
 
+    func testCurrentStepPresentationUsesCompactLiveLabels() {
+        var live = activity("live", status: "进行中")
+        live.isStreaming = true
+        live.activityKind = .reasoning
+        live.activityTitle = "思考摘要"
+        let active = ConversationCurrentStepPresentation(group: .init(messages: [live]))
+        XCTAssertEqual(active.label, "正在处理 · 思考摘要")
+        XCTAssertEqual(active.accessibilityLabel, "当前步骤：思考摘要")
+        XCTAssertEqual(active.tone, .active)
+
+        live.isStreaming = false
+        let waiting = ConversationCurrentStepPresentation(group: .init(messages: [live]))
+        XCTAssertEqual(waiting.label, "等待下一步")
+        XCTAssertEqual(waiting.tone, .waiting)
+
+        let failed = ConversationCurrentStepPresentation(group: .init(messages: [activity("failed", status: "失败")]))
+        XCTAssertEqual(failed.label, "1 项失败 · 仍在继续")
+        XCTAssertEqual(failed.tone, .warning)
+    }
+
     func testActivityWaitLabelHighlightsLongRunningTools() {
         let start = Date(timeIntervalSince1970: 1_000)
         XCTAssertEqual(
@@ -216,6 +236,8 @@ final class ConversationTimelineTests: XCTestCase {
         rows[3].activityTitle = "文件变更"
         rows[5].activityKind = .tool
         rows[5].activityTitle = "查看图片"
+        rows[6].activityKind = .reasoning
+        rows[6].activityTitle = "思考摘要"
         rows[6].isStreaming = true
         rows[6].activityStatus = "进行中"
         rows[6].startedAt = Date().addingTimeInterval(-45)
