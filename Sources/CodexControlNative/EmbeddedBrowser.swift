@@ -256,15 +256,26 @@ struct BrowserConversationLayout<Content: View>: View {
     let threadID: String?
     @ViewBuilder let content: () -> Content
     var body: some View {
-        GeometryReader { geometry in
-            if let threadID, browser.isVisible(for: threadID) {
+        if let threadID, browser.isVisible(for: threadID) {
+            GeometryReader { geometry in
                 HSplitView {
                     content().frame(minWidth: 300).frame(height: geometry.size.height)
                     EmbeddedBrowserPanel(browser: browser, threadID: threadID)
                         .frame(height: geometry.size.height)
                 }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
-            } else {
-                content().frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+            }
+        } else {
+            // The outer detail column now supplies its post-layout size. Pass
+            // that exact size through this wrapper; a flexible frame alone
+            // lets the conversation retain its 600-point ideal width and
+            // leaves the remainder of a wide window blank.
+            GeometryReader { geometry in
+                content()
+                    .frame(
+                        width: geometry.size.width,
+                        height: geometry.size.height,
+                        alignment: .topLeading
+                    )
             }
         }
     }

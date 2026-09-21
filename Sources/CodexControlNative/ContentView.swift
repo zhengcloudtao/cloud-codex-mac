@@ -1,39 +1,389 @@
 import AppKit
 import SwiftUI
 
+enum MainColumnLayout {
+    static let workspaceDefault = 240.0
+    static let workspaceRange = 220.0 ... 380.0
+    static let threadListDefault = 330.0
+    static let threadListRange = 300.0 ... 460.0
+
+    static func clamped(_ value: Double, to range: ClosedRange<Double>) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+private struct ColumnResizeHandle: View {
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    let defaultWidth: Double
+    let accessibilityName: String
+
+    @State private var dragStartWidth: Double?
+    @State private var isHovering = false
+    @State private var isDragging = false
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Color.clear
+                .contentShape(Rectangle())
+
+            Rectangle()
+                .fill(Color.accentColor.opacity(isHovering || isDragging ? 0.85 : 0.18))
+                .frame(width: isHovering || isDragging ? 2 : 1)
+        }
+        // Keep the full hit target inside the preceding column. The native
+        // NavigationSplitView divider sits exactly on the trailing pixel and
+        // can otherwise intercept the mouse before this gesture begins.
+        .frame(width: 24)
+        .contentShape(Rectangle())
+        .zIndex(1_000)
+        .onHover { hovering in
+            isHovering = hovering
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in
+                    if dragStartWidth == nil {
+                        dragStartWidth = MainColumnLayout.clamped(width, to: range)
+                    }
+                    isDragging = true
+                    let start = dragStartWidth ?? width
+                    width = MainColumnLayout.clamped(start + Double(value.translation.width), to: range)
+                }
+                .onEnded { _ in
+                    dragStartWidth = nil
+                    isDragging = false
+                }
+        )
+        .onTapGesture(count: 2) {
+            width = MainColumnLayout.clamped(defaultWidth, to: range)
+        }
+        .accessibilityElement()
+        .accessibilityLabel(accessibilityName)
+        .accessibilityValue("\(Int(MainColumnLayout.clamped(width, to: range).rounded())) 点")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment:
+                width = MainColumnLayout.clamped(width + 20, to: range)
+            case .decrement:
+                width = MainColumnLayout.clamped(width - 20, to: range)
+            @unknown default:
+                break
+            }
+        }
+        .help("左右拖动调整宽度，双击恢复默认宽度")
+    }
+}
+
+private struct DetailColumnSizeReader: NSViewRepresentable {
+    @Binding var size: CGSize
+    @Binding var workspaceWidth: Double
+    @Binding var threadListWidth: Double
+
+    func makeNSView(context: Context) -> DetailColumnSizeProbeView {
+        let view = DetailColumnSizeProbeView()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: DetailColumnSizeProbeView, context: Context) {
+        update(nsView)
+    }
+
+    static func dismantleNSView(_ nsView: DetailColumnSizeProbeView, coordinator: ()) {
+        nsView.disconnect()
+    }
+
+    private func update(_ view: DetailColumnSizeProbeView) {
+        view.onSizeChanged = { newSize in
+            guard abs(size.width - newSize.width) > 0.5
+                    || abs(size.height - newSize.height) > 0.5 else { return }
+            size = newSize
+        }
+        view.onLeadingColumnWidthsChanged = { newWorkspaceWidth, newThreadListWidth in
+            if abs(workspaceWidth - newWorkspaceWidth) > 0.5 {
+                workspaceWidth = MainColumnLayout.clamped(
+                    newWorkspaceWidth,
+                    to: MainColumnLayout.workspaceRange
+                )
+            }
+            if abs(threadListWidth - newThreadListWidth) > 0.5 {
+                threadListWidth = MainColumnLayout.clamped(
+                    newThreadListWidth,
+                    to: MainColumnLayout.threadListRange
+                )
+            }
+        }
+        view.connectWhenReady()
+    }
+}
+
+private final class DetailColumnSizeProbeView: NSView {
+    var onSizeChanged: ((CGSize) -> Void)?
+    var onLeadingColumnWidthsChanged: ((Double, Double) -> Void)?
+    private weak var observedColumn: NSView?
+    private weak var observedSplitView: NSSplitView?
+    private var observationTokens: [NSObjectProtocol] = []
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        connectWhenReady()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        connectWhenReady()
+    }
+
+    override func layout() {
+        super.layout()
+        fillDetailPath()
+    }
+
+    func connectWhenReady() {
+        DispatchQueue.main.async { [weak self] in self?.connect() }
+    }
+
+    func disconnect() {
+        observationTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        observationTokens.removeAll()
+        observedColumn = nil
+        observedSplitView = nil
+    }
+
+    deinit {
+        disconnect()
+    }
+
+    private func connect() {
+        var candidate: NSView? = self
+        var fallbackColumn: NSView?
+        while let current = candidate {
+            if let splitView = current.superview as? NSSplitView, splitView.isVertical {
+                fallbackColumn = fallbackColumn ?? current
+                if splitView.arrangedSubviews.count == 3,
+                   let detailColumn = splitView.arrangedSubviews.last {
+                    observe(column: detailColumn, splitView: splitView)
+                    return
+                }
+            }
+            candidate = current.superview
+        }
+        if let fallbackColumn, let splitView = fallbackColumn.superview as? NSSplitView {
+            observe(column: fallbackColumn, splitView: splitView)
+        }
+    }
+
+    private func observe(column: NSView, splitView: NSSplitView) {
+        guard observedColumn !== column else {
+            reportSize()
+            return
+        }
+        disconnect()
+        observedColumn = column
+        observedSplitView = splitView
+        column.postsFrameChangedNotifications = true
+        let center = NotificationCenter.default
+        observationTokens.append(center.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: column,
+            queue: .main
+        ) { [weak self] _ in self?.reportSize() })
+        observationTokens.append(center.addObserver(
+            forName: NSSplitView.didResizeSubviewsNotification,
+            object: splitView,
+            queue: .main
+        ) { [weak self, weak splitView] _ in
+            self?.reportSize()
+            if let splitView {
+                self?.reportLeadingColumnWidths(in: splitView)
+            }
+        })
+        if let window {
+            observationTokens.append(center.addObserver(
+                forName: NSWindow.didResizeNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in self?.reportSize() })
+        }
+        reportSize()
+        reportLeadingColumnWidths(in: splitView)
+    }
+
+    private func reportLeadingColumnWidths(in splitView: NSSplitView) {
+        guard splitView.arrangedSubviews.count == 3 else { return }
+        let workspaceWidth = splitView.arrangedSubviews[0].frame.width
+        let threadListWidth = splitView.arrangedSubviews[1].frame.width
+        guard workspaceWidth >= MainColumnLayout.workspaceRange.lowerBound - 1,
+              threadListWidth >= MainColumnLayout.threadListRange.lowerBound - 1 else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onLeadingColumnWidthsChanged?(workspaceWidth, threadListWidth)
+        }
+    }
+
+    private func reportSize() {
+        guard let observedColumn else { return }
+        fillDetailPath()
+        let newSize = targetColumnSize(for: observedColumn)
+        guard newSize.width > 0, newSize.height > 0 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.onSizeChanged?(newSize)
+            // Updating SwiftUI state can recreate the platform container with
+            // its ideal width. Re-apply the native column size after that
+            // transaction has committed as well.
+            DispatchQueue.main.async { [weak self] in
+                self?.fillDetailPath()
+            }
+        }
+    }
+
+    /// `NavigationSplitView` occasionally resizes its native column wrapper
+    /// without resizing one or more SwiftUI/AppKit bridge containers inside
+    /// it. Real three-column windows have more bridge layers than isolated
+    /// tests, so pin the complete path from this root-background probe to the
+    /// split item instead of depending on private class names.
+    private func fillDetailPath() {
+        guard let observedColumn else { return }
+        let targetSize = targetColumnSize(for: observedColumn)
+        if targetSize.width > observedColumn.bounds.width + 0.5 {
+            observedColumn.setFrameSize(targetSize)
+        }
+        fillSwiftUIBridges(in: observedColumn)
+        var current = superview
+        while let view = current, view !== observedColumn {
+            guard let parent = view.superview else { return }
+            view.autoresizingMask.formUnion([.width, .height])
+            view.frame = parent.bounds
+            current = parent
+        }
+    }
+
+    private func targetColumnSize(for column: NSView) -> CGSize {
+        guard let contentView = column.window?.contentView else { return column.bounds.size }
+        let frameInWindow = column.convert(column.bounds, to: contentView)
+        // The leading edge of the detail item remains correct even in the
+        // macOS bug where its stored width stops updating. Derive the usable
+        // width from that edge to the live window trailing edge.
+        let width = max(column.bounds.width, contentView.bounds.maxX - frameInWindow.minX)
+        return CGSize(width: width, height: max(column.bounds.height, contentView.bounds.height))
+    }
+
+    private func fillSwiftUIBridges(in root: NSView) {
+        // A ScrollView's document owns its intrinsic height. Expanding bridge
+        // views below the clip view to the detail pane's full bounds truncates
+        // long conversations: the scrollbar can reach its reported end while
+        // the final message is still hidden behind the composer. Inner bridges
+        // still need the live column width, so update only their horizontal
+        // geometry and leave every independently measured height untouched.
+        for child in root.subviews {
+            let parentType = String(describing: type(of: root))
+            let childType = String(describing: type(of: child))
+            let isSplitItemHost = parentType.contains("NSSplitViewItemViewWrapper")
+                && childType.contains("NSHostingView")
+            let isSwiftUIPlatformBridge = parentType.contains("NSHostingView")
+                && childType.contains("PlatformContainer")
+            if isSplitItemHost {
+                child.autoresizingMask = [.width, .height]
+                child.frame = root.bounds
+            } else if isSwiftUIPlatformBridge {
+                // The original platform bug is horizontal: the bridge keeps a
+                // stale 600-point width while the detail column grows. Preserve
+                // its independently measured height so message documents retain
+                // their full vertical scroll range.
+                child.autoresizingMask = [.width]
+                var frame = child.frame
+                frame.origin.x = root.bounds.minX
+                frame.size.width = root.bounds.width
+                child.frame = frame
+            }
+            fillSwiftUIBridges(in: child)
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var threadListScrollID: String?
     @State private var filePreview: LocalFilePreviewTarget?
+    @State private var detailColumnSize: CGSize = .zero
+    @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
     @AppStorage("cloudcodex.showConversationPreview") private var showConversationPreview = true
     @AppStorage("cloudcodex.showUnreadCompletionDot") private var showUnreadCompletionDot = true
     @AppStorage("cloudcodex.showUnreadDockBadge") private var showUnreadDockBadge = true
+    @AppStorage("cloudcodex.workspaceColumnWidth") private var workspaceColumnWidth = MainColumnLayout.workspaceDefault
+    @AppStorage("cloudcodex.threadListColumnWidth") private var threadListColumnWidth = MainColumnLayout.threadListDefault
     @AppStorage(SystemMetricsRefreshInterval.storageKey) private var systemMetricsRefreshInterval = SystemMetricsRefreshInterval.fiveSeconds.rawValue
     private let categoryDragPrefix = "cloudcodex-category://"
+
+    init(initialColumnVisibility: NavigationSplitViewVisibility = .all) {
+        _columnVisibility = State(initialValue: initialColumnVisibility)
+    }
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             folderSidebar
-                .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
+                .overlay(alignment: .trailing) {
+                    ColumnResizeHandle(
+                        width: $workspaceColumnWidth,
+                        range: MainColumnLayout.workspaceRange,
+                        defaultWidth: MainColumnLayout.workspaceDefault,
+                        accessibilityName: "调整工作区宽度"
+                    )
+                }
+                .navigationSplitViewColumnWidth(
+                    min: MainColumnLayout.workspaceRange.lowerBound,
+                    ideal: renderedWorkspaceColumnWidth,
+                    max: MainColumnLayout.workspaceRange.upperBound
+                )
         } content: {
             threadList
-                .navigationSplitViewColumnWidth(min: 280, ideal: 330, max: 430)
+                .overlay(alignment: .trailing) {
+                    ColumnResizeHandle(
+                        width: $threadListColumnWidth,
+                        range: MainColumnLayout.threadListRange,
+                        defaultWidth: MainColumnLayout.threadListDefault,
+                        accessibilityName: "调整会话列表宽度"
+                    )
+                }
+                .navigationSplitViewColumnWidth(
+                    min: MainColumnLayout.threadListRange.lowerBound,
+                    ideal: renderedThreadListColumnWidth,
+                    max: MainColumnLayout.threadListRange.upperBound
+                )
         } detail: {
-            // Detail content accepts the column's width, never the other way
-            // around. Long prompts/code must not renegotiate the split view.
-            GeometryReader { viewport in
-                BrowserConversationLayout(browser: model.browser, threadID: model.selectedThreadID) { conversation }
-                    .frame(width: viewport.size.width, height: viewport.size.height)
-            }
+            // NavigationSplitView can give the detail hosting container its
+            // final width while leaving the SwiftUI root at its 600-point
+            // ideal size. Turn that container size into an exact proposal so
+            // the conversation and scrollbar grow during live resizing.
+            BrowserConversationLayout(browser: model.browser, threadID: model.selectedThreadID) { conversation }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(
+                    DetailColumnSizeReader(
+                        size: $detailColumnSize,
+                        workspaceWidth: $workspaceColumnWidth,
+                        threadListWidth: $threadListColumnWidth
+                    )
+                        // Selecting a conversation replaces several SwiftUI/AppKit
+                        // bridge views without resizing the window. Recreate the
+                        // native probe so it connects to the new detail hierarchy
+                        // immediately instead of waiting for the user's first drag.
+                        .id(detailLayoutRevision)
+                )
         }
-        // A selected conversation can contain a wide code block or attachment.
-        // Keep all three columns balanced instead of letting that detail content
-        // compress the workspace/sidebar columns during selection.
-        .navigationSplitViewStyle(.balanced)
+        // When the leading columns are hidden, the conversation must reclaim
+        // their width immediately. The balanced style preserves the old detail
+        // column width and leaves a large blank strip on the right.
+        .navigationSplitViewStyle(.prominentDetail)
         .toolbar { toolbar }
         .environment(\.openURL, OpenURLAction { url in
             if ["https", "http"].contains(url.scheme?.lowercased() ?? ""), let threadID = model.selectedThreadID {
@@ -70,6 +420,9 @@ struct ContentView: View {
         .onAppear(perform: acknowledgeVisibleCompletions)
         .onAppear(perform: applySystemMetricsRefreshInterval)
         .onChange(of: model.unreadCompletions.unread) { _, _ in updateUnreadDockBadge() }
+        .onChange(of: model.selectedThreadID) { _, _ in
+            detailLayoutRevision &+= 1
+        }
         .onChange(of: showUnreadDockBadge) { _, _ in updateUnreadDockBadge() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             acknowledgeVisibleCompletions()
@@ -77,6 +430,28 @@ struct ContentView: View {
         .onChange(of: systemMetricsRefreshInterval) { _, _ in applySystemMetricsRefreshInterval() }
         .onChange(of: appearancePreference) { _, _ in
             applyAppearancePreference()
+        }
+    }
+
+    private var renderedWorkspaceColumnWidth: CGFloat {
+        switch columnVisibility {
+        case .doubleColumn, .detailOnly:
+            return 0
+        case .automatic, .all:
+            return CGFloat(MainColumnLayout.clamped(workspaceColumnWidth, to: MainColumnLayout.workspaceRange))
+        default:
+            return CGFloat(MainColumnLayout.clamped(workspaceColumnWidth, to: MainColumnLayout.workspaceRange))
+        }
+    }
+
+    private var renderedThreadListColumnWidth: CGFloat {
+        switch columnVisibility {
+        case .detailOnly:
+            return 0
+        case .automatic, .all, .doubleColumn:
+            return CGFloat(MainColumnLayout.clamped(threadListColumnWidth, to: MainColumnLayout.threadListRange))
+        default:
+            return CGFloat(MainColumnLayout.clamped(threadListColumnWidth, to: MainColumnLayout.threadListRange))
         }
     }
 
@@ -577,13 +952,21 @@ struct ContentView: View {
         } else if let thread = model.selectedThread {
             VStack(spacing: 0) {
                 ConversationHeader(thread: thread)
+                    .zIndex(2)
                 Divider()
+                    .zIndex(2)
                 MessageList(
                     messages: model.messages,
                     collaborationTasks: model.selectedCollaborationTasks,
                     isLoading: model.isConversationLoading,
                     isThinking: model.isSelectedThreadProcessing
                 )
+                    .frame(width: detailColumnSize.width > 0 ? detailColumnSize.width : nil)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // The window reserves a narrow trailing safe-area strip on
+                    // macOS. It belongs to the vertical scroller, not to empty
+                    // conversation content, so let the timeline occupy it.
+                    .ignoresSafeArea(.container, edges: .trailing)
                     .id(thread.id)
                 if !model.selectedUserInputRequests.isEmpty {
                     Divider()
@@ -605,6 +988,8 @@ struct ContentView: View {
                     Composer(mode: .conversation)
                 }
             }
+            .frame(width: detailColumnSize.width > 0 ? detailColumnSize.width : nil)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView {
                 Label("选择一个会话", systemImage: "message")
@@ -1235,7 +1620,10 @@ private struct ConversationHeader: View {
                 .frame(width: 36, height: 36)
                 .background(.black, in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 2) {
-                Text(thread.displayName).font(.headline).lineLimit(1).truncationMode(.tail)
+                Text(thread.displayName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(thread.cwd)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1243,6 +1631,7 @@ private struct ConversationHeader: View {
                     .truncationMode(.middle)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
             if let model = thread.model {
                 Text(TurnModelMetadata(model: model, reasoningEffort: thread.reasoningEffort).displayLabel ?? model)
                     .font(.caption)
@@ -1256,7 +1645,14 @@ private struct ConversationHeader: View {
             }
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 12)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+        // Keep the title bar opaque and above the timeline. Without its own
+        // background, a temporarily oversized NSScrollView document remains
+        // visible behind the title/path while switching or restoring a task.
+        .background(Color(nsColor: .windowBackgroundColor))
+        .contentShape(Rectangle())
+        .accessibilityIdentifier("conversation-header")
     }
 }
 
@@ -1271,10 +1667,11 @@ private struct MessageList: View {
     @State private var hasNewContentBelow = false
     @State private var visibleMessageLimit = 12
     @State private var viewportResetID = UUID()
-    @State private var scrollViewportController = MessageScrollViewportController()
+    @StateObject private var scrollViewportController = MessageScrollViewportController()
     @State private var hasPositionedInitialHistory = false
 
     private let messageBatchSize = 12
+    private let timelinePadding: CGFloat = 22
 
     var body: some View {
         let entries = ConversationTimeline.entries(from: messages)
@@ -1286,18 +1683,9 @@ private struct MessageList: View {
         }()
         ZStack(alignment: .bottomTrailing) {
             ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 18) {
-                        if messages.isEmpty && isLoading {
-                            Group {
-                                if showDelayedLoadingIndicator {
-                                    ProgressView("正在读取会话…")
-                                } else {
-                                    Color.clear
-                                }
-                            }
-                            .frame(minHeight: 110)
-                        } else if messages.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 18) {
+                        if messages.isEmpty && !isLoading {
                             ContentUnavailableView("开始对话", systemImage: "sparkles", description: Text("在下方输入任务并发送给 Codex。"))
                                 .padding(.top, 80)
                         }
@@ -1333,7 +1721,14 @@ private struct MessageList: View {
                             VStack(spacing: 0) {
                                 switch entry {
                                 case .message(let message):
-                                    MessageBubble(message: message)
+                                    MessageBubble(
+                                        message: message,
+                                        availableWidth: max(
+                                            0,
+                                            scrollViewportController.viewportWidth
+                                                - timelinePadding * 2
+                                        )
+                                    )
                                         .background(messageEntryOffsetReader(id: entry.id))
                                 case .process(let group):
                                     ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
@@ -1362,38 +1757,53 @@ private struct MessageList: View {
                             ThinkingIndicator()
                                 .id("persistent-thinking-indicator")
                         }
-                    }
-                        .padding(22)
-                        // Apply the width outside the padding. The padded
-                        // timeline then receives the viewport width minus its
-                        // insets instead of expanding the scroll document.
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            ScrollLatestObserver(
-                                isAtLatest: $isAtLatest,
-                                viewportController: scrollViewportController
-                            )
-                        )
-                    }
-                    .defaultScrollAnchor(.bottom)
-                    .coordinateSpace(name: "message-scroll-viewport")
-                    .id(viewportResetID)
-                    .onChange(of: visibleMessageLimit) { _, _ in
-                        guard let (id, alignment) = scrollViewportController.pendingAnchor else { return }
-                        scrollViewportController.pendingAnchor = nil
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) {
-                            proxy.scrollTo(id, anchor: alignment)
                         }
+                            // Use AppKit's actual clip-view width. SwiftUI can
+                            // propose the whole window width to a detail child,
+                            // even though NavigationSplitView visibly clips it
+                            // to the third column.
+                            .frame(
+                                width: max(0, scrollViewportController.viewportWidth - timelinePadding * 2),
+                                alignment: .leading
+                            )
+                            .padding(timelinePadding)
+                            .background(scrollLatestObserver)
+                        }
+                        // The timeline is vertical-only. Explicitly occupy the
+                        // complete detail pane so collapsing a sidebar or live
+                        // resizing the window also moves the scrollbar instead
+                        // of leaving the ScrollView at its previous ideal width.
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        // `.bottom` also centers horizontally (x = 0.5), which
+                        // shifts a wide timeline to the right in the third
+                        // column and clips its trailing controls. This scroll
+                        // view is vertical-only, so pin the unused axis left.
+                        .defaultScrollAnchor(.bottomLeading)
+                        .coordinateSpace(name: "message-scroll-viewport")
+                        .id(viewportResetID)
+                        .onChange(of: visibleMessageLimit) { _, _ in
+                            guard let (id, alignment) = scrollViewportController.pendingAnchor else { return }
+                            scrollViewportController.pendingAnchor = nil
+                            var transaction = Transaction()
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                proxy.scrollTo(id, anchor: alignment)
+                            }
+                        }
+                    .onPreferenceChange(MessageEntryViewportOffsetPreferenceKey.self) { offsets in
+                        // Geometry is a measurement cache, not display state.
+                        // Publishing every lazy-layout offset back into SwiftUI
+                        // invalidates the list while it is still placing its rows.
+                        scrollViewportController.entryViewportOffsets = offsets
                     }
-                }
-                .onPreferenceChange(MessageEntryViewportOffsetPreferenceKey.self) { offsets in
-                    // Geometry is a measurement cache, not display state.
-                    // Publishing every lazy-layout offset back into SwiftUI
-                    // invalidates the list while it is still placing its rows.
-                    scrollViewportController.entryViewportOffsets = offsets
-                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+
+            if messages.isEmpty && isLoading && showDelayedLoadingIndicator {
+                ConversationLoadingView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
+            }
 
             if hasNewContentBelow && !isAtLatest {
                 Button {
@@ -1412,6 +1822,7 @@ private struct MessageList: View {
                 .padding(.bottom, 14)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             isAtLatest = true
             hasUnseenUpdates = false
@@ -1459,6 +1870,13 @@ private struct MessageList: View {
                 hasNewContentBelow = hasUnseenUpdates
             }
         }
+    }
+
+    private var scrollLatestObserver: ScrollLatestObserver {
+        ScrollLatestObserver(
+            isAtLatest: $isAtLatest,
+            viewportController: scrollViewportController
+        )
     }
 
     private func prependAnchorID(in entries: [ConversationTimelineEntry]) -> String? {
@@ -1562,6 +1980,43 @@ private struct CollaborationTaskSummaryView: View, Equatable {
         if task.status == "已停止" { return .orange }
         if task.status == "已完成" { return .green }
         return .secondary
+    }
+}
+
+private struct ConversationLoadingView: View {
+    var body: some View {
+        VStack(spacing: 13) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.11))
+                    .frame(width: 46, height: 46)
+                Circle()
+                    .stroke(Color.accentColor.opacity(0.20), lineWidth: 1)
+                    .frame(width: 46, height: 46)
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(.accentColor)
+            }
+
+            VStack(spacing: 5) {
+                Text("正在读取会话")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text("正在同步消息与执行记录…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 30)
+        .padding(.vertical, 22)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.10), radius: 14, y: 5)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("正在读取会话，正在同步消息与执行记录")
     }
 }
 
@@ -1693,6 +2148,22 @@ private final class ScrollLatestProbeView: NSView {
         viewportController?.attach(scrollView)
 
         let center = NotificationCenter.default
+        scrollView.postsFrameChangedNotifications = true
+        observationTokens.append(center.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: scrollView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reportCurrentPosition()
+        })
+        scrollView.contentView.postsFrameChangedNotifications = true
+        observationTokens.append(center.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reportCurrentPosition()
+        })
         scrollView.contentView.postsBoundsChangedNotifications = true
         observationTokens.append(center.addObserver(
             forName: NSView.boundsDidChangeNotification,
@@ -1718,6 +2189,20 @@ private final class ScrollLatestProbeView: NSView {
     private func reportCurrentPosition() {
         guard let scrollView = observedScrollView,
               let documentView = scrollView.documentView else { return }
+        // The clip view is the source of truth during live window resizing and
+        // NavigationSplitView visibility changes. Unlike the old background
+        // probe, its width cannot be held back by the document's previous size.
+        viewportController?.updateViewportWidth(scrollView.contentView.bounds.width)
+        // This timeline is vertically scrollable only. A previously oversized
+        // document can leave AppKit's clip view with a stale horizontal origin
+        // after the content is narrowed, shifting every row right and clipping
+        // trailing controls. Reset x without disturbing the reading position.
+        let leadingX = documentView.bounds.minX
+        let currentOrigin = scrollView.contentView.bounds.origin
+        if abs(currentOrigin.x - leadingX) > 0.5 {
+            scrollView.contentView.scroll(to: NSPoint(x: leadingX, y: currentOrigin.y))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
         let visibleRect = scrollView.documentVisibleRect
         let documentBounds = documentView.bounds
         let threshold: CGFloat = 28
@@ -1733,7 +2218,8 @@ private final class ScrollLatestProbeView: NSView {
     }
 }
 
-private final class MessageScrollViewportController {
+private final class MessageScrollViewportController: ObservableObject {
+    @Published private(set) var viewportWidth: CGFloat = 600
     var pendingAnchor: (String, UnitPoint)?
     var entryViewportOffsets: [String: CGRect] = [:]
     private weak var scrollView: NSScrollView?
@@ -1742,15 +2228,25 @@ private final class MessageScrollViewportController {
         self.scrollView = scrollView
     }
 
+    func updateViewportWidth(_ width: CGFloat) {
+        guard width > 0, abs(viewportWidth - width) > 0.5 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, abs(self.viewportWidth - width) > 0.5 else { return }
+            self.viewportWidth = width
+        }
+    }
+
     func prependAlignment(for id: String?) -> UnitPoint {
         guard let id,
               let frame = entryViewportOffsets[id],
               let scrollView,
-              scrollView.contentView.bounds.height > 0 else { return .top }
+              scrollView.contentView.bounds.height > 0 else {
+            return UnitPoint(x: 0, y: 0)
+        }
         // For a row of height h in viewport H, scrollTo places its top at
         // (H - h) * anchor.y. Solve for the existing measured top offset.
         let available = scrollView.contentView.bounds.height - frame.height
-        guard abs(available) > 0.5 else { return .top }
+        guard abs(available) > 0.5 else { return UnitPoint(x: 0, y: 0) }
         return UnitPoint(x: 0, y: frame.minY / available)
     }
 }
@@ -1785,9 +2281,29 @@ enum HistoryPrependGeometry {
 private struct MessageBubble: View, Equatable {
     @EnvironmentObject private var model: AppModel
     let message: ChatMessage
+    let availableWidth: CGFloat
 
     static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
-        lhs.message == rhs.message
+        lhs.message == rhs.message && abs(lhs.availableWidth - rhs.availableWidth) < 0.5
+    }
+
+    private var userLeadingSpacer: CGFloat {
+        min(70, max(16, availableWidth * 0.12))
+    }
+
+    private var messageColumnMaximumWidth: CGFloat {
+        let reservedWidth: CGFloat
+        if message.role == .user {
+            // Leading breathing room, two HStack gaps and the avatar.
+            reservedWidth = userLeadingSpacer + 16 + 26
+        } else {
+            // Sparkle icon, two gaps and the trailing spacer.
+            reservedWidth = 26 + 16 + 30
+        }
+        return min(
+            UserMessagePresentation.maximumBubbleWidth,
+            max(180, availableWidth - reservedWidth)
+        )
     }
 
     @ViewBuilder
@@ -1798,7 +2314,7 @@ private struct MessageBubble: View, Equatable {
             ActivityBubble(message: message)
         } else {
             HStack(alignment: .top) {
-                if message.role == .user { Spacer(minLength: 70) }
+                if message.role == .user { Spacer(minLength: userLeadingSpacer) }
                 if message.role == .assistant {
                     Image(systemName: "sparkles")
                         .foregroundStyle(.blue)
@@ -1814,7 +2330,14 @@ private struct MessageBubble: View, Equatable {
                                 InterruptedMessageEditor(message: message)
                             } else {
                                 bubbleSurface {
-                                    UserMessageContent(message: message)
+                                    UserMessageContent(
+                                        message: message,
+                                        maximumContentWidth: max(
+                                            80,
+                                            messageColumnMaximumWidth
+                                                - UserMessagePresentation.bubbleHorizontalPadding * 2
+                                        )
+                                    )
                                 }
                             }
                             HStack(spacing: 9) {
@@ -1851,7 +2374,10 @@ private struct MessageBubble: View, Equatable {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                    .frame(maxWidth: 720, alignment: message.role == .user ? .trailing : .leading)
+                    .frame(
+                        maxWidth: messageColumnMaximumWidth,
+                        alignment: message.role == .user ? .trailing : .leading
+                    )
                 if message.role == .user {
                     Image(systemName: "person.fill")
                         .font(.caption.weight(.semibold))
@@ -2319,6 +2845,7 @@ enum UserMessagePresentation {
 
 private struct UserMessageContent: View {
     let message: ChatMessage
+    let maximumContentWidth: CGFloat
     @State private var isExpanded = false
 
     private var displayedText: String {
@@ -2341,8 +2868,23 @@ private struct UserMessageContent: View {
 
             if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    ReliableSelectableText(text: displayedText)
-                        .frame(maxWidth: UserMessagePresentation.maximumContentWidth, alignment: .leading)
+                    let selectableText = ReliableSelectableText(
+                        text: displayedText,
+                        maximumWidth: maximumContentWidth
+                    )
+
+                    if message.attachments.isEmpty {
+                        selectableText
+                            .frame(maxWidth: maximumContentWidth, alignment: .leading)
+                    } else {
+                        // Attachment rows already establish a card-like
+                        // message. Use the final measured content width instead
+                        // of accepting HStack's provisional narrow proposal;
+                        // otherwise text and metadata collapse into a thin
+                        // vertical strip in the third column.
+                        selectableText
+                            .frame(width: maximumContentWidth, alignment: .leading)
+                    }
 
                     if UserMessagePresentation.shouldCollapse(message.text) {
                         Button {
@@ -2545,84 +3087,109 @@ struct ConversationProcessView: View, Equatable {
     var body: some View {
         let steps = group.steps
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                isExpanded.toggle()
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12)
-                    if isCurrent {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: group.hasFailure ? "exclamationmark.circle" : "list.bullet.rectangle")
-                            .foregroundStyle(group.hasFailure ? Color.orange : .secondary)
-                    }
-                    Text("执行过程")
-                        .font(.callout.weight(.medium))
-                    Text("\(steps.count) 项")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if let start = group.progress?.startedAt {
-                        if let end = group.progress?.completedAt {
-                            Text("\(max(0, Int(end.timeIntervalSince(start)))) 秒")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        } else if isCurrent {
-                            Text(start, style: .timer)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    Spacer(minLength: 8)
-                    if isCurrent, let startedAt = group.latestStep?.startedAt ?? group.progress?.startedAt {
-                        ActivityElapsedLabel(startedAt: startedAt)
-                    }
-                    Text(group.status(isCurrent: isCurrent))
-                        .font(.caption)
-                        .foregroundStyle(isCurrent ? Color.blue : group.hasFailure ? .orange : .secondary)
-                    if isCurrent {
-                        Button {
-                            Task { await model.cancelTurn() }
-                        } label: {
-                            Label("停止", systemImage: "stop.fill")
-                                .labelStyle(.titleAndIcon)
-                        }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
-                        .foregroundStyle(.orange)
-                        .help("停止当前任务；已经完成的文件修改不会自动回滚")
-                    }
-                }
-                .contentShape(Rectangle())
-                .padding(.horizontal, 13)
-                .padding(.vertical, 11)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("执行过程，\(steps.count) 项，\(group.status(isCurrent: isCurrent))，\(isExpanded ? "收起" : "展开")")
-
-            if isCurrent || group.hasFailure {
-                HStack(spacing: 8) {
-                    if group.failureCount > 0 {
-                        Label("\(group.failureCount) 项失败或被拒绝", systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                    } else if group.hasFailure {
-                        Text("任务未成功，展开查看原因")
-                            .foregroundStyle(.orange)
-                    }
-                    if isCurrent {
-                        Text(group.latestStep?.isStreaming == true
-                             ? "当前：\(group.latestStep?.activityTitle ?? "正在处理")"
-                             : "正在继续思考，等待下一步…")
+            HStack(spacing: 8) {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    HStack(alignment: .center, spacing: 9) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
+                            .frame(width: 12)
+
+                        if isCurrent {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: group.hasFailure ? "exclamationmark.circle" : "list.bullet.rectangle")
+                                .foregroundStyle(group.hasFailure ? Color.orange : .secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 7) {
+                                Text("执行过程")
+                                    .font(.callout.weight(.semibold))
+                                    .fixedSize(horizontal: true, vertical: false)
+                                Text("\(steps.count) 项")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.10), in: Capsule())
+                                    .fixedSize(horizontal: true, vertical: false)
+                                if let start = group.progress?.startedAt {
+                                    if let end = group.progress?.completedAt {
+                                        Text("\(max(0, Int(end.timeIntervalSince(start)))) 秒")
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.tertiary)
+                                    } else if isCurrent {
+                                        Text(start, style: .timer)
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                            }
+
+                            if group.failureCount > 0 {
+                                Label("\(group.failureCount) 项失败或被拒绝", systemImage: "exclamationmark.triangle")
+                                    .foregroundStyle(.orange)
+                            } else if group.hasFailure {
+                                Text("任务未成功，展开查看原因")
+                                    .foregroundStyle(.orange)
+                            } else if isCurrent {
+                                Text(group.latestStep?.isStreaming == true
+                                     ? "当前：\(group.latestStep?.activityTitle ?? "正在处理")"
+                                     : "正在继续思考，等待下一步…")
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if isCurrent,
+                           group.latestStep?.isStreaming == true,
+                           let startedAt = group.latestStep?.startedAt {
+                            ActivityElapsedLabel(startedAt: startedAt)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+
+                        Text(group.status(isCurrent: isCurrent))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(isCurrent ? Color.blue : group.hasFailure ? .orange : .secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                (isCurrent ? Color.blue : group.hasFailure ? Color.orange : Color.secondary)
+                                    .opacity(0.10),
+                                in: Capsule()
+                            )
+                            .fixedSize(horizontal: true, vertical: false)
                     }
+                    .contentShape(Rectangle())
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .font(.caption)
-                .lineLimit(1)
-                .padding(.horizontal, 35)
-                .padding(.bottom, 11)
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel("执行过程，\(steps.count) 项，\(group.status(isCurrent: isCurrent))，\(isExpanded ? "收起" : "展开")")
+
+                if isCurrent {
+                    Button {
+                        Task { await model.cancelTurn() }
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.orange)
+                    .background(Color.orange.opacity(0.10), in: Circle())
+                    .help("停止当前任务；已经完成的文件修改不会自动回滚")
+                    .accessibilityLabel("停止当前任务")
+                    .fixedSize()
+                }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
 
             if isExpanded {
                 Divider()
@@ -2690,8 +3257,14 @@ struct ConversationProcessView: View, Equatable {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.secondary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+        .background(
+            (isCurrent ? Color.blue.opacity(0.045) : Color.secondary.opacity(0.035)),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isCurrent ? Color.blue.opacity(0.18) : Color.primary.opacity(0.08), lineWidth: 1)
+        }
     }
 
 }
@@ -3465,10 +4038,15 @@ private struct WaitingMessageQueueRow: View {
                 Button {
                     Task { await model.deliverWaitingMessage(item.id, steer: true) }
                 } label: {
-                    Label("立即引导", systemImage: "arrow.turn.up.right")
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.turn.up.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 18, height: 18)
+                            .background(Color.white.opacity(0.16), in: Circle())
+                        Text("立即引导")
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(WaitingMessagePrimaryActionButtonStyle())
                 .help("将这条消息补充给正在执行的任务，沿用当前任务的模型。")
             } else if item.error != nil {
                 Button {
@@ -3491,6 +4069,45 @@ private struct WaitingMessageQueueRow: View {
             .tint(.red)
             .help("从等待队列移除")
         }
+    }
+}
+
+private struct WaitingMessagePrimaryActionButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.leading, 7)
+            .padding(.trailing, 11)
+            .frame(height: 28)
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.blue, Color.blue.opacity(0.78)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            }
+            .shadow(
+                color: Color.blue.opacity(configuration.isPressed ? 0.12 : (isHovered ? 0.34 : 0.24)),
+                radius: configuration.isPressed ? 2 : (isHovered ? 6 : 4),
+                y: configuration.isPressed ? 1 : 2
+            )
+            .scaleEffect(configuration.isPressed ? 0.97 : (isHovered ? 1.01 : 1))
+            .brightness(configuration.isPressed ? -0.05 : (isHovered ? 0.04 : 0))
+            .opacity(isEnabled ? 1 : 0.48)
+            .onHover { isHovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.14), value: isHovered)
     }
 }
 

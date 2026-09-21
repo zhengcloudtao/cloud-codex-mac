@@ -45,7 +45,7 @@ struct AccountOverview {
 
     static func remaining(_ window: RemoteUsageSnapshot.Window?) -> String {
         guard let used = window?.usedPercent else { return "未提供" }
-        return "\(Int(max(0, min(100, 100 - used))))%"
+        return String(format: "%.2f%%", max(0, min(100, 100 - used)))
     }
 
     var primaryBucket: RemoteUsageSnapshot.Bucket? {

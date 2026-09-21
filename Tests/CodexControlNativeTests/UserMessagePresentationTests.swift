@@ -97,4 +97,16 @@ final class UserMessagePresentationTests: XCTestCase {
             260
         )
     }
+
+    func testFinalBubbleWidthCapsSingleLineTextAfterThreeColumnLayout() {
+        XCTAssertEqual(
+            ReliableSelectableText.resolvedWidth(
+                proposedWidth: 520,
+                naturalWidth: 600,
+                hasExplicitLineBreak: false,
+                maximumWidth: 360
+            ),
+            360
+        )
+    }
 }

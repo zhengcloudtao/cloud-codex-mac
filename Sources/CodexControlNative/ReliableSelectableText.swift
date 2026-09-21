@@ -8,6 +8,7 @@ import SwiftUI
 /// selection when unrelated conversation state refreshes.
 struct ReliableSelectableText: NSViewRepresentable {
     let text: String
+    var maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
 
     func makeNSView(context: Context) -> NSTextView {
         let textView = NSTextView(frame: .zero)
@@ -49,7 +50,8 @@ struct ReliableSelectableText: NSViewRepresentable {
         let width = Self.resolvedWidth(
             proposedWidth: proposal.width,
             naturalWidth: naturalWidth,
-            hasExplicitLineBreak: text.contains("\n")
+            hasExplicitLineBreak: text.contains("\n"),
+            maximumWidth: maximumWidth
         )
 
         textView.frame.size.width = width
@@ -62,24 +64,30 @@ struct ReliableSelectableText: NSViewRepresentable {
         return CGSize(width: width, height: ceil(font.ascender - font.descender + font.leading))
     }
 
-    static func resolvedMaximumWidth(proposedWidth: CGFloat?, naturalWidth: CGFloat) -> CGFloat {
+    static func resolvedMaximumWidth(
+        proposedWidth: CGFloat?,
+        naturalWidth: CGFloat,
+        maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
+    ) -> CGFloat {
         // HStack's first sizing pass can propose zero or one point to an
         // NSViewRepresentable. Accepting that value stacks every glyph in a
         // vertical strip. Treat only a useful proposal as authoritative.
         if let proposedWidth, proposedWidth >= 80 {
-            return min(UserMessagePresentation.maximumContentWidth, proposedWidth)
+            return min(maximumWidth, proposedWidth)
         }
-        return min(UserMessagePresentation.maximumContentWidth, max(80, naturalWidth))
+        return min(maximumWidth, max(80, naturalWidth))
     }
 
     static func resolvedWidth(
         proposedWidth: CGFloat?,
         naturalWidth: CGFloat,
-        hasExplicitLineBreak: Bool
+        hasExplicitLineBreak: Bool,
+        maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
     ) -> CGFloat {
-        let maximumWidth = resolvedMaximumWidth(
+        let proposedMaximumWidth = resolvedMaximumWidth(
             proposedWidth: proposedWidth,
-            naturalWidth: naturalWidth
+            naturalWidth: naturalWidth,
+            maximumWidth: maximumWidth
         )
 
         // SwiftUI can first offer an artificially narrow width while the
@@ -89,17 +97,17 @@ struct ReliableSelectableText: NSViewRepresentable {
         // multiline messages still honor the container width so they remain
         // safe in a narrow detail column.
         if !hasExplicitLineBreak,
-           naturalWidth <= UserMessagePresentation.maximumContentWidth {
+           naturalWidth <= maximumWidth {
             // Once the row has a useful final proposal, let the native text
             // container use that available width as well. Returning only the
             // natural measurement leaves NSTextView narrower than its SwiftUI
             // background and can wrap the final one or two CJK glyphs even
             // though the bubble has plenty of empty space.
             return min(
-                UserMessagePresentation.maximumContentWidth,
-                max(1, naturalWidth, maximumWidth)
+                maximumWidth,
+                max(1, naturalWidth, proposedMaximumWidth)
             )
         }
-        return maximumWidth
+        return proposedMaximumWidth
     }
 }

@@ -46,10 +46,10 @@ final class AccountOverviewTests: XCTestCase {
             ]]
         ])
         XCTAssertEqual(account.plan, "pro")
-        XCTAssertEqual(account.remaining(minutes: 300), "30%")
-        XCTAssertEqual(account.remaining(minutes: 10_080), "75%")
-        XCTAssertEqual(account.compactRemaining(minutes: 300), "30%")
-        XCTAssertEqual(account.compactRemaining(minutes: 10_080), "75%")
+        XCTAssertEqual(account.remaining(minutes: 300), "30.00%")
+        XCTAssertEqual(account.remaining(minutes: 10_080), "75.00%")
+        XCTAssertEqual(account.compactRemaining(minutes: 300), "30.00%")
+        XCTAssertEqual(account.compactRemaining(minutes: 10_080), "75.00%")
         XCTAssertEqual(account.compactResetCredits, "2 次")
         XCTAssertEqual(account.usage.resetCredits?.availableCount, 2)
         XCTAssertEqual(account.usage.resetCredits?.expirations, [300, 400])
@@ -72,8 +72,21 @@ final class AccountOverviewTests: XCTestCase {
         ])
 
         XCTAssertNil(account.compactRemaining(minutes: 300))
-        XCTAssertEqual(account.compactRemaining(minutes: 10_080), "74%")
+        XCTAssertEqual(account.compactRemaining(minutes: 10_080), "74.00%")
         XCTAssertEqual(account.compactResetCredits, "0 次")
+    }
+
+    func testRemainingQuotaKeepsTwoDecimalPrecision() {
+        let window: [String: Any] = [
+            "usedPercent": 10.123,
+            "windowDurationMins": 10_080
+        ]
+        let account = AccountOverview.parse([
+            "rateLimits": ["primary": window]
+        ])
+
+        XCTAssertEqual(account.remaining(minutes: 10_080), "89.88%")
+        XCTAssertEqual(account.compactRemaining(minutes: 10_080), "89.88%")
     }
 
     func testWeeklyRecommendationUsesRemainingQuotaAndResetTime() throws {
