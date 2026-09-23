@@ -20,6 +20,8 @@ final class ConversationLayoutTests: XCTestCase {
             MainColumnLayout.clamped(375, to: MainColumnLayout.threadListRange),
             375
         )
+        XCTAssertLessThan(EmbeddedBrowserLayout.minimumWidth, EmbeddedBrowserLayout.idealWidth)
+        XCTAssertLessThan(EmbeddedBrowserLayout.idealWidth, EmbeddedBrowserLayout.maximumWidth)
     }
 
     func testDetailOnlyTimelineTracksLiveWindowWidth() throws {
@@ -138,6 +140,180 @@ final class ConversationLayoutTests: XCTestCase {
         } else {
             XCTAssertEqual(visible.minY, document.bounds.minY, accuracy: 1)
         }
+    }
+
+    func testFourColumnBrowserLayoutFillsConversationPaneWithoutOverflow() throws {
+        let suiteName = "CloudCodex.FourColumnLayoutTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(remoteDefaults: defaults)
+        let thread = try makeThread(
+            id: "four-column-layout",
+            name: "四栏状态下会话和内置浏览器正确分配宽度",
+            preview: "验证会话区不会留下黑色空白或伸入浏览器"
+        )
+        model.threads = [thread]
+        model.selectedThreadID = thread.id
+        model.messages = [
+            .init(id: "four-column-question", role: .user, text: "打开内置浏览器后优化四栏布局"),
+            .init(
+                id: "four-column-answer",
+                role: .assistant,
+                text: String(repeating: "会话时间线必须填满自己的分栏，同时不能占用浏览器分栏。", count: 12)
+            )
+        ]
+        model.browser.show(threadID: thread.id)
+        let browserTab = try model.browser.create(threadID: thread.id)
+        browserTab.webView.loadHTMLString("<html><body style='margin:0;background:#246;color:white'>Responsive browser fixture</body></html>", baseURL: nil)
+
+        let contentSize = NSSize(width: 2_300, height: 1_200)
+        let hostingView = NSHostingView(rootView: ContentView().environmentObject(model))
+        let window = NSWindow(
+            contentRect: NSRect(origin: NSPoint(x: -4_000, y: -4_000), size: contentSize),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hostingView
+        hostingView.frame = NSRect(origin: .zero, size: contentSize)
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+
+        settleLayout(hostingView)
+        let outerSplit = try threeColumnSplitView(in: hostingView)
+        let detail = outerSplit.arrangedSubviews[2]
+        let timeline = try XCTUnwrap(
+            descendants(of: detail)
+                .compactMap { $0 as? NSScrollView }
+                .filter {
+                    !$0.isHiddenOrHasHiddenAncestor
+                        && $0.contentView.bounds.width > 300
+                        && $0.convert($0.bounds, to: hostingView).maxX
+                            < hostingView.bounds.maxX - EmbeddedBrowserLayout.minimumWidth + 1
+                }
+                .max {
+                    $0.contentView.bounds.width * $0.contentView.bounds.height
+                        < $1.contentView.bounds.width * $1.contentView.bounds.height
+                }
+        )
+        let detailFrame = detail.convert(detail.bounds, to: hostingView)
+        let timelineFrame = timeline.convert(timeline.bounds, to: hostingView)
+        let trailingPanelWidth = detailFrame.maxX - timelineFrame.maxX
+        try writeLayoutPreviewIfRequested(hostingView, name: "four-column-layout-preview.png")
+
+        XCTAssertGreaterThanOrEqual(
+            trailingPanelWidth,
+            EmbeddedBrowserLayout.minimumWidth - 1,
+            "The four-column conversation must leave the requested browser pane visible"
+        )
+        XCTAssertLessThanOrEqual(
+            trailingPanelWidth,
+            EmbeddedBrowserLayout.idealWidth + 64,
+            "The browser divider must not create an extra blank strip"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(timeline.documentView).frame.width,
+            timeline.contentView.bounds.width,
+            accuracy: 1
+        )
+
+        let inspectorSplit = try XCTUnwrap(
+            descendants(of: detail)
+                .compactMap { $0 as? NSSplitView }
+                .first {
+                    $0.isVertical
+                        && $0.arrangedSubviews.count == 2
+                        && timeline.isDescendant(of: $0.arrangedSubviews[0])
+                },
+            "Expected the native inspector split around the conversation and browser"
+        )
+        let originalDetailWidth = detail.frame.width
+        let probe = try XCTUnwrap(descendants(of: detail).compactMap { $0 as? DetailColumnSizeProbeView }.first)
+        XCTAssertTrue(probe.isDescendant(of: inspectorSplit.arrangedSubviews[0]),
+                      "The size probe must live inside the conversation pane, not outside the inspector")
+        let initialRepairCount = probe.bridgeRepairCount
+        let originalDividerPosition = inspectorSplit.arrangedSubviews[0].frame.maxX
+        let minimumConversationWidth: CGFloat = 300
+        let maximumDividerPosition = inspectorSplit.bounds.width - EmbeddedBrowserLayout.minimumWidth
+        let liveDragPositions = (0..<40).map { step in
+            min(maximumDividerPosition, max(minimumConversationWidth,
+                originalDividerPosition + 180 * sin(CGFloat(step) * .pi / 10)))
+        } + [originalDividerPosition]
+        var liveTrailingGaps: [CGFloat] = []
+        var actualDividerPositions: [CGFloat] = []
+        for position in liveDragPositions {
+            inspectorSplit.setPosition(position, ofDividerAt: 0)
+            hostingView.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            hostingView.layoutSubtreeIfNeeded()
+
+            actualDividerPositions.append(inspectorSplit.arrangedSubviews[0].frame.maxX)
+            let browserPane = inspectorSplit.arrangedSubviews[1]
+            XCTAssertEqual(inspectorSplit.bounds.width, detail.bounds.width, accuracy: 1,
+                           "The native split must fill the outer detail column")
+            XCTAssertEqual(browserTab.webView.frame.width, browserPane.bounds.width, accuracy: 1,
+                           "The actual webpage must fill the browser pane after every divider movement")
+            let addressField = try XCTUnwrap(descendants(of: browserPane).compactMap { $0 as? NSTextField }
+                .first { $0.placeholderString == "https://…" })
+            XCTAssertGreaterThan(addressField.frame.width, browserPane.bounds.width - 150,
+                                 "The address bar must expand with the browser, not remain a narrow strip")
+            let liveTimelineFrame = timeline.convert(timeline.bounds, to: hostingView)
+            let liveConversationFrame = inspectorSplit.arrangedSubviews[0].convert(
+                inspectorSplit.arrangedSubviews[0].bounds,
+                to: hostingView
+            )
+            let liveTrailingGap = liveConversationFrame.maxX - liveTimelineFrame.maxX
+            liveTrailingGaps.append(liveTrailingGap)
+            XCTAssertGreaterThanOrEqual(liveTrailingGap, -1,
+                                        "The timeline must not overflow into the browser")
+            XCTAssertLessThanOrEqual(
+                liveTrailingGap,
+                maximumTrailingScrollerGutter,
+                "The timeline scrollbar must follow the browser divider during live dragging"
+            )
+            XCTAssertEqual(
+                detail.frame.width,
+                originalDetailWidth,
+                accuracy: 0.5,
+                "Dragging the inspector must not mutate the outer detail column"
+            )
+        }
+        XCTAssertLessThanOrEqual(
+            (liveTrailingGaps.max() ?? 0) - (liveTrailingGaps.min() ?? 0),
+            1,
+            "The conversation-to-divider gap must remain stable instead of shaking between drag frames"
+        )
+        XCTAssertEqual(probe.bridgeRepairCount, initialRepairCount,
+                       "Inspector dragging must never trigger manual bridge frame repairs")
+        XCTAssertGreaterThan((actualDividerPositions.max() ?? 0) - (actualDividerPositions.min() ?? 0),
+                             100, "The divider must really move, not merely retain a stable gap")
+
+        // A short fixture at the default window size used to miss the empty
+        // 600-point strip. Exercise the lifecycle of the real wide window too.
+        for iteration in 0..<3 {
+            model.browser.hide(threadID: thread.id)
+            settleLayout(hostingView)
+            let closedTimeline = try timelineScrollView(in: hostingView)
+            XCTAssertLessThanOrEqual(
+                hostingView.bounds.maxX - closedTimeline.convert(closedTimeline.bounds, to: hostingView).maxX,
+                maximumTrailingScrollerGutter)
+            model.browser.show(threadID: thread.id)
+            model.messages.append(.init(id: "resize-update-\(iteration)", role: .assistant,
+                                       text: String(repeating: "切换浏览器并继续更新消息。", count: 30)))
+            window.setContentSize(NSSize(width: iteration == 1 ? 1_650 : 2_300, height: 1_200))
+            settleLayout(hostingView)
+            let refreshedDetail = try threeColumnSplitView(in: hostingView).arrangedSubviews[2]
+            let split = try XCTUnwrap(descendants(of: refreshedDetail).compactMap { $0 as? NSSplitView }
+                .first { $0.isVertical && $0.arrangedSubviews.count == 2 })
+            let pane = split.arrangedSubviews[0]
+            let scroll = try timelineScrollView(in: pane)
+            XCTAssertLessThanOrEqual(pane.bounds.maxX - scroll.convert(scroll.bounds, to: pane).maxX,
+                                    maximumTrailingScrollerGutter)
+            XCTAssertEqual(try XCTUnwrap(scroll.documentView).frame.width,
+                           scroll.contentView.bounds.width, accuracy: 1)
+        }
+        try writeLayoutPreviewIfRequested(hostingView, name: "four-column-layout-after-resizing.png")
     }
 
     func testSwitchingConversationsDoesNotResizeColumnsOrWindow() throws {
@@ -419,12 +595,15 @@ final class ConversationLayoutTests: XCTestCase {
         NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) + 1
     }
 
-    private func writeLayoutPreviewIfRequested(_ view: NSView) throws {
+    private func writeLayoutPreviewIfRequested(
+        _ view: NSView,
+        name: String = "conversation-layout-preview.png"
+    ) throws {
         guard let directory = ProcessInfo.processInfo.environment["CLOUDCODEX_LAYOUT_PREVIEW_DIR"] else { return }
         let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: bitmap)
         let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-        try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("conversation-layout-preview.png"))
+        try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name))
     }
 
     private func threeColumnSplitView(in view: NSView) throws -> NSSplitView {

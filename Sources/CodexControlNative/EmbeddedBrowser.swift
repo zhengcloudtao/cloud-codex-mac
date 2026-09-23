@@ -247,36 +247,156 @@ struct EmbeddedBrowserPanel: View {
                 ContentUnavailableView("当前任务还没有网页", systemImage: "globe", description: Text("点击 + 打开网页，或让新建任务使用内置浏览器。"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
-        }.frame(minWidth: 360, maxHeight: .infinity, alignment: .top)
+        }.frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
+enum EmbeddedBrowserLayout {
+    static let minimumWidth: CGFloat = 360
+    static let idealWidth: CGFloat = 520
+    static let maximumWidth: CGFloat = 960
+}
+
 struct BrowserConversationLayout<Content: View>: View {
+    @EnvironmentObject private var model: AppModel
     @ObservedObject var browser: EmbeddedBrowser
     let threadID: String?
-    @ViewBuilder let content: () -> Content
+    @ViewBuilder let content: (CGFloat) -> Content
+
+    @ViewBuilder
     var body: some View {
         if let threadID, browser.isVisible(for: threadID) {
             GeometryReader { geometry in
-                HSplitView {
-                    content().frame(minWidth: 300).frame(height: geometry.size.height)
-                    EmbeddedBrowserPanel(browser: browser, threadID: threadID)
-                        .frame(height: geometry.size.height)
-                }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+                BrowserNativeSplit(
+                    conversation: AnyView(conversationContent.environmentObject(model)),
+                    browser: AnyView(GeometryReader { pane in
+                        EmbeddedBrowserPanel(browser: browser, threadID: threadID)
+                            .frame(width: pane.size.width, height: pane.size.height)
+                    }.environmentObject(model))
+                )
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
         } else {
-            // The outer detail column now supplies its post-layout size. Pass
-            // that exact size through this wrapper; a flexible frame alone
-            // lets the conversation retain its 600-point ideal width and
-            // leaves the remainder of a wide window blank.
-            GeometryReader { geometry in
-                content()
-                    .frame(
-                        width: geometry.size.width,
-                        height: geometry.size.height,
-                        alignment: .topLeading
-                    )
-            }
+            // Remove the split entirely when closed so the conversation
+            // receives the full detail width immediately.
+            conversationContent
         }
+    }
+
+    private var conversationContent: some View {
+        GeometryReader { geometry in
+            content(geometry.size.width)
+                .frame(
+                    width: geometry.size.width,
+                    height: geometry.size.height,
+                    alignment: .topLeading
+                )
+        }
+    }
+
+}
+
+/// Own both hosting boundaries so the native pane width is the SwiftUI proposal.
+/// No geometry measurement is sent back through state or private bridge frames.
+private struct BrowserNativeSplit: NSViewControllerRepresentable {
+    let conversation: AnyView
+    let browser: AnyView
+
+    func makeNSViewController(context: Context) -> BrowserSplitController {
+        BrowserSplitController(conversation: hosted(conversation, context: context),
+                               browser: hosted(browser, context: context))
+    }
+
+    func updateNSViewController(_ controller: BrowserSplitController, context: Context) {
+        controller.conversationHost.rootView = hosted(conversation, context: context)
+        controller.browserHost.rootView = hosted(browser, context: context)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: BrowserSplitController,
+                      context: Context) -> CGSize? {
+        // The split's previous fitting size is not its next allocated width.
+        // Explicitly accept the detail-column proposal on every resize.
+        CGSize(width: proposal.width ?? 820, height: proposal.height ?? 640)
+    }
+
+    private func hosted(_ content: AnyView, context: Context) -> AnyView {
+        // Preserve the app's link routing and appearance across hosting roots.
+        AnyView(content.environment(\.openURL, context.environment.openURL)
+            .environment(\.colorScheme, context.environment.colorScheme))
+    }
+}
+
+private final class BrowserPaneController: NSViewController {
+    let host: NSHostingView<AnyView>
+    var rootView: AnyView {
+        get { host.rootView }
+        set { host.rootView = newValue }
+    }
+
+    init(rootView: AnyView) {
+        host = NSHostingView(rootView: rootView)
+        host.sizingOptions = []
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func loadView() {
+        view = NSView()
+        host.frame = view.bounds
+        host.autoresizingMask = [.width, .height]
+        view.addSubview(host)
+    }
+}
+
+private final class BrowserSplitController: NSViewController, NSSplitViewDelegate {
+    let splitView = NSSplitView()
+    let conversationHost: BrowserPaneController
+    let browserHost: BrowserPaneController
+    private var hasInitialPosition = false
+
+    init(conversation: AnyView, browser: AnyView) {
+        conversationHost = BrowserPaneController(rootView: conversation)
+        browserHost = BrowserPaneController(rootView: browser)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func loadView() {
+        view = splitView
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.delegate = self
+        for pane in [conversationHost, browserHost] {
+            addChild(pane)
+            splitView.addArrangedSubview(pane.view)
+        }
+    }
+
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        guard splitView.arrangedSubviews.count == 2 else { return }
+        let available = max(0, splitView.bounds.width - splitView.dividerThickness)
+        let requested = hasInitialPosition ? browserHost.view.frame.width : EmbeddedBrowserLayout.idealWidth
+        let browserWidth = min(max(0, available - 300),
+                               min(EmbeddedBrowserLayout.maximumWidth,
+                                   max(EmbeddedBrowserLayout.minimumWidth, requested)))
+        guard available > 0 else { return }
+        hasInitialPosition = true
+        let conversationWidth = available - browserWidth
+        conversationHost.view.frame = NSRect(x: 0, y: 0, width: conversationWidth,
+                                             height: splitView.bounds.height)
+        browserHost.view.frame = NSRect(x: conversationWidth + splitView.dividerThickness, y: 0,
+                                       width: browserWidth, height: splitView.bounds.height)
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat,
+                   ofSubviewAt dividerIndex: Int) -> CGFloat {
+        max(300, splitView.bounds.width - splitView.dividerThickness - EmbeddedBrowserLayout.maximumWidth)
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat,
+                   ofSubviewAt dividerIndex: Int) -> CGFloat {
+        max(300, splitView.bounds.width - splitView.dividerThickness - EmbeddedBrowserLayout.minimumWidth)
     }
 }

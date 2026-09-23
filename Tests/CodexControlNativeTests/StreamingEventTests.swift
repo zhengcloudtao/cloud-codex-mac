@@ -125,6 +125,31 @@ final class StreamingEventTests: XCTestCase {
         ])
     }
 
+    func testSelectedCollaborationTasksAlwaysComeFromVisibleConversation() {
+        let model = AppModel()
+        model.messages = [ChatMessage(
+            id: "other-thread-spawn",
+            role: .activity,
+            text: "",
+            activityKind: .collaboration,
+            turnID: "other-turn",
+            collaborationChildTasks: [
+                CollaborationChildTask(
+                    threadID: "other-child",
+                    name: "round8_liuxian",
+                    status: "已完成",
+                    detail: ""
+                )
+            ]
+        )]
+        XCTAssertEqual(model.selectedCollaborationTasks.map(\.name), ["round8_liuxian"])
+
+        // Switching to a conversation without collaboration must immediately
+        // remove the previous conversation's persistent child-task summary.
+        model.messages = [ChatMessage(id: "current-user", role: .user, text: "调整头像")]
+        XCTAssertTrue(model.selectedCollaborationTasks.isEmpty)
+    }
+
     func testUnsupportedOptionalActivityEventDoesNotShowErrorDialog() {
         let model = AppModel()
 

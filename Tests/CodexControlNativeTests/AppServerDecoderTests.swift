@@ -143,6 +143,26 @@ final class AppServerDecoderTests: XCTestCase {
         XCTAssertEqual(group.childTasks.first { $0.threadID == "child-guanlong" }?.status, "已完成")
     }
 
+    func testHistoricalActivitiesPreserveStepTiming() throws {
+        let messages = AppServerClient.parseMessages(from: [[
+            "id": "turn-timing",
+            "items": [[
+                "id": "command-timing",
+                "type": "commandExecution",
+                "command": "swift test",
+                "status": "completed",
+                "exitCode": 0,
+                "started_at_ms": 1_725_520_400_250 as Int64,
+                "completed_at_ms": 1_725_520_465_750 as Int64
+            ]]
+        ]])
+
+        let command = try XCTUnwrap(messages.first)
+        XCTAssertEqual(command.startedAt, Date(timeIntervalSince1970: 1_725_520_400.25))
+        XCTAssertEqual(command.completedAt, Date(timeIntervalSince1970: 1_725_520_465.75))
+        XCTAssertFalse(command.isStreaming)
+    }
+
     func testHistoricalFileChangesKeepDiffAndLineCounts() throws {
         let turns: [[String: Any]] = [[
             "id": "turn-files",

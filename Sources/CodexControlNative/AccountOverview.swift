@@ -202,9 +202,42 @@ struct AccountOverviewRefreshIssue: Equatable {
     }
 }
 
+struct ResetCreditUsePresentation: Equatable {
+    let message: String
+    let isError: Bool
+
+    static func outcome(_ value: String) -> Self {
+        switch value {
+        case "reset":
+            return .init(message: "重置成功，额度信息已刷新。", isError: false)
+        case "alreadyRedeemed":
+            return .init(message: "这次重置已经使用，额度信息已刷新。", isError: false)
+        case "nothingToReset":
+            return .init(message: "当前额度无需重置，Codex 没有执行重置。", isError: true)
+        case "noCredit":
+            return .init(message: "这次重置已不可用，请刷新后选择其他次数。", isError: true)
+        case "expired":
+            return .init(message: "这次重置已经过期，请刷新额度信息。", isError: true)
+        default:
+            return .init(message: "无法使用这次重置，请刷新后重试。", isError: true)
+        }
+    }
+
+    static func unavailableReason(
+        for credit: RemoteUsageSnapshot.ResetCredit,
+        now: Date = Date()
+    ) -> String? {
+        guard credit.resetType == "codexRateLimits" else { return "这条记录不能重置 Codex 额度" }
+        guard let expiresAt = credit.expiresAt, expiresAt.isFinite else { return "接口未提供截止时间" }
+        guard expiresAt > now.timeIntervalSince1970 else { return "这条记录已经过期" }
+        return nil
+    }
+}
+
 struct AccountOverviewView: View {
     @EnvironmentObject private var model: AppModel
     @State private var expanded = false
+    @State private var pendingResetCredit: RemoteUsageSnapshot.ResetCredit?
 
     var body: some View {
         Button { expanded.toggle() } label: {
@@ -325,21 +358,53 @@ struct AccountOverviewView: View {
                             Divider()
                             Text("可用重置次数：\(account.usage.resetCredits?.availableCount.map(String.init) ?? "未提供")")
                                 .fontWeight(.semibold)
-                            if let expirations = account.usage.resetCredits?.expirations {
-                                ForEach(Array(expirations.enumerated()), id: \.offset) { index, expiry in
-                                    Text("第 \(index + 1) 次 · 到期：\(dateLabel(expiry))")
+                            if let credits = account.usage.resetCredits?.credits {
+                                ForEach(Array(credits.enumerated()), id: \.element.ref) { index, credit in
+                                    HStack(spacing: 12) {
+                                        Text("第 \(index + 1) 次 · 到期：\(dateLabel(credit.expiresAt))")
+                                        Spacer(minLength: 8)
+                                        if model.resetCreditInProgressRef == credit.ref {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                                .frame(width: 78, height: 28)
+                                        } else {
+                                            Button {
+                                                pendingResetCredit = credit
+                                            } label: {
+                                                Label("使用", systemImage: "arrow.clockwise")
+                                                    .font(.caption.weight(.semibold))
+                                                    .frame(width: 58)
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .buttonBorderShape(.roundedRectangle(radius: 7))
+                                            .controlSize(.regular)
+                                            .tint(.accentColor)
+                                            .disabled(
+                                                model.resetCreditInProgressRef != nil
+                                                    || ResetCreditUsePresentation.unavailableReason(for: credit) != nil
+                                            )
+                                            .help(ResetCreditUsePresentation.unavailableReason(for: credit) ?? "使用这次额度重置")
+                                        }
+                                    }
+                                    .padding(.trailing, 12)
                                 }
-                                if expirations.isEmpty { Text("接口没有返回可用重置到期明细。") }
-                                if let count = account.usage.resetCredits?.availableCount, count > expirations.count {
-                                    Text("还有 \(count - expirations.count) 次未提供到期明细。")
+                                if credits.isEmpty { Text("接口没有返回可选择的重置明细。") }
+                                if let count = account.usage.resetCredits?.availableCount, count > credits.count {
+                                    Text("还有 \(count - credits.count) 次缺少可安全使用的明细。")
                                 }
                             } else {
-                                Text("重置到期明细：接口未提供。")
+                                Text("重置明细：接口未提供，不能执行重置。")
+                            }
+                            if let message = model.resetCreditStatusMessage {
+                                Text(message)
+                                    .font(.caption)
+                                    .foregroundStyle(model.resetCreditStatusIsError ? Color.orange : Color.green)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                             Divider()
                             Text("更新于 \(dateLabel(account.usage.capturedAt)) · 时间按本机时区显示")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Text("此处只展示账号信息，不执行重置。多个额度窗口按接口返回分别列出。")
+                            Text("使用重置前会再次确认；多个额度窗口按接口返回分别列出。")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -352,6 +417,22 @@ struct AccountOverviewView: View {
             }
             .padding(20)
             .frame(width: 460, height: 520)
+        }
+        .alert(
+            "确认使用重置次数？",
+            isPresented: Binding(
+                get: { pendingResetCredit != nil },
+                set: { if !$0 { pendingResetCredit = nil } }
+            ),
+            presenting: pendingResetCredit
+        ) { credit in
+            Button("确认使用", role: .destructive) {
+                pendingResetCredit = nil
+                Task { await model.consumeResetCredit(credit) }
+            }
+            Button("取消", role: .cancel) { pendingResetCredit = nil }
+        } message: { credit in
+            Text("将使用截止时间为 \(dateLabel(credit.expiresAt)) 的这次重置。此操作会立即修改当前 Codex 额度，且不能撤销。")
         }
     }
 

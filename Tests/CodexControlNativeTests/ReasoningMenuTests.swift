@@ -57,4 +57,22 @@ final class ReasoningMenuTests: XCTestCase {
         XCTAssertNil(option(["max"], defaultEffort: "max").defaultComposerEffort)
         XCTAssertEqual(option(["none", "minimal", "medium", "persistent"]).composerEfforts, ["medium", "persistent"])
     }
+
+    func testRecommendedSelectionUsesCatalogDefaultCapabilitiesWithoutPinningModel() {
+        let model = AppModel()
+        let recommended = CodexModelOption(json: [
+            "id": "gpt-6-astra", "model": "gpt-6-astra", "displayName": "GPT-6-Astra",
+            "isDefault": true, "defaultReasoningEffort": "medium",
+            "supportedReasoningEfforts": [["reasoningEffort": "low"], ["reasoningEffort": "medium"]]
+        ])!
+        model.modelOptions = [recommended]
+
+        model.selectModel(AppModel.recommendedModelSelectionID)
+
+        XCTAssertNil(model.selectedModel)
+        XCTAssertEqual(model.selectedModelCapabilities?.id, "gpt-6-astra")
+        XCTAssertEqual(model.selectedModelDisplayName, "默认")
+        XCTAssertEqual(model.selectedEffort, "medium")
+        XCTAssertEqual(recommended.pickerName, "GPT-6 Astra")
+    }
 }

@@ -760,6 +760,8 @@ final class AppServerClient {
                 guard let type = item["type"] as? String else { continue }
                 let id = item["id"] as? String ?? UUID().uuidString
                 let messageStart = messages.count
+                let itemStartedAt = unixDate(item["startedAt"] ?? item["started_at_ms"])
+                let itemCompletedAt = unixDate(item["completedAt"] ?? item["completed_at_ms"])
                 switch type {
                 case "userMessage":
                     let content = item["content"] as? [JSON] ?? []
@@ -927,6 +929,10 @@ final class AppServerClient {
                 }
                 for index in messageStart..<messages.count {
                     messages[index].turnID = turnID
+                    if messages[index].role == .activity {
+                        messages[index].startedAt = itemStartedAt
+                        messages[index].completedAt = itemCompletedAt
+                    }
                     // Only explicit running statuses are active: a finished
                     // tool in an active turn must not keep spinning forever.
                     if messages[index].role == .activity,

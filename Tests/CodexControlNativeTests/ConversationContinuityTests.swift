@@ -45,6 +45,32 @@ final class ConversationContinuityTests: XCTestCase {
         XCTAssertEqual(model.messages.map(\.id), ["question"])
     }
 
+    func testSelectingWorkspaceStartsNewThreadInThatWorkspace() {
+        let model = AppModel()
+        model.selectedThreadID = "one"
+        model.messages = [.init(id: "question", role: .user, text: "旧会话")]
+
+        model.selectFolder("/tmp/another-project")
+
+        XCTAssertEqual(model.selectedFolder, "/tmp/another-project")
+        XCTAssertNil(model.selectedThreadID)
+        XCTAssertTrue(model.showingNewThread)
+        XCTAssertEqual(model.newThreadFolder, "/tmp/another-project")
+        XCTAssertTrue(model.newThreadPrompt.isEmpty)
+        XCTAssertTrue(model.newThreadAttachments.isEmpty)
+        XCTAssertTrue(model.messages.isEmpty)
+    }
+
+    func testSelectingRecentThreadsDoesNotStartNewThread() {
+        let model = AppModel()
+        model.selectedFolder = "/tmp/project"
+
+        model.selectFolder(nil)
+
+        XCTAssertNil(model.selectedFolder)
+        XCTAssertFalse(model.showingNewThread)
+    }
+
     func testSwitchFlushesPendingOutputAndBackgroundCompletionIsRestored() {
         let model = AppModel()
         model.threads = [thread("one"), thread("two")]

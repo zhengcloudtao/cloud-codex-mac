@@ -81,6 +81,32 @@ final class WaitingMessageTests: XCTestCase {
         model.removeWaitingMessage(item.id)
     }
 
+    func testQueuedSnapshotGetsItsOwnOptimisticBubbleBeforeTurnStarts() {
+        let model = AppModel(remoteDefaults: defaults)
+        model.selectedThreadID = "one"
+        model.messages = [
+            ChatMessage(id: "local-older", role: .user, text: "上一条尚未确认")
+        ]
+        let attachment = ComposerAttachment(url: URL(fileURLWithPath: "/tmp/queued.png"))
+
+        model.appendOptimisticUserMessage(
+            threadID: "one",
+            localMessageID: "local-waiting-queue-id",
+            text: "队列中的原始内容",
+            outgoingAttachments: [attachment]
+        )
+        model.handleEvent("turn/started", [
+            "threadId": "one",
+            "turn": ["id": "queued-turn"]
+        ])
+
+        let userMessages = model.messages.filter { $0.role == .user }
+        XCTAssertEqual(userMessages.map(\.text), ["上一条尚未确认", "队列中的原始内容"])
+        XCTAssertNil(userMessages[0].turnID, "A queued turn must not take over an older unresolved bubble")
+        XCTAssertEqual(userMessages[1].turnID, "queued-turn")
+        XCTAssertEqual(userMessages[1].attachments.map(\.path), ["/tmp/queued.png"])
+    }
+
     func testWaitingMessagesCanMoveBeforeAndAfterWithinTheSameThread() {
         let model = AppModel(remoteDefaults: defaults)
         let first = message("第一条")

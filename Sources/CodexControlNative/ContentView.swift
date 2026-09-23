@@ -12,6 +12,22 @@ enum MainColumnLayout {
     }
 }
 
+enum WorkspaceCategoryDisclosureState {
+    static let uncategorizedKey = "__uncategorized__"
+
+    static func key(for categoryID: String?) -> String {
+        categoryID ?? uncategorizedKey
+    }
+
+    static func decode(_ rawValue: String) -> Set<String> {
+        Set(rawValue.split(separator: "\n").map(String.init))
+    }
+
+    static func encode(_ collapsedKeys: Set<String>) -> String {
+        collapsedKeys.sorted().joined(separator: "\n")
+    }
+}
+
 private struct ColumnResizeHandle: View {
     @Binding var width: Double
     let range: ClosedRange<Double>
@@ -81,7 +97,6 @@ private struct ColumnResizeHandle: View {
 }
 
 private struct DetailColumnSizeReader: NSViewRepresentable {
-    @Binding var size: CGSize
     @Binding var workspaceWidth: Double
     @Binding var threadListWidth: Double
 
@@ -100,11 +115,6 @@ private struct DetailColumnSizeReader: NSViewRepresentable {
     }
 
     private func update(_ view: DetailColumnSizeProbeView) {
-        view.onSizeChanged = { newSize in
-            guard abs(size.width - newSize.width) > 0.5
-                    || abs(size.height - newSize.height) > 0.5 else { return }
-            size = newSize
-        }
         view.onLeadingColumnWidthsChanged = { newWorkspaceWidth, newThreadListWidth in
             if abs(workspaceWidth - newWorkspaceWidth) > 0.5 {
                 workspaceWidth = MainColumnLayout.clamped(
@@ -123,8 +133,8 @@ private struct DetailColumnSizeReader: NSViewRepresentable {
     }
 }
 
-private final class DetailColumnSizeProbeView: NSView {
-    var onSizeChanged: ((CGSize) -> Void)?
+final class DetailColumnSizeProbeView: NSView {
+    private(set) var bridgeRepairCount = 0
     var onLeadingColumnWidthsChanged: ((Double, Double) -> Void)?
     private weak var observedColumn: NSView?
     private weak var observedSplitView: NSSplitView?
@@ -142,7 +152,12 @@ private final class DetailColumnSizeProbeView: NSView {
 
     override func layout() {
         super.layout()
-        fillDetailPath()
+        // The native inspector owns its two-pane live-resize transaction.
+        // Touching bridge frames from this callback makes AppKit lay out the
+        // conversation twice for every mouse movement and visibly shakes it.
+        if observedSplitView?.arrangedSubviews.count != 2 {
+            fillDetailPath()
+        }
     }
 
     func connectWhenReady() {
@@ -166,6 +181,25 @@ private final class DetailColumnSizeProbeView: NSView {
         while let current = candidate {
             if let splitView = current.superview as? NSSplitView, splitView.isVertical {
                 fallbackColumn = fallbackColumn ?? current
+                // When the browser is open, SwiftUI's native inspector adds a
+                // two-pane split inside NavigationSplitView's detail column.
+                // Observe that live conversation pane directly. Walking on to
+                // the outer three-column split makes fillDetailPath expand the
+                // conversation across the inspector while AppKit is dragging
+                // the opposite direction, which is the visible left-side
+                // shaking captured in the screen recording.
+                if splitView.arrangedSubviews.count == 2,
+                   splitView.arrangedSubviews.first === current {
+                    // The native inspector already sizes this pane correctly.
+                    // Remember its structure only so layout() knows not to run
+                    // the three-column bridge repair during live dragging.
+                    if observedColumn !== current || observedSplitView !== splitView {
+                        disconnect()
+                        observedColumn = current
+                        observedSplitView = splitView
+                    }
+                    return
+                }
                 if splitView.arrangedSubviews.count == 3,
                    let detailColumn = splitView.arrangedSubviews.last {
                     observe(column: detailColumn, splitView: splitView)
@@ -227,20 +261,9 @@ private final class DetailColumnSizeProbeView: NSView {
     }
 
     private func reportSize() {
-        guard let observedColumn else { return }
+        guard observedColumn != nil else { return }
+        guard observedSplitView?.arrangedSubviews.count != 2 else { return }
         fillDetailPath()
-        let newSize = targetColumnSize(for: observedColumn)
-        guard newSize.width > 0, newSize.height > 0 else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.onSizeChanged?(newSize)
-            // Updating SwiftUI state can recreate the platform container with
-            // its ideal width. Re-apply the native column size after that
-            // transaction has committed as well.
-            DispatchQueue.main.async { [weak self] in
-                self?.fillDetailPath()
-            }
-        }
     }
 
     /// `NavigationSplitView` occasionally resizes its native column wrapper
@@ -250,6 +273,7 @@ private final class DetailColumnSizeProbeView: NSView {
     /// split item instead of depending on private class names.
     private func fillDetailPath() {
         guard let observedColumn else { return }
+        bridgeRepairCount += 1
         let targetSize = targetColumnSize(for: observedColumn)
         if targetSize.width > observedColumn.bounds.width + 0.5 {
             observedColumn.setFrameSize(targetSize)
@@ -265,6 +289,13 @@ private final class DetailColumnSizeProbeView: NSView {
     }
 
     private func targetColumnSize(for column: NSView) -> CGSize {
+        // A native inspector already keeps both of its panes synchronized
+        // during live dragging. Its conversation pane must use the current
+        // split width, not the distance from its leading edge to the window's
+        // trailing edge (which includes the browser pane).
+        if observedSplitView?.arrangedSubviews.count == 2 {
+            return column.bounds.size
+        }
         guard let contentView = column.window?.contentView else { return column.bounds.size }
         let frameInWindow = column.convert(column.bounds, to: contentView)
         // The leading edge of the detail item remains correct even in the
@@ -313,7 +344,6 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var threadListScrollID: String?
     @State private var filePreview: LocalFilePreviewTarget?
-    @State private var detailColumnSize: CGSize = .zero
     @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
@@ -322,6 +352,7 @@ struct ContentView: View {
     @AppStorage("cloudcodex.showUnreadDockBadge") private var showUnreadDockBadge = true
     @AppStorage("cloudcodex.workspaceColumnWidth") private var workspaceColumnWidth = MainColumnLayout.workspaceDefault
     @AppStorage("cloudcodex.threadListColumnWidth") private var threadListColumnWidth = MainColumnLayout.threadListDefault
+    @AppStorage("cloudcodex.collapsedWorkspaceCategories.v1") private var collapsedWorkspaceCategories = ""
     @AppStorage(SystemMetricsRefreshInterval.storageKey) private var systemMetricsRefreshInterval = SystemMetricsRefreshInterval.fiveSeconds.rawValue
     private let categoryDragPrefix = "cloudcodex-category://"
 
@@ -365,11 +396,14 @@ struct ContentView: View {
             // final width while leaving the SwiftUI root at its 600-point
             // ideal size. Turn that container size into an exact proposal so
             // the conversation and scrollbar grow during live resizing.
-            BrowserConversationLayout(browser: model.browser, threadID: model.selectedThreadID) { conversation }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            BrowserConversationLayout(browser: model.browser, threadID: model.selectedThreadID) { width in
+                conversation(explicitWidth: width)
+                // This probe must be INSIDE the inspector's conversation pane.
+                // Outside BrowserConversationLayout its ancestor chain skips
+                // the inspector, so it mistakenly repairs the whole detail
+                // column while the native divider is resizing that pane.
                 .background(
                     DetailColumnSizeReader(
-                        size: $detailColumnSize,
                         workspaceWidth: $workspaceColumnWidth,
                         threadListWidth: $threadListColumnWidth
                     )
@@ -379,6 +413,8 @@ struct ContentView: View {
                         // immediately instead of waiting for the user's first drag.
                         .id(detailLayoutRevision)
                 )
+            }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         // When the leading columns are hidden, the conversation must reclaim
         // their width immediately. The balanced style preserves the old detail
@@ -534,7 +570,7 @@ struct ContentView: View {
                 workspaceCategorySection(category)
             }
 
-            Section {
+            Section(isExpanded: categoryExpansionBinding(nil)) {
                 if model.uncategorizedFolders.isEmpty {
                     categoryDropPlaceholder("拖动工作区到这里", categoryID: nil)
                 } else {
@@ -543,7 +579,12 @@ struct ContentView: View {
                     }
                 }
             } header: {
-                categoryDropHeader("未分类", systemImage: "tray", categoryID: nil)
+                categoryDropHeader(
+                    "未分类",
+                    systemImage: "tray",
+                    categoryID: nil,
+                    isExpanded: categoryExpansionBinding(nil)
+                )
             }
         }
         .listStyle(.sidebar)
@@ -556,7 +597,7 @@ struct ContentView: View {
     }
 
     private func workspaceCategorySection(_ category: WorkspaceCategory) -> some View {
-        Section {
+        Section(isExpanded: categoryExpansionBinding(category.id)) {
             let folders = model.folders(inCategory: category.id)
             if folders.isEmpty {
                 categoryDropPlaceholder("拖动工作区到这里", categoryID: category.id)
@@ -566,7 +607,12 @@ struct ContentView: View {
                 }
             }
         } header: {
-            categoryDropHeader(category.name, systemImage: "folder.fill", categoryID: category.id)
+            categoryDropHeader(
+                category.name,
+                systemImage: "folder.fill",
+                categoryID: category.id,
+                isExpanded: categoryExpansionBinding(category.id)
+            )
                 .contextMenu {
                     Button("重命名") {
                         model.showingCategoryManager = true
@@ -636,16 +682,29 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func categoryDropHeader(_ title: String, systemImage: String, categoryID: String?) -> some View {
+    private func categoryDropHeader(
+        _ title: String,
+        systemImage: String,
+        categoryID: String?,
+        isExpanded: Binding<Bool>
+    ) -> some View {
         let header = Label(title, systemImage: systemImage)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 2)
             .padding(.bottom, 1)
             .contentShape(Rectangle())
+            .onTapGesture {
+                isExpanded.wrappedValue.toggle()
+            }
             .dropDestination(for: String.self) { paths, location in
                 handleCategoryDrop(paths, targetCategoryID: categoryID, location: location)
             }
-            .help("可将工作区拖到此分类")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityValue(isExpanded.wrappedValue ? "已展开" : "已收起")
+            .accessibilityHint("点击收起或展开；也可将工作区拖到此分类")
+            .help(isExpanded.wrappedValue
+                  ? "点击收起；可将工作区拖到此分类"
+                  : "点击展开；可将工作区拖到此分类")
 
         if let categoryID {
             header.draggable(categoryDragPrefix + categoryID) {
@@ -656,6 +715,24 @@ struct ContentView: View {
         } else {
             header
         }
+    }
+
+    private func categoryExpansionBinding(_ categoryID: String?) -> Binding<Bool> {
+        let key = WorkspaceCategoryDisclosureState.key(for: categoryID)
+        return Binding(
+            get: {
+                !WorkspaceCategoryDisclosureState.decode(collapsedWorkspaceCategories).contains(key)
+            },
+            set: { isExpanded in
+                var collapsed = WorkspaceCategoryDisclosureState.decode(collapsedWorkspaceCategories)
+                if isExpanded {
+                    collapsed.remove(key)
+                } else {
+                    collapsed.insert(key)
+                }
+                collapsedWorkspaceCategories = WorkspaceCategoryDisclosureState.encode(collapsed)
+            }
+        )
     }
 
     private func categoryDropPlaceholder(_ title: String, categoryID: String?) -> some View {
@@ -946,7 +1023,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private var conversation: some View {
+    private func conversation(explicitWidth: CGFloat) -> some View {
         if model.showingNewThread {
             NewThreadWorkspace()
         } else if let thread = model.selectedThread {
@@ -956,12 +1033,17 @@ struct ContentView: View {
                 Divider()
                     .zIndex(2)
                 MessageList(
+                    viewportWidth: explicitWidth,
                     messages: model.messages,
                     collaborationTasks: model.selectedCollaborationTasks,
                     isLoading: model.isConversationLoading,
                     isThinking: model.isSelectedThreadProcessing
                 )
-                    .frame(width: detailColumnSize.width > 0 ? detailColumnSize.width : nil)
+                    // Use the exact width proposed by BrowserConversationLayout.
+                    // A flexible frame can leave the AppKit-backed timeline at
+                    // its old 600-point ideal width and create an empty column
+                    // before the embedded browser.
+                    .frame(width: explicitWidth)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // The window reserves a narrow trailing safe-area strip on
                     // macOS. It belongs to the vertical scroller, not to empty
@@ -988,7 +1070,7 @@ struct ContentView: View {
                     Composer(mode: .conversation)
                 }
             }
-            .frame(width: detailColumnSize.width > 0 ? detailColumnSize.width : nil)
+            .frame(width: explicitWidth)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ContentUnavailableView {
@@ -1657,6 +1739,7 @@ private struct ConversationHeader: View {
 }
 
 private struct MessageList: View {
+    let viewportWidth: CGFloat
     let messages: [ChatMessage]
     let collaborationTasks: [CollaborationChildTask]
     let isLoading: Bool
@@ -1725,7 +1808,7 @@ private struct MessageList: View {
                                         message: message,
                                         availableWidth: max(
                                             0,
-                                            scrollViewportController.viewportWidth
+                                            viewportWidth
                                                 - timelinePadding * 2
                                         )
                                     )
@@ -1758,12 +1841,12 @@ private struct MessageList: View {
                                 .id("persistent-thinking-indicator")
                         }
                         }
-                            // Use AppKit's actual clip-view width. SwiftUI can
-                            // propose the whole window width to a detail child,
-                            // even though NavigationSplitView visibly clips it
-                            // to the third column.
+                            // The scroll container proposes its available width
+                            // to the document. Never feed the measured clip width
+                            // back into its own layout: that locks the initial
+                            // 600-point viewport in place and races live resizing.
                             .frame(
-                                width: max(0, scrollViewportController.viewportWidth - timelinePadding * 2),
+                                maxWidth: .infinity,
                                 alignment: .leading
                             )
                             .padding(timelinePadding)
@@ -1773,7 +1856,8 @@ private struct MessageList: View {
                         // complete detail pane so collapsing a sidebar or live
                         // resizing the window also moves the scrollbar instead
                         // of leaving the ScrollView at its previous ideal width.
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .frame(width: viewportWidth)
+                        .frame(maxHeight: .infinity, alignment: .leading)
                         // `.bottom` also centers horizontally (x = 0.5), which
                         // shifts a wide timeline to the right in the third
                         // column and clips its trailing controls. This scroll
@@ -2189,10 +2273,6 @@ private final class ScrollLatestProbeView: NSView {
     private func reportCurrentPosition() {
         guard let scrollView = observedScrollView,
               let documentView = scrollView.documentView else { return }
-        // The clip view is the source of truth during live window resizing and
-        // NavigationSplitView visibility changes. Unlike the old background
-        // probe, its width cannot be held back by the document's previous size.
-        viewportController?.updateViewportWidth(scrollView.contentView.bounds.width)
         // This timeline is vertically scrollable only. A previously oversized
         // document can leave AppKit's clip view with a stale horizontal origin
         // after the content is narrowed, shifting every row right and clipping
@@ -2219,21 +2299,12 @@ private final class ScrollLatestProbeView: NSView {
 }
 
 private final class MessageScrollViewportController: ObservableObject {
-    @Published private(set) var viewportWidth: CGFloat = 600
     var pendingAnchor: (String, UnitPoint)?
     var entryViewportOffsets: [String: CGRect] = [:]
     private weak var scrollView: NSScrollView?
 
     func attach(_ scrollView: NSScrollView) {
         self.scrollView = scrollView
-    }
-
-    func updateViewportWidth(_ width: CGFloat) {
-        guard width > 0, abs(viewportWidth - width) > 0.5 else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, abs(self.viewportWidth - width) > 0.5 else { return }
-            self.viewportWidth = width
-        }
     }
 
     func prependAlignment(for id: String?) -> UnitPoint {
@@ -3070,14 +3141,12 @@ struct ConversationProcessView: View, Equatable {
     @State private var isExpanded = false
     @State private var isAtLatest = true
     @State private var logViewportID = UUID()
-    @State private var logContentHeight: CGFloat = 44
     @State private var requestedLatest = false
 
     init(group: ConversationProcessGroup, isCurrent: Bool, initiallyExpanded: Bool = false) {
         self.group = group
         self.isCurrent = isCurrent
         _isExpanded = State(initialValue: initiallyExpanded)
-        _logContentHeight = State(initialValue: min(320, CGFloat(group.steps.count) * 34 + 20))
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -3239,18 +3308,22 @@ struct ConversationProcessView: View, Equatable {
                             }
                         }
                         .padding(10)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .background(GeometryReader { geometry in
-                            Color.clear.preference(key: ProcessContentHeightKey.self, value: geometry.size.height)
-                        })
                         .background(ScrollLatestObserver(isAtLatest: $isAtLatest))
                     }
                     .defaultScrollAnchor(requestedLatest ? .bottom : .top)
-                    .frame(height: min(320, max(1, logContentHeight)), alignment: .top)
+                    // Keep the viewport independent from streaming text layout.
+                    // Measuring the complete log and feeding that height back
+                    // into this ScrollView creates a loop: scrollbar width
+                    // changes wrapping, wrapping changes the measured height,
+                    // and every delta relays out the whole conversation.
+                    .frame(
+                        height: ProcessLogLayout.viewportHeight(
+                            stepCount: steps.count,
+                            includesFailureSummary: group.progress?.isFailedActivity == true
+                        ),
+                        alignment: .top
+                    )
                     .clipped()
-                    .onPreferenceChange(ProcessContentHeightKey.self) { height in
-                        if height > 0, abs(logContentHeight - height) > 0.5 { logContentHeight = height }
-                    }
                     .id(logViewportID)
                     .accessibilityLabel("可滚动的执行过程")
 
@@ -3370,14 +3443,34 @@ enum ActivityWaitPresentation {
 
     static func label(startedAt: Date, now: Date) -> String {
         let elapsed = max(0, Int(now.timeIntervalSince(startedAt)))
-        let duration = elapsed >= 60
-            ? String(format: "%d:%02d", elapsed / 60, elapsed % 60)
-            : "\(elapsed) 秒"
+        let duration = ActivityDurationPresentation.duration(
+            startedAt: startedAt,
+            completedAt: nil,
+            now: now
+        )
         return elapsed >= Int(longWaitThreshold) ? "等待较久 \(duration)" : "已等待 \(duration)"
     }
 
     static func isLongWait(startedAt: Date, now: Date) -> Bool {
         now.timeIntervalSince(startedAt) >= longWaitThreshold
+    }
+}
+
+enum ActivityDurationPresentation {
+    static func duration(startedAt: Date, completedAt: Date?, now: Date) -> String {
+        let elapsed = max(0, Int((completedAt ?? now).timeIntervalSince(startedAt)))
+        if elapsed >= 3_600 {
+            return String(format: "%d:%02d:%02d", elapsed / 3_600, (elapsed % 3_600) / 60, elapsed % 60)
+        }
+        if elapsed >= 60 {
+            return String(format: "%d:%02d", elapsed / 60, elapsed % 60)
+        }
+        return "\(elapsed) 秒"
+    }
+
+    static func label(startedAt: Date, completedAt: Date?, now: Date) -> String {
+        let prefix = completedAt == nil ? "已耗时" : "耗时"
+        return "\(prefix) \(duration(startedAt: startedAt, completedAt: completedAt, now: now))"
     }
 }
 
@@ -3401,10 +3494,49 @@ private struct ActivityElapsedLabel: View {
     }
 }
 
-private struct ProcessContentHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+private struct ActivityDurationLabel: View {
+    let startedAt: Date
+    let completedAt: Date?
+
+    var body: some View {
+        if completedAt == nil {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                label(at: context.date)
+            }
+        } else {
+            label(at: completedAt ?? Date())
+        }
+    }
+
+    private func label(at date: Date) -> some View {
+        let isLongRunning = completedAt == nil
+            && ActivityWaitPresentation.isLongWait(startedAt: startedAt, now: date)
+        return Text(ActivityDurationPresentation.label(
+            startedAt: startedAt,
+            completedAt: completedAt,
+            now: date
+        ))
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(isLongRunning ? Color.orange : Color.secondary)
+        .fixedSize(horizontal: true, vertical: false)
+        .help(completedAt == nil ? "当前步骤从开始到现在的耗时" : "该步骤的最终耗时")
+    }
+}
+
+enum ProcessLogLayout {
+    static let maximumViewportHeight: CGFloat = 320
+    static let minimumViewportHeight: CGFloat = 64
+    static let estimatedStepHeight: CGFloat = 44
+    static let verticalPadding: CGFloat = 20
+    static let failureSummaryHeight: CGFloat = 44
+
+    static func viewportHeight(stepCount: Int, includesFailureSummary: Bool) -> CGFloat {
+        let rows = CGFloat(max(0, stepCount)) * estimatedStepHeight
+        let failure = includesFailureSummary ? failureSummaryHeight : 0
+        return min(
+            maximumViewportHeight,
+            max(minimumViewportHeight, rows + verticalPadding + failure)
+        )
     }
 }
 
@@ -3470,6 +3602,13 @@ private struct ActivityBubble: View {
                 Spacer()
                 if message.isStreaming {
                     ProgressView().controlSize(.small)
+                }
+                if let startedAt = message.startedAt,
+                   message.isStreaming || message.completedAt != nil {
+                    ActivityDurationLabel(
+                        startedAt: startedAt,
+                        completedAt: message.isStreaming ? nil : message.completedAt
+                    )
                 }
                 if let status = message.activityStatus {
                     Text(status)
@@ -3906,7 +4045,9 @@ private struct Composer: View {
     }
 
     private var draftModel: CodexModelOption? {
-        model.modelOptions.first { $0.id == draftModelID }
+        draftModelID == AppModel.recommendedModelSelectionID
+            ? model.recommendedModel
+            : model.modelOptions.first { $0.id == draftModelID }
     }
 
     private var modelSelectionPanel: some View {
@@ -3925,61 +4066,77 @@ private struct Composer: View {
                 .help("取消并关闭")
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 11)
+            .padding(.vertical, 9)
+            .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top, spacing: 18) {
-                    selectionSection("模型") {
-                        ForEach(model.modelOptions) { option in
-                            selectionRow(option.displayName, selected: draftModelID == option.id) {
-                                draftModelID = option.id
-                                if !option.composerEfforts.contains(draftEffort ?? "") {
-                                    draftEffort = option.defaultComposerEffort
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 18) {
+                        selectionSection("模型") {
+                            selectionRow(
+                                "默认",
+                                subtitle: "推荐模型集",
+                                selected: draftModelID == AppModel.recommendedModelSelectionID
+                            ) {
+                                draftModelID = AppModel.recommendedModelSelectionID
+                                if let recommended = model.recommendedModel,
+                                   !recommended.composerEfforts.contains(draftEffort ?? "") {
+                                    draftEffort = recommended.defaultComposerEffort
                                 }
-                                if option.fastServiceTierID == nil { draftFastMode = false }
+                            }
+                            ForEach(model.modelOptions) { option in
+                                selectionRow(option.pickerName, selected: draftModelID == option.id) {
+                                    draftModelID = option.id
+                                    if !option.composerEfforts.contains(draftEffort ?? "") {
+                                        draftEffort = option.defaultComposerEffort
+                                    }
+                                    if option.fastServiceTierID == nil { draftFastMode = false }
+                                }
                             }
                         }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
 
+                        Divider()
+
+                        selectionSection("推理强度") {
+                            if let draftModel, !draftModel.composerEfforts.isEmpty {
+                                ForEach(draftModel.composerEfforts, id: \.self) { effort in
+                                    selectionRow(effortDisplayName(effort), selected: draftEffort == effort) {
+                                        draftEffort = effort
+                                    }
+                                }
+                            } else {
+                                Text("当前模型无需设置")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.vertical, 8)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
                     Divider()
 
-                    selectionSection("推理强度") {
-                        if let draftModel, !draftModel.composerEfforts.isEmpty {
-                            ForEach(draftModel.composerEfforts, id: \.self) { effort in
-                                selectionRow(effortDisplayName(effort), selected: draftEffort == effort) {
-                                    draftEffort = effort
-                                }
+                    selectionSection("响应速度") {
+                        HStack(spacing: 12) {
+                            selectionRow("标准", selected: !draftFastMode) {
+                                draftFastMode = false
                             }
-                        } else {
-                            Text("当前模型无需设置")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .padding(.vertical, 8)
+                            selectionRow(
+                                draftModel?.fastServiceTierID == nil ? "加速（当前模型不支持）" : "加速",
+                                selected: draftFastMode
+                            ) {
+                                if draftModel?.fastServiceTierID != nil { draftFastMode = true }
+                            }
+                            .disabled(draftModel?.fastServiceTierID == nil)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                Divider()
-
-                selectionSection("响应速度") {
-                    HStack(spacing: 12) {
-                        selectionRow("标准", selected: !draftFastMode) {
-                            draftFastMode = false
-                        }
-                        selectionRow(
-                            draftModel?.fastServiceTierID == nil ? "加速（当前模型不支持）" : "加速",
-                            selected: draftFastMode
-                        ) {
-                            if draftModel?.fastServiceTierID != nil { draftFastMode = true }
-                        }
-                        .disabled(draftModel?.fastServiceTierID == nil)
-                    }
-                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
             }
-            .padding(18)
+            .frame(maxHeight: .infinity)
 
             Divider()
             HStack {
@@ -3992,8 +4149,9 @@ private struct Composer: View {
                     .disabled(draftModelID == nil)
             }
             .padding(12)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(width: 560, height: 460)
+        .frame(width: 560, height: 500)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
         .overlay(RoundedRectangle(cornerRadius: 13).stroke(.quaternary))
         .shadow(color: .black.opacity(0.3), radius: 18, y: 7)
@@ -4009,17 +4167,29 @@ private struct Composer: View {
         }
     }
 
-    private func selectionRow(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func selectionRow(
+        _ title: String,
+        subtitle: String? = nil,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                Text(title).foregroundStyle(.primary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).foregroundStyle(.primary)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
             .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.vertical, 4)
             .background(selected ? Color.accentColor.opacity(0.12) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 7))
         }
@@ -4042,7 +4212,7 @@ private struct Composer: View {
     }
 
     private var modelAndEffortCompactLabel: String {
-        let modelName = model.selectedModel?.compactName ?? "选择模型"
+        let modelName = model.selectedModelDisplayName
         guard let effort = model.selectedEffort else {
             return "\(modelName) · \(model.selectedSpeedLabel)"
         }
@@ -4050,7 +4220,7 @@ private struct Composer: View {
     }
 
     private var modelAndEffortAccessibilityLabel: String {
-        let modelName = model.selectedModel?.compactName ?? "选择模型"
+        let modelName = model.selectedModelDisplayName
         guard let effort = model.selectedEffort else {
             return "\(modelName)，\(model.selectedSpeedLabel)速度"
         }

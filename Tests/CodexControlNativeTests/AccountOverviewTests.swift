@@ -18,6 +18,42 @@ final class AccountOverviewTests: XCTestCase {
         XCTAssertEqual(AccountOverviewRefreshIssue.parse("unexpected backend response").title, "套餐信息刷新失败")
     }
 
+    func testResetCreditUseRequiresSupportedTypeAndKnownFutureExpiry() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let usable = RemoteUsageSnapshot.ResetCredit(
+            ref: "safe-ref", expiresAt: 1_800_000_100, resetType: "codexRateLimits"
+        )
+        XCTAssertNil(ResetCreditUsePresentation.unavailableReason(for: usable, now: now))
+        XCTAssertEqual(
+            ResetCreditUsePresentation.unavailableReason(
+                for: .init(ref: "safe-ref", expiresAt: nil, resetType: "codexRateLimits"),
+                now: now
+            ),
+            "接口未提供截止时间"
+        )
+        XCTAssertEqual(
+            ResetCreditUsePresentation.unavailableReason(
+                for: .init(ref: "safe-ref", expiresAt: 1_799_999_999, resetType: "codexRateLimits"),
+                now: now
+            ),
+            "这条记录已经过期"
+        )
+        XCTAssertEqual(
+            ResetCreditUsePresentation.unavailableReason(
+                for: .init(ref: "safe-ref", expiresAt: 1_800_000_100, resetType: "other"),
+                now: now
+            ),
+            "这条记录不能重置 Codex 额度"
+        )
+    }
+
+    func testResetCreditOutcomesUseClearLocalMessages() {
+        XCTAssertEqual(ResetCreditUsePresentation.outcome("reset").message, "重置成功，额度信息已刷新。")
+        XCTAssertFalse(ResetCreditUsePresentation.outcome("reset").isError)
+        XCTAssertTrue(ResetCreditUsePresentation.outcome("noCredit").isError)
+        XCTAssertTrue(ResetCreditUsePresentation.outcome("unexpected").isError)
+    }
+
     func testProTiersMatchOfficialClientNames() {
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "pro"]]).planDisplayName, "Pro 20×")
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "prolite"]]).planDisplayName, "Pro 5×")

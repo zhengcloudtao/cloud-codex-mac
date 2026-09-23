@@ -2,6 +2,18 @@ import XCTest
 @testable import CloudCodex
 
 final class WorkspaceOrganizationTests: XCTestCase {
+    func testWorkspaceCategoryDisclosureStatePersistsNamedAndUncategorizedSections() {
+        let keys: Set<String> = [
+            WorkspaceCategoryDisclosureState.key(for: "cloud-id"),
+            WorkspaceCategoryDisclosureState.key(for: nil)
+        ]
+        let encoded = WorkspaceCategoryDisclosureState.encode(keys)
+
+        XCTAssertEqual(WorkspaceCategoryDisclosureState.decode(encoded), keys)
+        XCTAssertEqual(WorkspaceCategoryDisclosureState.key(for: nil), "__uncategorized__")
+        XCTAssertEqual(encoded, "__uncategorized__\ncloud-id")
+    }
+
     func testAssignMoveAndDeleteCategory() throws {
         var organization = WorkspaceOrganization()
         let development = try XCTUnwrap(organization.addCategory(named: "开发"))

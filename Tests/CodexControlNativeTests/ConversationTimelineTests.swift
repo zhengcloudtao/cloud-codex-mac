@@ -180,6 +180,26 @@ final class ConversationTimelineTests: XCTestCase {
         )
     }
 
+    func testEveryActivityDurationUsesLiveAndFinalLabels() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(
+            ActivityDurationPresentation.label(
+                startedAt: start,
+                completedAt: nil,
+                now: start.addingTimeInterval(8)
+            ),
+            "已耗时 8 秒"
+        )
+        XCTAssertEqual(
+            ActivityDurationPresentation.label(
+                startedAt: start,
+                completedAt: start.addingTimeInterval(3_725),
+                now: start.addingTimeInterval(9_999)
+            ),
+            "耗时 1:02:05"
+        )
+    }
+
     func testQuietTurnFailureAndStopRemainVisibleWithoutSteps() {
         let progress = ChatMessage(id: "turn-progress", role: .activity, text: "连接失败", activityStatus: "失败")
         let failed = ConversationProcessGroup(messages: [progress])
@@ -198,6 +218,15 @@ final class ConversationTimelineTests: XCTestCase {
         XCTAssertEqual(entries.count, 1)
         guard case .process(let group) = entries[0] else { return XCTFail() }
         XCTAssertEqual(group.messages.map(\.id), rows.map(\.id))
+    }
+
+    func testProcessLogViewportUsesStableBoundedHeight() {
+        XCTAssertEqual(ProcessLogLayout.viewportHeight(stepCount: 0, includesFailureSummary: false), 64)
+        XCTAssertEqual(ProcessLogLayout.viewportHeight(stepCount: 1, includesFailureSummary: false), 64)
+        XCTAssertEqual(ProcessLogLayout.viewportHeight(stepCount: 2, includesFailureSummary: false), 108)
+        XCTAssertEqual(ProcessLogLayout.viewportHeight(stepCount: 1, includesFailureSummary: true), 108)
+        XCTAssertEqual(ProcessLogLayout.viewportHeight(stepCount: 28, includesFailureSummary: false), 320)
+        XCTAssertEqual(ProcessLogLayout.viewportHeight(stepCount: 10_000, includesFailureSummary: true), 320)
     }
 
     @MainActor

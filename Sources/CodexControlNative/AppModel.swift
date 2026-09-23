@@ -9,11 +9,16 @@ enum ThreadInputAvailability: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let recommendedModelSelectionID = "__cloudcodex_recommended__"
+
     let browser = EmbeddedBrowser()
     let connectionHealth = ConnectionHealth()
     let systemMetrics = SystemMetricsMonitor()
     @Published private(set) var accountOverview: AccountOverview?
     @Published private(set) var accountOverviewError: String?
+    @Published private(set) var resetCreditInProgressRef: String?
+    @Published private(set) var resetCreditStatusMessage: String?
+    @Published private(set) var resetCreditStatusIsError = false
     @Published private(set) var recentThirtyMinuteConsumptionRate: Double?
     @Published private(set) var usageInsights: CodexUsageInsights?
     @Published private(set) var usageInsightsError: String?
@@ -511,25 +516,31 @@ final class AppModel: ObservableObject {
             } else {
                 let state = try await client.readThreadState(item.threadID)
                 guard state.status == "idle", !locallyRunningThreadIDs.contains(item.threadID) else { return }
-                guard waitingMessages.first(where: { $0.threadID == item.threadID })?.id == messageID else { return }
-                rememberTurnLaunch(
-                    threadID: item.threadID,
-                    model: item.model,
-                    effort: item.effort,
-                    permissions: item.permissions,
-                    serviceTier: item.serviceTier
-                )
-                liveTurnMetadataByThread[item.threadID] = TurnModelMetadata(model: item.model, reasoningEffort: item.effort)
-                setLocalTurnRunning(item.threadID, permissions: item.permissions)
+                // Re-read the queue head after the asynchronous status check. The
+                // exact snapshot shown in the queue must be the snapshot staged in
+                // history and submitted to app-server.
+                guard let current = waitingMessages.first(where: { $0.threadID == item.threadID }),
+                      current.id == messageID else { return }
+                let localMessageID = "local-waiting-\(current.id.uuidString)"
                 do {
-                    try await client.resumeThread(item.threadID)
-                    let turnID = try await client.startTurn(threadID: item.threadID,
-                        text: item.text, attachments: item.attachments, model: item.model,
-                        effort: item.effort, permissions: item.permissions, serviceTier: item.serviceTier)
-                    setLocalTurnRunning(item.threadID, turnID: turnID)
-                    setThreadRunning(item.threadID, running: true)
+                    try await startTurnOptimistically(
+                        threadID: current.threadID,
+                        localMessageID: localMessageID,
+                        text: current.text,
+                        outgoingAttachments: current.attachments,
+                        model: current.model,
+                        effort: current.effort,
+                        permissions: current.permissions,
+                        serviceTier: current.serviceTier
+                    )
                 } catch {
-                    clearLocalTurn(item.threadID)
+                    rollbackOptimisticSend(
+                        threadID: current.threadID,
+                        localMessageID: localMessageID,
+                        text: current.text,
+                        outgoingAttachments: current.attachments,
+                        restoreComposer: false
+                    )
                     throw error
                 }
             }
@@ -624,7 +635,9 @@ final class AppModel: ObservableObject {
     private var capacityRetryStates: [String: CapacityRetryState] = [:]
     private var capacityRetryTasks: [String: Task<Void, Never>] = [:]
     private var messagesByThread: [String: [ChatMessage]] = [:]
-    @Published private(set) var selectedCollaborationTasks: [CollaborationChildTask] = []
+    var selectedCollaborationTasks: [CollaborationChildTask] {
+        ConversationTimeline.latestChildTasks(from: messages)
+    }
     private var threadSummaries: [String: CodexThread] = [:]
     private var selectionGeneration = 0
     private var turnEventRevision: [String: Int] = [:]
@@ -650,10 +663,6 @@ final class AppModel: ObservableObject {
         if eventThreadID == threadID { eventBuffer = value; return }
         messagesByThread[threadID] = value
         if selectedThreadID == threadID {
-            let childTasks = ConversationTimeline.latestChildTasks(from: value)
-            if !childTasks.isEmpty, selectedCollaborationTasks != childTasks {
-                selectedCollaborationTasks = childTasks
-            }
             if messages != value { messages = value }
         }
     }
@@ -982,7 +991,20 @@ final class AppModel: ObservableObject {
     }
 
     var selectedModel: CodexModelOption? {
-        modelOptions.first { $0.id == selectedModelID }
+        guard selectedModelID != Self.recommendedModelSelectionID else { return nil }
+        return modelOptions.first { $0.id == selectedModelID }
+    }
+
+    var recommendedModel: CodexModelOption? {
+        modelOptions.first(where: \.isDefault) ?? modelOptions.first
+    }
+
+    var selectedModelCapabilities: CodexModelOption? {
+        selectedModelID == Self.recommendedModelSelectionID ? recommendedModel : selectedModel
+    }
+
+    var selectedModelDisplayName: String {
+        selectedModelID == Self.recommendedModelSelectionID ? "默认" : (selectedModel?.compactName ?? "选择模型")
     }
 
     var selectedPermission: PermissionProfileOption? {
@@ -990,11 +1012,11 @@ final class AppModel: ObservableObject {
     }
 
     var availableEfforts: [String] {
-        selectedModel?.composerEfforts ?? []
+        selectedModelCapabilities?.composerEfforts ?? []
     }
 
     var supportsFastMode: Bool {
-        selectedModel?.fastServiceTierID != nil
+        selectedModelCapabilities?.fastServiceTierID != nil
     }
 
     var selectedSpeedLabel: String {
@@ -1002,7 +1024,7 @@ final class AppModel: ObservableObject {
     }
 
     var selectedServiceTier: String {
-        if isFastModeEnabled, let tier = selectedModel?.fastServiceTierID {
+        if isFastModeEnabled, let tier = selectedModelCapabilities?.fastServiceTierID {
             return tier
         }
         return "default"
@@ -1112,6 +1134,41 @@ final class AppModel: ObservableObject {
         recentThirtyMinuteConsumptionRate = quotaConsumptionTracker.record(account: overview)
         if let data = try? JSONEncoder().encode(quotaConsumptionTracker) {
             remoteDefaults.set(data, forKey: quotaConsumptionHistoryKey)
+        }
+    }
+
+    func consumeResetCredit(_ credit: RemoteUsageSnapshot.ResetCredit) async {
+        guard resetCreditInProgressRef == nil else { return }
+        if let reason = ResetCreditUsePresentation.unavailableReason(for: credit) {
+            resetCreditStatusMessage = reason
+            resetCreditStatusIsError = true
+            return
+        }
+
+        resetCreditInProgressRef = credit.ref
+        resetCreditStatusMessage = nil
+        defer { resetCreditInProgressRef = nil }
+
+        do {
+            let outcome = try await client.consumeRemoteReset(.init(
+                id: UUID().uuidString,
+                creditRef: credit.ref
+            ))
+            let presentation = ResetCreditUsePresentation.outcome(outcome)
+            resetCreditStatusMessage = presentation.message
+            resetCreditStatusIsError = presentation.isError
+
+            do {
+                applyAccountOverview(try await client.readAccountOverview())
+                accountOverviewError = nil
+            } catch {
+                accountOverviewError = error.localizedDescription
+                resetCreditStatusMessage = presentation.message + " 最新额度暂时未能读取，请稍后刷新。"
+            }
+        } catch {
+            let issue = AccountOverviewRefreshIssue.parse(error.localizedDescription)
+            resetCreditStatusMessage = "使用失败：\(issue.message)"
+            resetCreditStatusIsError = true
         }
     }
 
@@ -1459,6 +1516,9 @@ final class AppModel: ObservableObject {
         isConversationLoading = false
         hasMoreThreads = false
         searchText = ""
+        if let path {
+            stageNewThread(in: path)
+        }
         Task {
             if canReleasePrevious, let previousThreadID {
                 try? await client.unsubscribeThread(previousThreadID)
@@ -1487,7 +1547,6 @@ final class AppModel: ObservableObject {
         threadOwnershipNotice = nil
         threadInputAvailability = id == nil ? .available : .checking
         selectedThreadID = id
-        selectedCollaborationTasks = []
         syncFastModeFromSelectedThread()
         messages = id.flatMap { messagesByThread[$0] } ?? []
         // Publish loading together with the new selection so an uncached
@@ -1571,7 +1630,6 @@ final class AppModel: ObservableObject {
                 threads[index] = updated
             }
             if selectedThreadID == id {
-                selectedCollaborationTasks = ConversationTimeline.latestChildTasks(from: loadedMessages)
                 flushPendingDeltas()
                 storeMessages(ConversationHistory.merge(snapshot: loadedMessages, cached: messages), for: id)
                 scheduleTurnModelMetadataLoad(
@@ -1673,7 +1731,34 @@ final class AppModel: ObservableObject {
             threadOwnershipNotice = nil
         }
         setThreadRunning(threadID, running: true)
+        appendOptimisticUserMessage(
+            threadID: threadID,
+            localMessageID: localMessageID,
+            text: text,
+            outgoingAttachments: outgoingAttachments
+        )
+        if selectedThreadID == threadID { beginTurnProgress() }
+        try await client.resumeThread(threadID)
+        let turnID = try await client.startTurn(
+            threadID: threadID,
+            text: text,
+            attachments: outgoingAttachments,
+            model: model,
+            effort: effort,
+            permissions: permissions,
+            serviceTier: serviceTier
+        )
+        setLocalTurnRunning(threadID, turnID: turnID)
+    }
+
+    func appendOptimisticUserMessage(
+        threadID: String,
+        localMessageID: String,
+        text: String,
+        outgoingAttachments: [ComposerAttachment]
+    ) {
         var history = conversationMessages(for: threadID)
+        history.removeAll { $0.id == localMessageID }
         history.append(.init(
             id: localMessageID,
             role: .user,
@@ -1688,18 +1773,6 @@ final class AppModel: ObservableObject {
             timestamp: Date()
         ))
         storeMessages(history, for: threadID)
-        if selectedThreadID == threadID { beginTurnProgress() }
-        try await client.resumeThread(threadID)
-        let turnID = try await client.startTurn(
-            threadID: threadID,
-            text: text,
-            attachments: outgoingAttachments,
-            model: model,
-            effort: effort,
-            permissions: permissions,
-            serviceTier: serviceTier
-        )
-        setLocalTurnRunning(threadID, turnID: turnID)
     }
 
     func handleSendFailure(
@@ -2094,7 +2167,13 @@ final class AppModel: ObservableObject {
     }
 
     func selectModel(_ id: String, preferredEffort: String? = nil) {
-        guard let option = modelOptions.first(where: { $0.id == id }) else { return }
+        let option: CodexModelOption?
+        if id == Self.recommendedModelSelectionID {
+            option = recommendedModel
+        } else {
+            option = modelOptions.first(where: { $0.id == id })
+        }
+        guard let option else { return }
         selectedModelID = id
         if let preferredEffort, option.composerEfforts.contains(preferredEffort) {
             selectedEffort = preferredEffort
@@ -2112,7 +2191,7 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: fastModeKey)
         guard let threadID = selectedThreadID else { return }
 
-        let serviceTier = enabled ? (selectedModel?.fastServiceTierID ?? "priority") : "default"
+        let serviceTier = enabled ? (selectedModelCapabilities?.fastServiceTierID ?? "priority") : "default"
         let previousServiceTier = selectedThread?.serviceTier
         let generation = serviceTierUpdateGenerationByThread[threadID, default: 0] + 1
         serviceTierUpdateGenerationByThread[threadID] = generation
@@ -2152,23 +2231,31 @@ final class AppModel: ObservableObject {
         speech.stop()
         cancelWaitingMessageEdit()
         cancelInterruptedMessageEdit()
-        newThreadFocusRequest = UUID()
-        if showingNewThread { return }
-        newThreadFolder = selectedFolder
+        let folder = selectedFolder
             ?? selectedThread?.cwd
             ?? FileManager.default.homeDirectoryForCurrentUser.path
-        newThreadPrompt = ""
-        newThreadAttachments = []
-        threadOwnershipNotice = nil
+        if showingNewThread {
+            newThreadFocusRequest = UUID()
+            return
+        }
         selectedThreadMonitorTask?.cancel()
         selectedThreadMonitorTask = nil
         preserveSelectedConversation()
         isExternalThreadProcessing = false
+        stageNewThread(in: folder)
+        Task { await loadPermissionProfiles(cwd: newThreadFolder) }
+    }
+
+    private func stageNewThread(in folder: String) {
+        newThreadFocusRequest = UUID()
+        newThreadFolder = folder
+        newThreadPrompt = ""
+        newThreadAttachments = []
+        threadOwnershipNotice = nil
         selectedThreadID = nil
         syncSelectedLocalTurnState()
         messages = []
         showingNewThread = true
-        Task { await loadPermissionProfiles(cwd: newThreadFolder) }
     }
 
     func cancelNewThread() {
@@ -2232,8 +2319,9 @@ final class AppModel: ObservableObject {
         do {
             modelOptions = try await client.listModels()
             let preferred = selectedThread?.model
+                ?? (selectedModelID == Self.recommendedModelSelectionID ? Self.recommendedModelSelectionID : nil)
                 ?? modelOptions.first(where: { $0.id == selectedModelID })?.id
-                ?? modelOptions.first(where: { $0.id == "gpt-5.6-sol" })?.id
+                ?? (recommendedModel == nil ? nil : Self.recommendedModelSelectionID)
                 ?? modelOptions.first?.id
             if let preferred { selectModel(preferred, preferredEffort: selectedThread?.reasoningEffort) }
         } catch {
@@ -2652,14 +2740,17 @@ final class AppModel: ObservableObject {
             return
         }
         let modelOption: CodexModelOption?
+        let modelOverride: String?
         if requestedModel.isEmpty {
-            modelOption = selectedModel
+            modelOption = selectedModelCapabilities
+            modelOverride = selectedModel?.model
         } else {
             guard let available = modelOptions.first(where: { $0.id == requestedModel || $0.model == requestedModel }) else {
                 await failRemoteTask(task, message: "这台 Mac 当前不支持模型 \(requestedModel)。")
                 return
             }
             modelOption = available
+            modelOverride = available.model
         }
 
         let requestedEffort = task.effort.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2707,7 +2798,7 @@ final class AppModel: ObservableObject {
             if threadID.isEmpty {
                 let thread = try await client.createThread(
                     cwd: task.workspace,
-                    model: modelOption?.model,
+                    model: modelOverride,
                     permissions: permission,
                     serviceTier: tier
                 )
@@ -2731,7 +2822,7 @@ final class AppModel: ObservableObject {
             remoteControlStatus = "正在执行 \(remoteExecutions.count) 个远程任务"
             rememberTurnLaunch(
                 threadID: threadID,
-                model: modelOption?.model,
+                model: modelOverride,
                 effort: effort,
                 permissions: permission,
                 serviceTier: tier,
@@ -2742,13 +2833,13 @@ final class AppModel: ObservableObject {
             setThreadRunning(threadID, running: true)
             // Capture this remote request, never the visible composer's model.
             liveTurnMetadataByThread[threadID] = TurnModelMetadata(
-                model: modelOption?.model, reasoningEffort: effort
+                model: modelOverride, reasoningEffort: effort
             )
             let turnID = try await client.startTurn(
                 threadID: threadID,
                 text: task.prompt,
                 attachments: attachments,
-                model: modelOption?.model,
+                model: modelOverride,
                 effort: effort,
                 permissions: permission,
                 serviceTier: tier,
@@ -3993,10 +4084,13 @@ final class AppModel: ObservableObject {
     }
 
     private func applyLiveTurnMetadata(to message: inout ChatMessage, threadID: String) {
+        // Turn identity is independent of whether model metadata is already
+        // available. Keeping this assignment behind the metadata lookup can
+        // leave a local bubble unresolved and let a later queued turn claim it.
+        if message.turnID == nil { message.turnID = activeTurnIDsByThread[threadID] }
         guard let metadata = liveTurnMetadataByThread[threadID] else { return }
         message.model = metadata.model
         message.reasoningEffort = metadata.reasoningEffort
-        if message.turnID == nil { message.turnID = activeTurnIDsByThread[threadID] }
     }
 
     private func completeStreamingActivities() {

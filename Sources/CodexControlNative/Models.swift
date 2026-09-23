@@ -273,6 +273,7 @@ struct CodexModelOption: Identifiable, Hashable {
     let model: String
     let displayName: String
     let description: String
+    let isDefault: Bool
     let defaultEffort: String
     let supportedEfforts: [String]
     let defaultServiceTier: String?
@@ -300,10 +301,17 @@ struct CodexModelOption: Identifiable, Hashable {
     }
 
     var compactName: String {
-        displayName
-            .replacingOccurrences(of: "GPT-", with: "")
-            .replacingOccurrences(of: "-", with: " ")
-            .replacingOccurrences(of: "Sol", with: "Sol")
+        pickerName
+    }
+
+    /// app-server uses hyphens in catalog names (for example GPT-6-Astra),
+    /// while the Codex model picker keeps the GPT family hyphen and separates
+    /// the named tier with a space (GPT-6 Astra).
+    var pickerName: String {
+        guard displayName.hasPrefix("GPT-") else {
+            return displayName.replacingOccurrences(of: "-", with: " ")
+        }
+        return "GPT-" + String(displayName.dropFirst(4)).replacingOccurrences(of: "-", with: " ")
     }
 
     init?(json: [String: Any]) {
@@ -315,6 +323,7 @@ struct CodexModelOption: Identifiable, Hashable {
         self.model = model
         self.displayName = displayName
         self.description = json["description"] as? String ?? ""
+        self.isDefault = json["isDefault"] as? Bool ?? false
         self.defaultEffort = defaultEffort
         let efforts = json["supportedReasoningEfforts"] as? [[String: Any]] ?? []
         self.supportedEfforts = efforts.compactMap { $0["reasoningEffort"] as? String }
