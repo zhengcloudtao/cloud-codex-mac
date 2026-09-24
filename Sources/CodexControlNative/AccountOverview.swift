@@ -170,6 +170,24 @@ struct AccountOverview {
     static func compactConsumptionRateLabel(_ value: Double) -> String {
         String(format: "%.1f%%", max(0, min(100, value)))
     }
+
+    static func quotaResetCountdown(resetsAt: Double?, now: Date = Date()) -> String? {
+        guard let resetsAt, resetsAt.isFinite else { return nil }
+
+        let secondsRemaining = resetsAt - now.timeIntervalSince1970
+        guard secondsRemaining > 0 else { return "已到恢复时间，等待额度刷新" }
+
+        let totalMinutes = Int(ceil(secondsRemaining / 60))
+        let days = totalMinutes / (24 * 60)
+        let hours = totalMinutes % (24 * 60) / 60
+        let minutes = totalMinutes % 60
+
+        var components: [String] = []
+        if days > 0 { components.append("\(days)天") }
+        if days > 0 || hours > 0 { components.append("\(hours)小时") }
+        components.append("\(minutes)分钟")
+        return "还有 \(components.joined(separator: " "))恢复"
+    }
 }
 
 struct AccountOverviewRefreshIssue: Equatable {
@@ -308,107 +326,118 @@ struct AccountOverviewView: View {
                         .disabled(model.connectionHealth.isChecking)
                 }
                 if let account = model.accountOverview {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("订阅套餐：\(account.planDisplayName)").fontWeight(.semibold)
-                            Text(subscriptionPeriodLabel(account.subscriptionPeriodEnd))
-                                .foregroundStyle(.secondary)
-                            Divider()
-                            ForEach(account.usage.buckets, id: \.id) { bucket in
-                                Text(bucket.name).fontWeight(.semibold)
-                                ForEach(Array(bucket.windows.enumerated()), id: \.offset) { _, window in
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("\(windowName(window.windowDurationMins)) · 剩余 \(AccountOverview.remaining(window))")
-                                        Text("恢复时间：\(dateLabel(window.resetsAt))").foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                            if account.usage.buckets.isEmpty { Text("当前账号未提供额度窗口。") }
-                            if let pace = account.weeklyPaceStatus() {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text("每周使用进度：\(pace.label)")
-                                        .fontWeight(.semibold)
-                                        .foregroundStyle(paceColor(pace.state))
-                                    Text(pace.detail)
-                                        .foregroundStyle(.secondary)
-                                }
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(paceColor(pace.state).opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            }
-                            if account.weeklyUsageWindow?.usedPercent != nil {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("最近 30 分钟消耗速度")
-                                        .fontWeight(.semibold)
-                                    if let rate = model.recentThirtyMinuteConsumptionRate {
-                                        Text(AccountOverview.consumptionRateLabel(rate))
-                                            .font(.title3.weight(.semibold))
-                                            .monospacedDigit()
-                                        Text("表示最近 30 分钟消耗的每周总额度百分比；额度恢复或重置后会重新采集。")
-                                            .foregroundStyle(.secondary)
-                                    } else {
-                                        Text("正在采集，需要连续获得满 30 分钟的额度数据。")
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            }
-                            Divider()
-                            Text("可用重置次数：\(account.usage.resetCredits?.availableCount.map(String.init) ?? "未提供")")
-                                .fontWeight(.semibold)
-                            if let credits = account.usage.resetCredits?.credits {
-                                ForEach(Array(credits.enumerated()), id: \.element.ref) { index, credit in
-                                    HStack(spacing: 12) {
-                                        Text("第 \(index + 1) 次 · 到期：\(dateLabel(credit.expiresAt))")
-                                        Spacer(minLength: 8)
-                                        if model.resetCreditInProgressRef == credit.ref {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                                .frame(width: 78, height: 28)
-                                        } else {
-                                            Button {
-                                                pendingResetCredit = credit
-                                            } label: {
-                                                Label("使用", systemImage: "arrow.clockwise")
-                                                    .font(.caption.weight(.semibold))
-                                                    .frame(width: 58)
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("订阅套餐：\(account.planDisplayName)").fontWeight(.semibold)
+                                Text(subscriptionPeriodLabel(account.subscriptionPeriodEnd))
+                                    .foregroundStyle(.secondary)
+                                Divider()
+                                ForEach(account.usage.buckets, id: \.id) { bucket in
+                                    Text(bucket.name).fontWeight(.semibold)
+                                    ForEach(Array(bucket.windows.enumerated()), id: \.offset) { _, window in
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("\(windowName(window.windowDurationMins)) · 剩余 \(AccountOverview.remaining(window))")
+                                            Text("恢复时间：\(dateLabel(window.resetsAt))").foregroundStyle(.secondary)
+                                            if let countdown = AccountOverview.quotaResetCountdown(
+                                                resetsAt: window.resetsAt,
+                                                now: context.date
+                                            ) {
+                                                Text(countdown)
+                                                    .font(.caption.weight(.medium))
+                                                    .foregroundStyle(.secondary)
+                                                    .monospacedDigit()
                                             }
-                                            .buttonStyle(.bordered)
-                                            .buttonBorderShape(.roundedRectangle(radius: 7))
-                                            .controlSize(.regular)
-                                            .tint(.accentColor)
-                                            .disabled(
-                                                model.resetCreditInProgressRef != nil
-                                                    || ResetCreditUsePresentation.unavailableReason(for: credit) != nil
-                                            )
-                                            .help(ResetCreditUsePresentation.unavailableReason(for: credit) ?? "使用这次额度重置")
                                         }
                                     }
-                                    .padding(.trailing, 12)
                                 }
-                                if credits.isEmpty { Text("接口没有返回可选择的重置明细。") }
-                                if let count = account.usage.resetCredits?.availableCount, count > credits.count {
-                                    Text("还有 \(count - credits.count) 次缺少可安全使用的明细。")
+                                if account.usage.buckets.isEmpty { Text("当前账号未提供额度窗口。") }
+                                if let pace = account.weeklyPaceStatus(now: context.date) {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text("每周使用进度：\(pace.label)")
+                                            .fontWeight(.semibold)
+                                            .foregroundStyle(paceColor(pace.state))
+                                        Text(pace.detail)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(paceColor(pace.state).opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 }
-                            } else {
-                                Text("重置明细：接口未提供，不能执行重置。")
+                                if account.weeklyUsageWindow?.usedPercent != nil {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("最近 30 分钟消耗速度")
+                                            .fontWeight(.semibold)
+                                        if let rate = model.recentThirtyMinuteConsumptionRate {
+                                            Text(AccountOverview.consumptionRateLabel(rate))
+                                                .font(.title3.weight(.semibold))
+                                                .monospacedDigit()
+                                            Text("表示最近 30 分钟消耗的每周总额度百分比；额度恢复或重置后会重新采集。")
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Text("正在采集，需要连续获得满 30 分钟的额度数据。")
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                                Divider()
+                                Text("可用重置次数：\(account.usage.resetCredits?.availableCount.map(String.init) ?? "未提供")")
+                                    .fontWeight(.semibold)
+                                if let credits = account.usage.resetCredits?.credits {
+                                    ForEach(Array(credits.enumerated()), id: \.element.ref) { index, credit in
+                                        HStack(spacing: 12) {
+                                            Text("第 \(index + 1) 次 · 到期：\(dateLabel(credit.expiresAt))")
+                                            Spacer(minLength: 8)
+                                            if model.resetCreditInProgressRef == credit.ref {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                    .frame(width: 78, height: 28)
+                                            } else {
+                                                Button {
+                                                    pendingResetCredit = credit
+                                                } label: {
+                                                    Label("使用", systemImage: "arrow.clockwise")
+                                                        .font(.caption.weight(.semibold))
+                                                        .frame(width: 58)
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .buttonBorderShape(.roundedRectangle(radius: 7))
+                                                .controlSize(.regular)
+                                                .tint(.accentColor)
+                                                .disabled(
+                                                    model.resetCreditInProgressRef != nil
+                                                        || ResetCreditUsePresentation.unavailableReason(for: credit) != nil
+                                                )
+                                                .help(ResetCreditUsePresentation.unavailableReason(for: credit) ?? "使用这次额度重置")
+                                            }
+                                        }
+                                        .padding(.trailing, 12)
+                                    }
+                                    if credits.isEmpty { Text("接口没有返回可选择的重置明细。") }
+                                    if let count = account.usage.resetCredits?.availableCount, count > credits.count {
+                                        Text("还有 \(count - credits.count) 次缺少可安全使用的明细。")
+                                    }
+                                } else {
+                                    Text("重置明细：接口未提供，不能执行重置。")
+                                }
+                                if let message = model.resetCreditStatusMessage {
+                                    Text(message)
+                                        .font(.caption)
+                                        .foregroundStyle(model.resetCreditStatusIsError ? Color.orange : Color.green)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Divider()
+                                Text("更新于 \(dateLabel(account.usage.capturedAt)) · 时间按本机时区显示")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text("使用重置前会再次确认；多个额度窗口按接口返回分别列出。")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
-                            if let message = model.resetCreditStatusMessage {
-                                Text(message)
-                                    .font(.caption)
-                                    .foregroundStyle(model.resetCreditStatusIsError ? Color.orange : Color.green)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Divider()
-                            Text("更新于 \(dateLabel(account.usage.capturedAt)) · 时间按本机时区显示")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Text("使用重置前会再次确认；多个额度窗口按接口返回分别列出。")
-                                .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
                     }
                 } else { Text("尚未读取到套餐或额度，请检查本机 Codex 登录和连接状态。") }
                 if let error = model.accountOverviewError {

@@ -28,6 +28,28 @@ final class CodexUsageInsightsTests: XCTestCase {
         XCTAssertEqual(value.dailyBuckets.map(\.tokens), [800, 1200])
     }
 
+    func testOfficialProfileAndBoundDisplayNameOverrideWinOverAccountFallback() throws {
+        let profile = CodexProfileReader.Profile(
+            id: "user-123",
+            name: "lowercase",
+            email: "profile@example.com",
+            username: "profile.handle",
+            avatarURL: URL(string: "https://chatgpt.com/avatar.jpg")
+        )
+        let value = CodexUsageInsights.parse(
+            account: ["account": ["email": "account@example.com", "planType": "pro"]],
+            usage: [:],
+            profile: profile,
+            displayNameOverride: "Exact Official Name"
+        )
+
+        XCTAssertEqual(value.identity.profileID, "user-123")
+        XCTAssertEqual(value.identity.displayName, "Exact Official Name")
+        XCTAssertEqual(value.identity.email, "profile@example.com")
+        XCTAssertEqual(value.identity.secondaryLabel, "@profile.handle")
+        XCTAssertEqual(value.identity.avatarURL, URL(string: "https://chatgpt.com/avatar.jpg"))
+    }
+
     func testMissingUsageFieldsStayUnknown() {
         let value = CodexUsageInsights.parse(account: [:], usage: ["summary": [:]])
 

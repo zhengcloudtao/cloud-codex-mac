@@ -2,6 +2,7 @@ import SwiftUI
 
 struct CodexUsageInsights: Equatable {
     struct Identity: Equatable {
+        let profileID: String?
         let name: String?
         let email: String?
         let username: String?
@@ -52,11 +53,13 @@ struct CodexUsageInsights: Equatable {
         account: [String: Any],
         usage: [String: Any],
         profile: CodexProfileReader.Profile? = nil,
+        displayNameOverride: String? = nil,
         calendar: Calendar = .current
     ) -> Self {
         let accountValue = account["account"] as? [String: Any]
         let identity = Identity(
-            name: profile?.name,
+            profileID: profile?.id,
+            name: displayNameOverride ?? profile?.name,
             email: profile?.email ?? accountValue?["email"] as? String,
             username: profile?.username,
             avatarURL: profile?.avatarURL,

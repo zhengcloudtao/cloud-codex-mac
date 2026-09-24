@@ -126,7 +126,16 @@ final class AppServerClient {
     func readUsageInsights() async throws -> CodexUsageInsights {
         let account = try await request("account/read", params: ["refreshToken": false])
         let usage = try await request("account/usage/read", params: [:])
-        return CodexUsageInsights.parse(account: account, usage: usage, profile: CodexProfileReader().read())
+        let localProfile = CodexProfileReader().read()
+        let officialProfile = await CodexOfficialProfileReader().read()
+        let profile = officialProfile?.mergingFallback(localProfile) ?? localProfile
+        let displayNameOverride = CodexProfileDisplayNameStore().displayName(for: profile?.id)
+        return CodexUsageInsights.parse(
+            account: account,
+            usage: usage,
+            profile: profile,
+            displayNameOverride: displayNameOverride
+        )
     }
 
     func consumeRemoteReset(_ attempt: RemoteResetAttempt) async throws -> String {

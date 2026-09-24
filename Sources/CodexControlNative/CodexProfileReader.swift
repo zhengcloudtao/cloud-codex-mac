@@ -4,10 +4,35 @@ import Foundation
 /// Raw tokens and unrelated claims never leave this process.
 struct CodexProfileReader {
     struct Profile: Equatable {
+        let id: String?
         let name: String?
         let email: String?
         let username: String?
         let avatarURL: URL?
+
+        init(
+            id: String? = nil,
+            name: String?,
+            email: String?,
+            username: String?,
+            avatarURL: URL?
+        ) {
+            self.id = id
+            self.name = name
+            self.email = email
+            self.username = username
+            self.avatarURL = avatarURL
+        }
+
+        func mergingFallback(_ fallback: Profile?) -> Profile {
+            Profile(
+                id: id ?? fallback?.id,
+                name: name ?? fallback?.name,
+                email: email ?? fallback?.email,
+                username: username ?? fallback?.username,
+                avatarURL: avatarURL ?? fallback?.avatarURL
+            )
+        }
     }
 
     private static let profileClaim = "https://api.openai.com/profile"
@@ -29,6 +54,18 @@ struct CodexProfileReader {
         for path in authPaths() {
             guard let data = loadData(path), let profile = Self.profile(authData: data) else { continue }
             return profile
+        }
+        return nil
+    }
+
+    func accessToken() -> String? {
+        for path in authPaths() {
+            guard let data = loadData(path),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tokens = json["tokens"] as? [String: Any],
+                  let token = tokens["access_token"] as? String else { continue }
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
         }
         return nil
     }
@@ -74,6 +111,7 @@ struct CodexProfileReader {
             return url
         }
         let result = Profile(
+            id: firstString(["sub"]),
             name: firstString(["name"]),
             email: email,
             username: username,

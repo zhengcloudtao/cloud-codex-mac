@@ -213,6 +213,42 @@ final class AccountOverviewTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(account.weeklyUsageRecommendation(now: now)).value, "30%")
     }
 
+    func testQuotaResetCountdownShowsRemainingTimeToMinutePrecision() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        XCTAssertEqual(
+            AccountOverview.quotaResetCountdown(
+                resetsAt: now.addingTimeInterval(2 * 24 * 60 * 60 + 3 * 60 * 60 + 4 * 60).timeIntervalSince1970,
+                now: now
+            ),
+            "还有 2天 3小时 4分钟恢复"
+        )
+        XCTAssertEqual(
+            AccountOverview.quotaResetCountdown(
+                resetsAt: now.addingTimeInterval(61).timeIntervalSince1970,
+                now: now
+            ),
+            "还有 2分钟恢复"
+        )
+        XCTAssertEqual(
+            AccountOverview.quotaResetCountdown(
+                resetsAt: now.addingTimeInterval(30).timeIntervalSince1970,
+                now: now
+            ),
+            "还有 1分钟恢复"
+        )
+    }
+
+    func testQuotaResetCountdownHandlesUnknownAndReachedResetTime() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        XCTAssertNil(AccountOverview.quotaResetCountdown(resetsAt: nil, now: now))
+        XCTAssertEqual(
+            AccountOverview.quotaResetCountdown(resetsAt: now.timeIntervalSince1970, now: now),
+            "已到恢复时间，等待额度刷新"
+        )
+    }
+
     func testWeeklyPaceShowsAheadBehindAndOnTrackFromElapsedWeek() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         func account(used: Double) -> AccountOverview {
