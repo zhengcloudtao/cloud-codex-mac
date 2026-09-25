@@ -74,6 +74,40 @@ final class RemoteSchedulingTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteClaimsAreSerializedAcrossRunningAndReleasingThreads() {
+        XCTAssertTrue(AppModel.canClaimRemoteTask(
+            locallyRunningThreadIDs: [], remoteExecutionThreadIDs: [], releasingThreadIDs: []
+        ))
+        XCTAssertFalse(AppModel.canClaimRemoteTask(
+            locallyRunningThreadIDs: ["desktop"], remoteExecutionThreadIDs: [], releasingThreadIDs: []
+        ))
+        XCTAssertFalse(AppModel.canClaimRemoteTask(
+            locallyRunningThreadIDs: ["remote"], remoteExecutionThreadIDs: ["remote"], releasingThreadIDs: []
+        ))
+        XCTAssertFalse(AppModel.canClaimRemoteTask(
+            locallyRunningThreadIDs: [], remoteExecutionThreadIDs: [], releasingThreadIDs: ["finishing"]
+        ))
+    }
+
+    @MainActor
+    func testOnlyUnownedRemoteThreadCanReleaseItsSubscription() {
+        XCTAssertTrue(AppModel.shouldReleaseRemoteThread(
+            "remote", selectedThreadID: "desktop", locallyRunningThreadIDs: [],
+            waitingThreadIDs: [], remoteExecutionThreadIDs: [], capacityRetryThreadIDs: []
+        ))
+        for protected in ["selected", "running", "waiting", "remote", "retry"] {
+            XCTAssertFalse(AppModel.shouldReleaseRemoteThread(
+                protected,
+                selectedThreadID: protected == "selected" ? protected : "desktop",
+                locallyRunningThreadIDs: protected == "running" ? [protected] : [],
+                waitingThreadIDs: protected == "waiting" ? [protected] : [],
+                remoteExecutionThreadIDs: protected == "remote" ? [protected] : [],
+                capacityRetryThreadIDs: protected == "retry" ? [protected] : []
+            ))
+        }
+    }
+
+    @MainActor
     func testLateAndCanceledRefreshesDoNotReplaceNewSnapshot() async throws {
         let suite = "RemoteSchedulingTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

@@ -50,12 +50,42 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertTrue(AppModel.isComputerControlItem([
             "type": "dynamicToolCall", "namespace": "computer-use", "tool": "run"
         ]))
+        XCTAssertTrue(AppModel.isComputerControlItem([
+            "type": "mcpToolCall", "server": "cua_repl", "tool": "js"
+        ]))
         XCTAssertFalse(AppModel.isComputerControlItem([
             "type": "dynamicToolCall", "namespace": "browser", "tool": "open"
         ]))
         XCTAssertFalse(AppModel.isComputerControlItem([
             "type": "mcpToolCall", "server": "wechat", "tool": "preview"
         ]))
+    }
+
+    func testNativePipeFailureIsRecognizedFromCurrentMCPShape() throws {
+        let item: [String: Any] = [
+            "type": "mcpToolCall",
+            "server": "cua_repl",
+            "tool": "js",
+            "status": "failed",
+            "result": [
+                "content": [["type": "text", "text": "Sky Computer Use native pipe closed before response"]],
+                "isError": true
+            ]
+        ]
+
+        let message = try XCTUnwrap(AppModel.computerControlNativePipeFailure(item))
+        XCTAssertTrue(message.contains("暂停领取新任务 60 秒"))
+        XCTAssertNil(AppModel.computerControlNativePipeFailure([
+            "type": "mcpToolCall", "server": "wechat", "status": "failed",
+            "result": ["content": [["text": "native pipe closed before response"]]]
+        ]))
+    }
+
+    func testComputerControlCircuitExpires() {
+        let now = Date(timeIntervalSince1970: 100)
+        XCTAssertTrue(AppModel.computerControlCircuitIsOpen(until: now.addingTimeInterval(1), now: now))
+        XCTAssertFalse(AppModel.computerControlCircuitIsOpen(until: now, now: now))
+        XCTAssertFalse(AppModel.computerControlCircuitIsOpen(until: nil, now: now))
     }
 
     func testStalledComputerControlStopsTurnAndShowsSpecificReason() async throws {

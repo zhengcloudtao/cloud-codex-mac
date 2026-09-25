@@ -11,7 +11,7 @@ struct ReliableSelectableText: NSViewRepresentable {
     var maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
 
     func makeNSView(context: Context) -> NSTextView {
-        let textView = NSTextView(frame: .zero)
+        let textView = ReliableSelectableNSTextView(frame: .zero)
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -109,5 +109,51 @@ struct ReliableSelectableText: NSViewRepresentable {
             )
         }
         return proposedMaximumWidth
+    }
+}
+
+/// Keeps copying local to the message text view instead of relying entirely on
+/// SwiftUI's responder-chain bridge. A conversation refresh or a surrounding
+/// scroll gesture can leave an AppKit selection visible while another SwiftUI
+/// view temporarily owns the key focus; making the text view first responder
+/// at mouse-down and handling both copy entry points makes the visible
+/// selection authoritative.
+final class ReliableSelectableNSTextView: NSTextView {
+    var copyPasteboard: NSPasteboard = .general
+
+    override func mouseDown(with event: NSEvent) {
+        _ = window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let disallowedModifiers: NSEvent.ModifierFlags = [.control, .option, .shift]
+        if modifiers.contains(.command),
+           modifiers.intersection(disallowedModifiers).isEmpty,
+           event.charactersIgnoringModifiers?.lowercased() == "c",
+           copySelectedText() {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func copy(_ sender: Any?) {
+        if copySelectedText() { return }
+        super.copy(sender)
+    }
+
+    @discardableResult
+    func copySelectedText() -> Bool {
+        let selection = selectedRange()
+        guard selection.location != NSNotFound,
+              selection.length > 0,
+              NSMaxRange(selection) <= (string as NSString).length else {
+            return false
+        }
+
+        let selectedText = (string as NSString).substring(with: selection)
+        copyPasteboard.clearContents()
+        return copyPasteboard.setString(selectedText, forType: .string)
     }
 }

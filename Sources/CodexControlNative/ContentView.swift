@@ -1752,6 +1752,7 @@ private struct MessageList: View {
     @State private var viewportResetID = UUID()
     @StateObject private var scrollViewportController = MessageScrollViewportController()
     @State private var hasPositionedInitialHistory = false
+    @State private var historyLoadTriggerWasVisible = false
 
     private let messageBatchSize = 12
     private let timelinePadding: CGFloat = 22
@@ -1774,28 +1775,26 @@ private struct MessageList: View {
                         }
 
                         if hiddenEntryCount > 0 {
-                            Button {
-                                let anchorID = prependAnchorID(in: entries)
-                                let alignment = scrollViewportController.prependAlignment(for: anchorID)
-                                scrollViewportController.pendingAnchor = anchorID.map { ($0, alignment) }
-                                var transaction = Transaction()
-                                transaction.disablesAnimations = true
-                                withTransaction(transaction) {
-                                    visibleMessageLimit = min(entries.count, visibleMessageLimit + messageBatchSize)
+                            Label(
+                                "继续上滑，自动加载更早的 \(min(messageBatchSize, hiddenEntryCount)) 段内容",
+                                systemImage: "arrow.up.circle"
+                            )
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(.quaternary.opacity(0.45), in: Capsule())
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: HistoryAutoLoadTriggerFramePreferenceKey.self,
+                                        value: geometry.frame(in: .named("message-scroll-viewport"))
+                                    )
                                 }
-                            } label: {
-                                Label(
-                                    "显示更早的 \(min(messageBatchSize, hiddenEntryCount)) 段内容",
-                                    systemImage: "clock.arrow.circlepath"
-                                )
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
                             }
-                            .buttonStyle(.plain)
-                            .background(.quaternary.opacity(0.65), in: Capsule())
+                            .accessibilityLabel("自动加载更早的 \(min(messageBatchSize, hiddenEntryCount)) 段内容")
 
-                            Text("已折叠更早的 \(hiddenEntryCount) 段对话，执行过程可单独展开")
+                            Text("已折叠更早的 \(hiddenEntryCount) 段对话，上滑到顶部会自动加载")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
@@ -1879,6 +1878,13 @@ private struct MessageList: View {
                         // Publishing every lazy-layout offset back into SwiftUI
                         // invalidates the list while it is still placing its rows.
                         scrollViewportController.entryViewportOffsets = offsets
+                    }
+                    .onPreferenceChange(HistoryAutoLoadTriggerFramePreferenceKey.self) { frame in
+                        let triggerIsVisible = HistoryAutoLoad.triggerIsVisible(frame)
+                        guard triggerIsVisible != historyLoadTriggerWasVisible else { return }
+                        historyLoadTriggerWasVisible = triggerIsVisible
+                        guard triggerIsVisible else { return }
+                        loadEarlierMessages(in: entries)
                     }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -1964,10 +1970,22 @@ private struct MessageList: View {
     }
 
     private func prependAnchorID(in entries: [ConversationTimelineEntry]) -> String? {
-        // The load button is rendered immediately before the current suffix.
+        // The automatic load trigger is rendered immediately before the current suffix.
         // Its first entry is therefore the exact boundary that must remain
         // fixed while older entries are inserted above it.
         entries.suffix(visibleMessageLimit).first?.id
+    }
+
+    private func loadEarlierMessages(in entries: [ConversationTimelineEntry]) {
+        guard entries.count > visibleMessageLimit else { return }
+        let anchorID = prependAnchorID(in: entries)
+        let alignment = scrollViewportController.prependAlignment(for: anchorID)
+        scrollViewportController.pendingAnchor = anchorID.map { ($0, alignment) }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            visibleMessageLimit = min(entries.count, visibleMessageLimit + messageBatchSize)
+        }
     }
 
     private func messageEntryOffsetReader(id: String) -> some View {
@@ -2109,6 +2127,24 @@ private struct MessageEntryViewportOffsetPreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, newest in newest })
+    }
+}
+
+enum HistoryAutoLoad {
+    /// The trigger enters from above as the reader approaches the oldest
+    /// rendered message. Allow a small preload band so the next batch is ready
+    /// before the user reaches the absolute scroll limit.
+    static func triggerIsVisible(_ frame: CGRect?) -> Bool {
+        guard let frame, !frame.isNull, !frame.isInfinite else { return false }
+        return frame.maxY >= 0 && frame.minY <= 80
+    }
+}
+
+private struct HistoryAutoLoadTriggerFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect? = nil
+
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
     }
 }
 
@@ -2411,21 +2447,7 @@ private struct MessageBubble: View, Equatable {
                                     )
                                 }
                             }
-                            HStack(spacing: 9) {
-                                if !model.isEditingInterruptedMessage(message.id),
-                                   model.canEditInterruptedMessage(message) {
-                                    Button {
-                                        model.beginEditingInterruptedMessage(message)
-                                    } label: {
-                                        Label("编辑并重新执行", systemImage: "pencil")
-                                    }
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(.secondary)
-                                    .help("撤回已停止的最后一轮，修改后重新执行；不会回滚已经修改的本地文件")
-                                }
-                                MessageMetadataFooter(message: message)
-                            }
-                            .font(.caption2.weight(.medium))
+                            UserMessageFooter(message: message)
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 6) {
@@ -2768,6 +2790,8 @@ private struct MessageMetadataFooter: View {
             HStack(spacing: 9) {
                 if let modelUsageLabel = message.modelUsageLabel {
                     Label(modelUsageLabel, systemImage: "cpu")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(.quaternary, in: Capsule())
@@ -2775,11 +2799,52 @@ private struct MessageMetadataFooter: View {
                 }
                 if let timestamp = message.timestamp {
                     Label(MessageTimeFormatter.string(from: timestamp), systemImage: "clock")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .accessibilityLabel("消息时间 \(MessageTimeFormatter.accessibilityString(from: timestamp))")
                 }
             }
+            .fixedSize(horizontal: true, vertical: false)
             .font(.caption2.weight(.medium))
             .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct UserMessageFooter: View {
+    @EnvironmentObject private var model: AppModel
+    let message: ChatMessage
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                editButton
+                Spacer(minLength: 0)
+                MessageMetadataFooter(message: message)
+            }
+            VStack(alignment: .trailing, spacing: 6) {
+                editButton
+                MessageMetadataFooter(message: message)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .font(.caption2.weight(.medium))
+    }
+
+    @ViewBuilder
+    private var editButton: some View {
+        if !model.isEditingInterruptedMessage(message.id),
+           model.canEditInterruptedMessage(message) {
+            Button {
+                model.beginEditingInterruptedMessage(message)
+            } label: {
+                Label("编辑并重新执行", systemImage: "pencil")
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("撤回已停止的最后一轮，修改后重新执行；不会回滚已经修改的本地文件")
         }
     }
 }

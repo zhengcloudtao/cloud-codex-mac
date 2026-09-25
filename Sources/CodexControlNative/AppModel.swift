@@ -716,7 +716,17 @@ final class AppModel: ObservableObject {
     private var remoteUsageSnapshot: RemoteUsageSnapshot?
     private var remoteUsageLastAttempt: Date?
     private var remoteExecutions: [String: RemoteExecution] = [:]
-    private let maxConcurrentRemoteExecutions = 4
+    /// A crashed Sky bridge can restart quickly, but immediately binding the
+    /// same AX application again produces a crash loop. Remember the concrete
+    /// tool failure per thread and briefly stop claiming mini-program work.
+    private var computerControlNativeFailures: [String: String] = [:]
+    private var computerControlCircuitOpenUntil: Date?
+    /// `cua_repl` ultimately shares one native Sky bridge. Keeping several
+    /// remotely loaded threads alive at once leaves multiple accessibility
+    /// observers attached to the same application and can crash that bridge.
+    /// A release is counted as busy until app-server acknowledges
+    /// `thread/unsubscribe`, so the next mini-program task cannot race it.
+    private var remoteReleasingThreadIDs: Set<String> = []
     private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
     private let fastModeKey = "CloudCodex.fastModeEnabled.v1"
@@ -2569,7 +2579,12 @@ final class AppModel: ObservableObject {
                 }
             }
             if remoteControlPaired, remoteClaimTask == nil,
-               remoteExecutions.count < maxConcurrentRemoteExecutions {
+               !Self.computerControlCircuitIsOpen(until: computerControlCircuitOpenUntil, now: Date()),
+               Self.canClaimRemoteTask(
+                    locallyRunningThreadIDs: locallyRunningThreadIDs,
+                    remoteExecutionThreadIDs: Set(remoteExecutions.keys),
+                    releasingThreadIDs: remoteReleasingThreadIDs
+               ) {
                 // A slow image download / writer check must not pause heartbeat,
                 // history reads or status recovery. Keep claiming single-flight.
                 remoteClaimTask = Task { [weak self] in
@@ -2765,6 +2780,7 @@ final class AppModel: ObservableObject {
         }
 
         var threadID = task.threadId.trimmingCharacters(in: .whitespacesAndNewlines)
+        var acquiredThreadSubscription = false
         do {
             let permission: String?
             let approval: String?
@@ -2803,6 +2819,7 @@ final class AppModel: ObservableObject {
                     serviceTier: tier
                 )
                 threadID = thread.id
+                acquiredThreadSubscription = true
                 if !threads.contains(where: { $0.id == thread.id }) { threads.insert(thread, at: 0) }
             } else {
                 if locallyRunningThreadIDs.contains(threadID) {
@@ -2816,9 +2833,11 @@ final class AppModel: ObservableObject {
                     throw RemoteControlError.server("这个会话正在 Codex 中运行，请稍后重试。")
                 }
                 try await client.resumeThread(threadID)
+                acquiredThreadSubscription = true
             }
 
             remoteExecutions[threadID] = RemoteExecution(taskID: task.taskId, threadID: threadID, turnID: nil, responseText: "")
+            computerControlNativeFailures.removeValue(forKey: threadID)
             remoteControlStatus = "正在执行 \(remoteExecutions.count) 个远程任务"
             rememberTurnLaunch(
                 threadID: threadID,
@@ -2875,6 +2894,9 @@ final class AppModel: ObservableObject {
                 setThreadRunning(threadID, running: false)
                 remoteExecutions.removeValue(forKey: threadID)
             }
+            if acquiredThreadSubscription {
+                scheduleRemoteThreadRelease(threadID)
+            }
             if Self.shouldDeferRemoteTask(error) {
                 await deferRemoteTask(task, threadID: threadID, reason: Self.remoteWaitReason(error))
                 return
@@ -2892,6 +2914,56 @@ final class AppModel: ObservableObject {
 
     static func remoteWaitReason(_ error: Error) -> String {
         error.localizedDescription.lowercased().contains("active writer") ? "writer_busy" : "thread_busy"
+    }
+
+    static func canClaimRemoteTask(
+        locallyRunningThreadIDs: Set<String>,
+        remoteExecutionThreadIDs: Set<String>,
+        releasingThreadIDs: Set<String>
+    ) -> Bool {
+        locallyRunningThreadIDs.isEmpty
+            && remoteExecutionThreadIDs.isEmpty
+            && releasingThreadIDs.isEmpty
+    }
+
+    static func computerControlCircuitIsOpen(until: Date?, now: Date) -> Bool {
+        guard let until else { return false }
+        return until > now
+    }
+
+    static func shouldReleaseRemoteThread(
+        _ threadID: String,
+        selectedThreadID: String?,
+        locallyRunningThreadIDs: Set<String>,
+        waitingThreadIDs: Set<String>,
+        remoteExecutionThreadIDs: Set<String>,
+        capacityRetryThreadIDs: Set<String>
+    ) -> Bool {
+        selectedThreadID != threadID
+            && !locallyRunningThreadIDs.contains(threadID)
+            && !waitingThreadIDs.contains(threadID)
+            && !remoteExecutionThreadIDs.contains(threadID)
+            && !capacityRetryThreadIDs.contains(threadID)
+    }
+
+    /// Releases the writer and all per-thread MCP processes acquired for an
+    /// unselected mini-program task. Local selection, waiting messages and a
+    /// capacity retry keep their lease and remain resumable.
+    private func scheduleRemoteThreadRelease(_ threadID: String) {
+        guard Self.shouldReleaseRemoteThread(
+            threadID,
+            selectedThreadID: selectedThreadID,
+            locallyRunningThreadIDs: locallyRunningThreadIDs,
+            waitingThreadIDs: Set(waitingMessages.map(\.threadID)),
+            remoteExecutionThreadIDs: Set(remoteExecutions.keys),
+            capacityRetryThreadIDs: Set(capacityRetryStates.keys)
+        ), remoteReleasingThreadIDs.insert(threadID).inserted else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.remoteReleasingThreadIDs.remove(threadID) }
+            try? await self.client.unsubscribeThread(threadID)
+        }
     }
 
     private func deferRemoteTask(_ task: RemoteTask, threadID: String, reason: String) async {
@@ -2934,6 +3006,7 @@ final class AppModel: ObservableObject {
                                 self.clearLocalTurn(body.threadId)
                                 self.setThreadRunning(body.threadId, running: false)
                             }
+                            self.scheduleRemoteThreadRelease(body.threadId)
                         }
                         await self.reportRemoteTaskStatus(id, body: body)
                     }
@@ -3029,18 +3102,22 @@ final class AppModel: ObservableObject {
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String ?? "completed"
             let errorObject = turn?["error"] as? [String: Any]
-            let errorText = errorObject?["message"] as? String ?? ""
+            let nativeFailure = computerControlNativeFailures.removeValue(forKey: threadID)
+            let errorText = nativeFailure ?? errorObject?["message"] as? String ?? ""
+            let failureText = errorText.isEmpty ? "Codex 执行远程任务失败。" : errorText
+            let completedSuccessfully = status == "completed" && nativeFailure == nil
             remoteExecutions.removeValue(forKey: threadID)
+            scheduleRemoteThreadRelease(threadID)
             remoteControlStatus = remoteExecutions.isEmpty
-                ? (status == "completed" ? "远程任务已完成" : "远程任务执行失败")
+                ? (completedSuccessfully ? "远程任务已完成" : "远程任务执行失败：\(failureText)")
                 : "正在执行 \(remoteExecutions.count) 个远程任务"
             Task { [weak self] in
                 await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
-                        status: status == "completed" ? "completed" : "failed",
+                        status: completedSuccessfully ? "completed" : "failed",
                         threadId: execution.threadID,
                         turnId: execution.turnID ?? "",
                         result: execution.responseText,
-                        error: errorText,
+                        error: completedSuccessfully ? "" : failureText,
                         fileDiff: execution.fileDiff, progress: execution.progress
                 ))
             }
@@ -3050,6 +3127,7 @@ final class AppModel: ObservableObject {
             remoteExecutions.removeValue(forKey: threadID)
             clearLocalTurn(execution.threadID)
             setThreadRunning(execution.threadID, running: false)
+            scheduleRemoteThreadRelease(threadID)
             remoteControlStatus = remoteExecutions.isEmpty ? "远程任务失败：\(message)" : "正在执行 \(remoteExecutions.count) 个远程任务"
             Task { [weak self] in
                 await self?.reportRemoteTaskStatus(execution.taskID, body: RemoteTaskStatusBody(
@@ -3203,9 +3281,54 @@ final class AppModel: ObservableObject {
     }
 
     static func isComputerControlItem(_ item: [String: Any]) -> Bool {
-        guard item["type"] as? String == "dynamicToolCall" else { return false }
-        let namespace = (item["namespace"] as? String)?.lowercased() ?? ""
-        return namespace == "cua_repl" || namespace.contains("computer-use")
+        let type = item["type"] as? String ?? ""
+        let owner: String
+        switch type {
+        case "dynamicToolCall": owner = item["namespace"] as? String ?? ""
+        case "mcpToolCall": owner = item["server"] as? String ?? ""
+        default: return false
+        }
+        let normalized = owner.lowercased()
+        return normalized == "cua_repl" || normalized.contains("computer-use")
+    }
+
+    static func computerControlNativePipeFailure(_ item: [String: Any]) -> String? {
+        guard isComputerControlItem(item),
+              (item["status"] as? String)?.lowercased() == "failed" else { return nil }
+        let text = toolResultText(item["result"])
+        guard text.localizedCaseInsensitiveContains("Sky Computer Use native pipe closed before response")
+                || text.localizedCaseInsensitiveContains("native pipe closed before response") else { return nil }
+        return "原生界面控制服务在连接目标应用时崩溃。CloudCodex 已停止本轮并暂停领取新任务 60 秒，避免连续闪退；这不是普通的辅助功能授权失败。"
+    }
+
+    private static func toolResultText(_ value: Any?) -> String {
+        if let value = value as? String { return value }
+        if let value = value as? [Any] { return value.map { toolResultText($0) }.joined(separator: "\n") }
+        if let value = value as? [String: Any] {
+            return ["text", "message", "output", "content"].compactMap { key -> String? in
+                let text = toolResultText(value[key])
+                return text.isEmpty ? nil : text
+            }.joined(separator: "\n")
+        }
+        return ""
+    }
+
+    private func handleComputerControlNativePipeFailure(
+        _ message: String,
+        threadID: String,
+        turnID: String?
+    ) {
+        guard computerControlNativeFailures[threadID] == nil else { return }
+        computerControlNativeFailures[threadID] = message
+        computerControlCircuitOpenUntil = Date().addingTimeInterval(60)
+        if remoteExecutions[threadID] != nil {
+            remoteControlStatus = "界面控制服务崩溃，已停止本轮并暂停领取新任务 60 秒"
+        }
+        guard let activeTurnID = activeTurnIDsByThread[threadID],
+              turnID == nil || turnID == activeTurnID else { return }
+        Task { [weak self] in
+            try? await self?.client.interruptTurn(threadID: threadID, turnID: activeTurnID)
+        }
     }
 
     private func scheduleComputerControlTimeout(
@@ -3363,6 +3486,7 @@ final class AppModel: ObservableObject {
             let terminal = method == "turn/completed"
                 || (method == "error" && params["willRetry"] as? Bool != true)
             if terminal, capacityFailure == nil {
+                computerControlNativeFailures.removeValue(forKey: eventThreadID)
                 liveTurnMetadataByThread.removeValue(forKey: eventThreadID)
                 turnLaunchSettingsByThreadID.removeValue(forKey: eventThreadID)
                 cancelCapacityRetry(threadID: eventThreadID)
@@ -3516,6 +3640,13 @@ final class AppModel: ObservableObject {
             guard let item = params["item"] as? [String: Any] else { return }
             if let itemID = item["id"] as? String {
                 cancelComputerControlTimeout(itemID: itemID, threadID: eventThreadID)
+            }
+            if let message = Self.computerControlNativePipeFailure(item) {
+                handleComputerControlNativePipeFailure(
+                    message,
+                    threadID: eventThreadID,
+                    turnID: params["turnId"] as? String
+                )
             }
             if item["type"] as? String == "agentMessage",
                let id = item["id"] as? String,
@@ -3823,16 +3954,20 @@ final class AppModel: ObservableObject {
             let server = item["server"] as? String ?? "MCP"
             let tool = item["tool"] as? String ?? "工具"
             let status = item["status"] as? String ?? (completed ? "completed" : "inProgress")
+            let result = Self.toolResultText(item["result"])
+            let detail = [jsonPreview(item["arguments"]), result].filter { !$0.isEmpty }.joined(separator: "\n\n")
             upsertActivity(id: id, kind: .tool, title: "调用 \(server) · \(tool)",
-                           text: jsonPreview(item["arguments"]), status: localizedStatus(status),
+                           text: detail, status: localizedStatus(status),
                            isStreaming: !completed)
         case "dynamicToolCall":
             let tool = item["tool"] as? String ?? "工具"
             let namespace = item["namespace"] as? String
             let title = [namespace, tool].compactMap { $0 }.joined(separator: " · ")
             let status = item["status"] as? String ?? (completed ? "completed" : "inProgress")
+            let result = Self.toolResultText(item["result"])
+            let detail = [jsonPreview(item["arguments"]), result].filter { !$0.isEmpty }.joined(separator: "\n\n")
             upsertActivity(id: id, kind: .tool, title: "调用 \(title)",
-                           text: jsonPreview(item["arguments"]), status: localizedStatus(status),
+                           text: detail, status: localizedStatus(status),
                            isStreaming: !completed)
         case "webSearch":
             upsertActivity(id: id, kind: .web, title: "搜索网页",
