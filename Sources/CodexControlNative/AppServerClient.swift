@@ -217,6 +217,20 @@ final class AppServerClient {
         return rows.compactMap(CodexModelOption.init(json:))
     }
 
+    func listPersonalSkills(forceReload: Bool = false) async throws -> [CodexPersonalSkill] {
+        let result = try await request(
+            "skills/list",
+            params: [
+                // Personal skills are independent of a repository, but
+                // skills/list requires a concrete discovery cwd. The user's
+                // home directory is stable even when no conversation is open.
+                "cwds": [FileManager.default.homeDirectoryForCurrentUser.path],
+                "forceReload": forceReload
+            ]
+        )
+        return CodexPersonalSkill.parseListResponse(result)
+    }
+
     func listPermissionProfiles(cwd: String?) async throws -> [PermissionProfileOption] {
         var params: JSON = ["limit": 100]
         if let cwd { params["cwd"] = cwd }

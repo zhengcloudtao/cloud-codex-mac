@@ -15,12 +15,25 @@ struct RemoteThreadSnapshot: Codable, Equatable {
     var updatedAt: Double? = nil
 }
 
+/// Model capabilities come from the connected Codex app-server. The mini
+/// program must not maintain a second, stale model catalog.
+struct RemoteModelSnapshot: Codable, Equatable {
+    let id: String
+    let model: String
+    let name: String
+    let description: String
+    let supportedEfforts: [String]
+    let defaultEffort: String
+    let supportsFast: Bool
+}
+
 struct RemoteHeartbeatBody: Codable, Equatable {
     let name: String
     let permissionLabel: String
     let remoteControlReady: Bool
     let workspaces: [RemoteWorkspaceSnapshot]
     let threads: [RemoteThreadSnapshot]
+    var models: [RemoteModelSnapshot] = []
     var usage: RemoteUsageSnapshot? = nil
     var defaultModel: String? = nil
     var defaultEffort: String? = nil

@@ -74,18 +74,21 @@ final class RemoteSchedulingTests: XCTestCase {
     }
 
     @MainActor
-    func testRemoteClaimsAreSerializedAcrossRunningAndReleasingThreads() {
+    func testRemoteClaimsUseCapacityInsteadOfGlobalConversationLock() {
         XCTAssertTrue(AppModel.canClaimRemoteTask(
-            locallyRunningThreadIDs: [], remoteExecutionThreadIDs: [], releasingThreadIDs: []
+            remoteExecutionCount: 0, maxConcurrentRemoteExecutions: 4
+        ))
+        XCTAssertTrue(AppModel.canClaimRemoteTask(
+            remoteExecutionCount: 1, maxConcurrentRemoteExecutions: 4
+        ))
+        XCTAssertTrue(AppModel.canClaimRemoteTask(
+            remoteExecutionCount: 3, maxConcurrentRemoteExecutions: 4
         ))
         XCTAssertFalse(AppModel.canClaimRemoteTask(
-            locallyRunningThreadIDs: ["desktop"], remoteExecutionThreadIDs: [], releasingThreadIDs: []
+            remoteExecutionCount: 4, maxConcurrentRemoteExecutions: 4
         ))
         XCTAssertFalse(AppModel.canClaimRemoteTask(
-            locallyRunningThreadIDs: ["remote"], remoteExecutionThreadIDs: ["remote"], releasingThreadIDs: []
-        ))
-        XCTAssertFalse(AppModel.canClaimRemoteTask(
-            locallyRunningThreadIDs: [], remoteExecutionThreadIDs: [], releasingThreadIDs: ["finishing"]
+            remoteExecutionCount: 0, maxConcurrentRemoteExecutions: 0
         ))
     }
 

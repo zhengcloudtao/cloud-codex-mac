@@ -45,13 +45,17 @@ final class RemoteModelSettingsTests: XCTestCase {
     @MainActor func testHeartbeatPublishesDefaultsAndFrozenRequestIgnoresLaterSelection() throws {
         let model = AppModel()
         model.modelOptions = ["gpt-6-astra", "gpt-5.6-sol"].compactMap { id in
-            CodexModelOption(json: ["id": id, "model": id, "displayName": id, "defaultReasoningEffort": "low",
+            let displayName = id == "gpt-6-astra" ? "GPT-6-Astra" : "GPT-5.6-Sol"
+            return CodexModelOption(json: ["id": id, "model": id, "displayName": displayName, "defaultReasoningEffort": "low",
                 "supportedReasoningEfforts": [["reasoningEffort": "low"], ["reasoningEffort": "xhigh"]]])
         }
         model.selectModel("gpt-6-astra", preferredEffort: "xhigh")
         let snapshot = model.makeRemoteHeartbeat(ready: true)
         XCTAssertEqual(snapshot.defaultModel, "gpt-6-astra")
         XCTAssertEqual(snapshot.defaultEffort, "xhigh")
+        XCTAssertEqual(snapshot.models.map(\.model), ["gpt-6-astra", "gpt-5.6-sol"])
+        XCTAssertEqual(snapshot.models.first?.name, "GPT-6 Astra")
+        XCTAssertEqual(snapshot.models.first?.supportedEfforts, ["low", "xhigh"])
         model.selectModel("gpt-5.6-sol", preferredEffort: "low")
         let params = AppServerClient.turnStartParameters(threadID: "thread", text: "test", attachments: [],
             model: snapshot.defaultModel, effort: snapshot.defaultEffort, permissions: nil, serviceTier: nil)

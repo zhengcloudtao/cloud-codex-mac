@@ -444,6 +444,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingThreadNameEditor) { threadNameEditorSheet }
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
         .sheet(isPresented: $model.showingUsageInsights) { CodexUsageInsightsSheet() }
+        .sheet(isPresented: $model.showingPersonalSkills) { CodexPersonalSkillsSheet() }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -1134,6 +1135,12 @@ struct ContentView: View {
                 Label("个性设置", systemImage: "paintpalette")
             }
             .help("个性设置：选择外观模式")
+            Button {
+                model.showingPersonalSkills = true
+            } label: {
+                Label("我的技能", systemImage: "books.vertical")
+            }
+            .help("查看当前 Codex 识别到的自建技能")
             Button {
                 model.showingUsageInsights = true
             } label: {

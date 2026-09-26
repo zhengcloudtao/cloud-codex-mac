@@ -24,6 +24,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var usageInsightsError: String?
     @Published private(set) var isLoadingUsageInsights = false
     @Published var showingUsageInsights = false
+    @Published private(set) var personalSkills: [CodexPersonalSkill] = []
+    @Published private(set) var personalSkillsError: String?
+    @Published private(set) var isLoadingPersonalSkills = false
+    @Published var showingPersonalSkills = false
     @Published var threads: [CodexThread] = []
     @Published var folderCatalog: [WorkspaceFolder] = []
     @Published var selectedFolder: String?
@@ -716,16 +720,17 @@ final class AppModel: ObservableObject {
     private var remoteUsageSnapshot: RemoteUsageSnapshot?
     private var remoteUsageLastAttempt: Date?
     private var remoteExecutions: [String: RemoteExecution] = [:]
+    /// Different Codex conversations may execute independently. Same-thread
+    /// serialization remains enforced by the relay and by executeRemoteTask's
+    /// active-writer check.
+    private let maxConcurrentRemoteExecutions = 4
     /// A crashed Sky bridge can restart quickly, but immediately binding the
     /// same AX application again produces a crash loop. Remember the concrete
     /// tool failure per thread and briefly stop claiming mini-program work.
     private var computerControlNativeFailures: [String: String] = [:]
     private var computerControlCircuitOpenUntil: Date?
-    /// `cua_repl` ultimately shares one native Sky bridge. Keeping several
-    /// remotely loaded threads alive at once leaves multiple accessibility
-    /// observers attached to the same application and can crash that bridge.
-    /// A release is counted as busy until app-server acknowledges
-    /// `thread/unsubscribe`, so the next mini-program task cannot race it.
+    /// Track release ownership per thread. A release must not be duplicated,
+    /// but it must not block unrelated conversations from being claimed.
     private var remoteReleasingThreadIDs: Set<String> = []
     private var speechTargetsNewThread = false
     private let workspaceOrganizationKey = "CloudCodex.workspaceOrganization.v1"
@@ -1191,6 +1196,18 @@ final class AppModel: ObservableObject {
             usageInsightsError = nil
         } catch {
             usageInsightsError = AccountOverviewRefreshIssue.parse(error.localizedDescription).message
+        }
+    }
+
+    func refreshPersonalSkills(forceReload: Bool = true) async {
+        guard !isLoadingPersonalSkills else { return }
+        isLoadingPersonalSkills = true
+        defer { isLoadingPersonalSkills = false }
+        do {
+            personalSkills = try await client.listPersonalSkills(forceReload: forceReload)
+            personalSkillsError = nil
+        } catch {
+            personalSkillsError = AccountOverviewRefreshIssue.parse(error.localizedDescription).message
         }
     }
 
@@ -2581,9 +2598,8 @@ final class AppModel: ObservableObject {
             if remoteControlPaired, remoteClaimTask == nil,
                !Self.computerControlCircuitIsOpen(until: computerControlCircuitOpenUntil, now: Date()),
                Self.canClaimRemoteTask(
-                    locallyRunningThreadIDs: locallyRunningThreadIDs,
-                    remoteExecutionThreadIDs: Set(remoteExecutions.keys),
-                    releasingThreadIDs: remoteReleasingThreadIDs
+                    remoteExecutionCount: remoteExecutions.count,
+                    maxConcurrentRemoteExecutions: maxConcurrentRemoteExecutions
                ) {
                 // A slow image download / writer check must not pause heartbeat,
                 // history reads or status recovery. Keep claiming single-flight.
@@ -2728,14 +2744,26 @@ final class AppModel: ObservableObject {
             allowedPaths: Set(workspaces.map(\.path)),
             locallyRunning: locallyRunningThreadIDs.compactMap { threadSummaries[$0] }
         )
+        let models = modelOptions.prefix(100).map {
+            RemoteModelSnapshot(
+                id: $0.id,
+                model: $0.model,
+                name: $0.pickerName,
+                description: $0.description,
+                supportedEfforts: $0.composerEfforts,
+                defaultEffort: $0.defaultComposerEffort ?? $0.defaultEffort,
+                supportsFast: $0.fastServiceTierID != nil
+            )
+        }
         return RemoteHeartbeatBody(
             name: remoteControlAPI?.deviceName ?? "CloudCodex Mac",
             permissionLabel: remotePermissionLabel,
             remoteControlReady: ready,
             workspaces: Array(workspaces),
             threads: Array(snapshots),
+            models: Array(models),
             usage: remoteControlPaired ? remoteUsageSnapshot : nil,
-            defaultModel: selectedModel?.model,
+            defaultModel: selectedModelCapabilities?.model,
             defaultEffort: selectedEffort,
             systemMetrics: remoteControlPaired && systemMetrics.snapshot.hasValues ? systemMetrics.snapshot : nil,
             connectionHealth: remoteControlPaired ? connectionHealth.remoteSnapshot : nil
@@ -2917,13 +2945,11 @@ final class AppModel: ObservableObject {
     }
 
     static func canClaimRemoteTask(
-        locallyRunningThreadIDs: Set<String>,
-        remoteExecutionThreadIDs: Set<String>,
-        releasingThreadIDs: Set<String>
+        remoteExecutionCount: Int,
+        maxConcurrentRemoteExecutions: Int
     ) -> Bool {
-        locallyRunningThreadIDs.isEmpty
-            && remoteExecutionThreadIDs.isEmpty
-            && releasingThreadIDs.isEmpty
+        maxConcurrentRemoteExecutions > 0
+            && remoteExecutionCount < maxConcurrentRemoteExecutions
     }
 
     static func computerControlCircuitIsOpen(until: Date?, now: Date) -> Bool {
@@ -3399,6 +3425,11 @@ final class AppModel: ObservableObject {
     }
 
     func handleEvent(_ method: String, _ params: [String: Any]) {
+        if method == "skills/changed" {
+            guard showingPersonalSkills || !personalSkills.isEmpty else { return }
+            Task { await refreshPersonalSkills(forceReload: true) }
+            return
+        }
         guard let eventThreadID = params["threadId"] as? String else {
             if method == "error", let error = params["error"] as? [String: Any] {
                 if params["willRetry"] as? Bool == true {
