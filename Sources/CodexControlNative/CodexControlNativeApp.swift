@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct CloudCodexApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model = AppModel(eventNotifier: .live)
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {

@@ -6,10 +6,12 @@ struct UnreadCompletions: Codable, Equatable {
     var latestTurns: [String: String] = [:]
     var unread: Set<String> = []
 
-    mutating func complete(threadID: String, turnID: String, viewed: Bool) {
-        guard latestTurns[threadID] != turnID else { return }
+    @discardableResult
+    mutating func complete(threadID: String, turnID: String, viewed: Bool) -> Bool {
+        guard latestTurns[threadID] != turnID else { return false }
         latestTurns[threadID] = turnID
         if viewed { unread.remove(threadID) } else { unread.insert(threadID) }
+        return true
     }
 
     mutating func markRead(_ threadID: String) { unread.remove(threadID) }

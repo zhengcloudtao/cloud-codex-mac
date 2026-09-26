@@ -49,6 +49,7 @@ final class AppModel: ObservableObject {
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
     private let revertedFileChangesKey = "cloudcodex.revertedFileChanges.v1"
     private var quotaConsumptionTracker = QuotaConsumptionTracker()
+    private let eventNotifier: CodexEventNotifier?
     @Published private(set) var revertedFileChanges: Set<String> = []
     @Published private(set) var revertingFileChanges: String?
 
@@ -94,8 +95,14 @@ final class AppModel: ObservableObject {
     }
 
     func recordCompletedConversation(_ threadID: String, turnID: String, viewed: Bool) {
-        unreadCompletions.complete(threadID: threadID, turnID: turnID, viewed: viewed)
+        let isNewCompletion = unreadCompletions.complete(
+            threadID: threadID,
+            turnID: turnID,
+            viewed: viewed
+        )
         saveUnreadCompletions()
+        guard isNewCompletion, let eventNotifier else { return }
+        Task { await eventNotifier.notify(.conversationCompleted) }
     }
 
     private func saveUnreadCompletions() {
@@ -777,6 +784,7 @@ final class AppModel: ObservableObject {
         remoteDefaults: UserDefaults = .standard,
         userInputTimeoutSeconds: TimeInterval = 60,
         computerControlTimeoutSeconds: TimeInterval = 120,
+        eventNotifier: CodexEventNotifier? = nil,
         remoteAPILoader: @escaping @Sendable (Bool) async throws -> RemoteControlAPI = {
             try await RemoteControlAPI.connect(allowInteraction: $0)
         }
@@ -784,6 +792,7 @@ final class AppModel: ObservableObject {
         self.remoteDefaults = remoteDefaults
         self.userInputTimeoutSeconds = userInputTimeoutSeconds
         self.computerControlTimeoutSeconds = computerControlTimeoutSeconds
+        self.eventNotifier = eventNotifier
         self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
         if let data = remoteDefaults.data(forKey: unreadCompletionsKey),
@@ -1145,10 +1154,17 @@ final class AppModel: ObservableObject {
     }
 
     private func applyAccountOverview(_ overview: AccountOverview) {
+        let shouldNotify = CodexEventNotifier.shouldNotifyQuotaUpdated(
+            previous: accountOverview,
+            current: overview
+        )
         accountOverview = overview
         recentThirtyMinuteConsumptionRate = quotaConsumptionTracker.record(account: overview)
         if let data = try? JSONEncoder().encode(quotaConsumptionTracker) {
             remoteDefaults.set(data, forKey: quotaConsumptionHistoryKey)
+        }
+        if shouldNotify, let eventNotifier {
+            Task { await eventNotifier.notify(.quotaUpdated) }
         }
     }
 
