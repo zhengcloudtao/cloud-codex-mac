@@ -52,4 +52,27 @@ final class ReliableSelectableTextTests: XCTestCase {
         XCTAssertFalse(textView.copySelectedText())
         XCTAssertEqual(pasteboard.string(forType: .string), "原内容")
     }
+
+    func testEquivalentStyledRefreshPreservesSelection() {
+        let textView = ReliableSelectableNSTextView()
+        let initial = NSAttributedString(
+            string: "第一段\n第二段",
+            attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]
+        )
+        textView.setAttributedStringIfNeeded(initial)
+        textView.setSelectedRange(NSRange(location: 2, length: 4))
+
+        textView.setAttributedStringIfNeeded(initial.copy() as! NSAttributedString)
+
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 2, length: 4))
+    }
+
+    func testStyledContentChangeReplacesText() {
+        let textView = ReliableSelectableNSTextView()
+        textView.setAttributedStringIfNeeded(NSAttributedString(string: "旧回复"))
+
+        textView.setAttributedStringIfNeeded(NSAttributedString(string: "新回复"))
+
+        XCTAssertEqual(textView.string, "新回复")
+    }
 }

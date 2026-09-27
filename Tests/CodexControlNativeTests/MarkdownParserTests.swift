@@ -41,6 +41,20 @@ final class MarkdownParserTests: XCTestCase {
         )
     }
 
+    func testMarkdownTextDocumentBridgesFormattingAndLinksToAppKitSelectionSurface() throws {
+        let blocks = MarkdownBlockParser.parse("**重点**与[文档](https://example.com)\n\n> 引用\n\n```swift\nlet value = 1\n```")
+        let document = MarkdownTextDocument.appKitAttributed(from: blocks)
+        let bodyRange = try XCTUnwrap(document.string.range(of: "重点").map { NSRange($0, in: document.string) })
+        let linkRange = try XCTUnwrap(document.string.range(of: "文档").map { NSRange($0, in: document.string) })
+        let quoteRange = try XCTUnwrap(document.string.range(of: "引用").map { NSRange($0, in: document.string) })
+        let codeRange = try XCTUnwrap(document.string.range(of: "let value = 1").map { NSRange($0, in: document.string) })
+
+        XCTAssertEqual(document.attribute(.foregroundColor, at: bodyRange.location, effectiveRange: nil) as? NSColor, .labelColor)
+        XCTAssertEqual(document.attribute(.link, at: linkRange.location, effectiveRange: nil) as? URL, URL(string: "https://example.com"))
+        XCTAssertEqual(document.attribute(.foregroundColor, at: quoteRange.location, effectiveRange: nil) as? NSColor, .secondaryLabelColor)
+        XCTAssertNotNil(document.attribute(.font, at: codeRange.location, effectiveRange: nil) as? NSFont)
+    }
+
     func testUnclosedStreamingCodeFenceStillRendersAsCode() {
         let blocks = MarkdownBlockParser.parse("```swift\nlet value = 1")
         XCTAssertEqual(blocks, [.code(language: "swift", text: "let value = 1")])

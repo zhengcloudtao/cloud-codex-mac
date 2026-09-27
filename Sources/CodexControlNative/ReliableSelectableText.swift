@@ -112,6 +112,68 @@ struct ReliableSelectableText: NSViewRepresentable {
     }
 }
 
+/// The styled counterpart used by assistant Markdown. Keeping the whole
+/// rendered reply in one NSTextView makes a drag selection continuous across
+/// paragraphs, lists and code while the surrounding conversation scroll view
+/// remains responsible for scrolling.
+struct ReliableSelectableAttributedText: NSViewRepresentable {
+    typealias NSViewType = ReliableSelectableNSTextView
+
+    let text: NSAttributedString
+    var maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
+
+    func makeNSView(context: Context) -> ReliableSelectableNSTextView {
+        let textView = ReliableSelectableNSTextView(frame: .zero)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.heightTracksTextView = false
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.linkTextAttributes = [
+            .foregroundColor: NSColor.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue
+        ]
+        textView.insertionPointColor = .controlAccentColor
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.setContentCompressionResistancePriority(.required, for: .vertical)
+        return textView
+    }
+
+    func updateNSView(_ textView: ReliableSelectableNSTextView, context: Context) {
+        textView.setAttributedStringIfNeeded(text)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView textView: ReliableSelectableNSTextView, context: Context) -> CGSize? {
+        let attributedText = text
+        textView.setAttributedStringIfNeeded(attributedText)
+
+        let naturalWidth = ceil(attributedText.boundingRect(
+            with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).width) + 1
+        let width = ReliableSelectableText.resolvedMaximumWidth(
+            proposedWidth: proposal.width,
+            naturalWidth: naturalWidth,
+            maximumWidth: maximumWidth
+        )
+
+        textView.frame.size.width = width
+        textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        if let layoutManager = textView.layoutManager, let textContainer = textView.textContainer {
+            layoutManager.ensureLayout(for: textContainer)
+            let height = ceil(layoutManager.usedRect(for: textContainer).height)
+            return CGSize(width: width, height: max(1, height))
+        }
+        return CGSize(width: width, height: 1)
+    }
+}
+
 /// Keeps copying local to the message text view instead of relying entirely on
 /// SwiftUI's responder-chain bridge. A conversation refresh or a surrounding
 /// scroll gesture can leave an AppKit selection visible while another SwiftUI
@@ -141,6 +203,14 @@ final class ReliableSelectableNSTextView: NSTextView {
     override func copy(_ sender: Any?) {
         if copySelectedText() { return }
         super.copy(sender)
+    }
+
+    /// NSTextView drops its selection whenever textStorage is replaced. Only
+    /// mutate it when the rendered Markdown really changed; polling and other
+    /// conversation updates can otherwise erase a selection mid-drag.
+    func setAttributedStringIfNeeded(_ value: NSAttributedString) {
+        guard !textStorage!.isEqual(to: value) else { return }
+        textStorage?.setAttributedString(value)
     }
 
     @discardableResult

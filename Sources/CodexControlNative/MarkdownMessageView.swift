@@ -117,10 +117,8 @@ private struct MarkdownBlocksView: View, Equatable {
     @ViewBuilder
     var body: some View {
         let content = VStack(alignment: .leading, spacing: 10) {
-            Text(MarkdownTextDocument.attributed(from: blocks))
-                .textSelection(.enabled)
-                .tint(Color(nsColor: .selectedTextBackgroundColor))
-                .fixedSize(horizontal: false, vertical: true)
+            ReliableSelectableAttributedText(text: MarkdownTextDocument.appKitAttributed(from: blocks))
+                .frame(maxWidth: UserMessagePresentation.maximumContentWidth, alignment: .leading)
 
             ForEach(Array(imageBlocks.enumerated()), id: \.offset) { _, block in
                 if case .image(let alt, let target) = block {
@@ -159,6 +157,41 @@ enum MarkdownTextDocument {
                 document.append(AttributedString(isList(previous) && isList(block) ? "\n" : "\n\n"))
             }
             document.append(attributed(block))
+        }
+        return document
+    }
+
+    static func appKitAttributed(from blocks: [MarkdownBlock]) -> NSAttributedString {
+        let document = NSMutableAttributedString()
+        let textualBlocks = blocks.filter {
+            if case .image = $0 { return false }
+            return true
+        }
+
+        for (index, block) in textualBlocks.enumerated() {
+            if index > 0 {
+                let previous = textualBlocks[index - 1]
+                document.append(NSAttributedString(
+                    string: isList(previous) && isList(block) ? "\n" : "\n\n",
+                    attributes: [.font: preferredAppKitFont(.body)]
+                ))
+            }
+            document.append(appKitAttributed(block))
+        }
+
+        // NSTextView otherwise falls back to a fixed black foreground for
+        // attributed runs that only specify a font. Fill only missing colors
+        // so ordinary text follows light/dark mode while quotes keep their
+        // secondary color and links keep NSTextView's blue link styling.
+        var uncoloredRanges: [NSRange] = []
+        document.enumerateAttribute(
+            .foregroundColor,
+            in: NSRange(location: 0, length: document.length)
+        ) { value, range, _ in
+            if value == nil { uncoloredRanges.append(range) }
+        }
+        for range in uncoloredRanges {
+            document.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
         }
         return document
     }
@@ -221,6 +254,109 @@ enum MarkdownTextDocument {
         return value
     }
 
+    private static func appKitAttributed(_ block: MarkdownBlock) -> NSAttributedString {
+        switch block {
+        case .heading(let level, let text):
+            return inlineAppKit(text, font: headingAppKitFont(level))
+        case .paragraph(let text):
+            return inlineAppKit(text, font: preferredAppKitFont(.body))
+        case .bullet(let text):
+            return prefixAppKit(
+                "•  ",
+                content: inlineAppKit(text, font: preferredAppKitFont(.body)),
+                font: preferredAppKitFont(.body, weight: .semibold)
+            )
+        case .numbered(let number, let text):
+            return prefixAppKit(
+                "\(number).  ",
+                content: inlineAppKit(text, font: preferredAppKitFont(.body)),
+                font: NSFont.monospacedDigitSystemFont(
+                    ofSize: preferredAppKitFont(.body).pointSize,
+                    weight: .medium
+                )
+            )
+        case .quote(let text):
+            let value = NSMutableAttributedString(attributedString: prefixAppKit(
+                "│  ",
+                content: inlineAppKit(text, font: preferredAppKitFont(.body)),
+                font: preferredAppKitFont(.body, weight: .semibold)
+            ))
+            value.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: value.length))
+            return value
+        case .code(let language, let code):
+            let value = NSMutableAttributedString()
+            if let language, !language.isEmpty {
+                value.append(NSAttributedString(
+                    string: language.uppercased() + "\n",
+                    attributes: [
+                        .font: preferredAppKitFont(.caption2, weight: .semibold),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ]
+                ))
+            }
+            value.append(NSAttributedString(
+                string: code,
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(
+                        ofSize: preferredAppKitFont(.callout).pointSize,
+                        weight: .regular
+                    ),
+                    .backgroundColor: NSColor.black.withAlphaComponent(0.18)
+                ]
+            ))
+            return value
+        case .rule:
+            return NSAttributedString(
+                string: "────────────────────────",
+                attributes: [
+                    .font: preferredAppKitFont(.body),
+                    .foregroundColor: NSColor.secondaryLabelColor
+                ]
+            )
+        case .table(let headers, let rows):
+            let allRows = [headers] + rows
+            return NSAttributedString(
+                string: allRows.map { $0.joined(separator: "  │  ") }.joined(separator: "\n"),
+                attributes: [.font: NSFont.monospacedSystemFont(
+                    ofSize: preferredAppKitFont(.callout).pointSize,
+                    weight: .regular
+                )]
+            )
+        case .image:
+            return NSAttributedString()
+        }
+    }
+
+    private static func inlineAppKit(_ text: String, font: NSFont) -> NSAttributedString {
+        let value = (try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(text)
+        let result = NSMutableAttributedString()
+        for run in value.runs {
+            var resolvedFont = font
+            if run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true {
+                resolvedFont = NSFontManager.shared.convert(resolvedFont, toHaveTrait: .boldFontMask)
+            }
+            if run.inlinePresentationIntent?.contains(.emphasized) == true {
+                resolvedFont = NSFontManager.shared.convert(resolvedFont, toHaveTrait: .italicFontMask)
+            }
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                resolvedFont = NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular)
+            }
+            let renderedRun = NSMutableAttributedString(attributedString: NSAttributedString(AttributedString(value[run.range])))
+            renderedRun.addAttribute(.font, value: resolvedFont, range: NSRange(location: 0, length: renderedRun.length))
+            result.append(renderedRun)
+        }
+        return result
+    }
+
+    private static func prefixAppKit(_ prefix: String, content: NSAttributedString, font: NSFont) -> NSAttributedString {
+        let value = NSMutableAttributedString(string: prefix, attributes: [.font: font])
+        value.append(content)
+        return value
+    }
+
     private static func isList(_ block: MarkdownBlock) -> Bool {
         switch block {
         case .bullet, .numbered: return true
@@ -235,6 +371,20 @@ enum MarkdownTextDocument {
         case 3: return .headline
         default: return .subheadline.weight(.semibold)
         }
+    }
+
+    private static func headingAppKitFont(_ level: Int) -> NSFont {
+        switch level {
+        case 1: return preferredAppKitFont(.title2, weight: .bold)
+        case 2: return preferredAppKitFont(.title3, weight: .bold)
+        case 3: return preferredAppKitFont(.headline, weight: .semibold)
+        default: return preferredAppKitFont(.subheadline, weight: .semibold)
+        }
+    }
+
+    private static func preferredAppKitFont(_ style: NSFont.TextStyle, weight: NSFont.Weight = .regular) -> NSFont {
+        let preferred = NSFont.preferredFont(forTextStyle: style)
+        return NSFont.systemFont(ofSize: preferred.pointSize, weight: weight)
     }
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum MainColumnLayout {
     static let workspaceDefault = 240.0
@@ -347,6 +348,12 @@ struct ContentView: View {
     @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
+    @AppStorage(BackgroundPreference.imagePathKey) private var backgroundImagePath = ""
+    @AppStorage(BackgroundScope.storageKey) private var backgroundScope: BackgroundScope = .conversation
+    @AppStorage(BackgroundPreference.opacityKey) private var backgroundOpacity = BackgroundPreference.defaultOpacity
+    @AppStorage(BackgroundPreference.zoomKey) private var backgroundZoom = BackgroundPreference.defaultZoom
+    @AppStorage(BackgroundPreference.offsetXKey) private var backgroundOffsetX = 0.0
+    @AppStorage(BackgroundPreference.offsetYKey) private var backgroundOffsetY = 0.0
     @AppStorage("cloudcodex.showConversationPreview") private var showConversationPreview = true
     @AppStorage("cloudcodex.showUnreadCompletionDot") private var showUnreadCompletionDot = true
     @AppStorage("cloudcodex.showUnreadDockBadge") private var showUnreadDockBadge = true
@@ -420,6 +427,17 @@ struct ContentView: View {
         // their width immediately. The balanced style preserves the old detail
         // column width and leaves a large blank strip on the right.
         .navigationSplitViewStyle(.prominentDetail)
+        .overlay {
+            if !backgroundImagePath.isEmpty, backgroundScope == .entireWindow {
+                PersonalBackgroundImage(
+                    path: backgroundImagePath,
+                    opacity: backgroundOpacity,
+                    zoom: backgroundZoom,
+                    offsetX: backgroundOffsetX,
+                    offsetY: backgroundOffsetY
+                )
+            }
+        }
         .toolbar { toolbar }
         .environment(\.openURL, OpenURLAction { url in
             if ["https", "http"].contains(url.scheme?.lowercased() ?? ""), let threadID = model.selectedThreadID {
@@ -1025,21 +1043,22 @@ struct ContentView: View {
 
     @ViewBuilder
     private func conversation(explicitWidth: CGFloat) -> some View {
-        if model.showingNewThread {
-            NewThreadWorkspace()
-        } else if let thread = model.selectedThread {
-            VStack(spacing: 0) {
-                ConversationHeader(thread: thread)
-                    .zIndex(2)
-                Divider()
-                    .zIndex(2)
-                MessageList(
-                    viewportWidth: explicitWidth,
-                    messages: model.messages,
-                    collaborationTasks: model.selectedCollaborationTasks,
-                    isLoading: model.isConversationLoading,
-                    isThinking: model.isSelectedThreadProcessing
-                )
+        Group {
+            if model.showingNewThread {
+                NewThreadWorkspace()
+            } else if let thread = model.selectedThread {
+                VStack(spacing: 0) {
+                    ConversationHeader(thread: thread)
+                        .zIndex(2)
+                    Divider()
+                        .zIndex(2)
+                    MessageList(
+                        viewportWidth: explicitWidth,
+                        messages: model.messages,
+                        collaborationTasks: model.selectedCollaborationTasks,
+                        isLoading: model.isConversationLoading,
+                        isThinking: model.isSelectedThreadProcessing
+                    )
                     // Use the exact width proposed by BrowserConversationLayout.
                     // A flexible frame can leave the AppKit-backed timeline at
                     // its old 600-point ideal width and create an empty column
@@ -1051,37 +1070,49 @@ struct ContentView: View {
                     // conversation content, so let the timeline occupy it.
                     .ignoresSafeArea(.container, edges: .trailing)
                     .id(thread.id)
-                if !model.selectedUserInputRequests.isEmpty {
+                    if !model.selectedUserInputRequests.isEmpty {
+                        Divider()
+                        UserInputRequestsPanel(requests: model.selectedUserInputRequests) { requestID, answers in
+                            model.submitUserInput(requestID: requestID, answers: answers)
+                        }
+                    }
+                    if !model.selectedComputerUseApprovalRequests.isEmpty {
+                        Divider()
+                        ComputerUseApprovalRequestsPanel(requests: model.selectedComputerUseApprovalRequests) { requestID, decision in
+                            model.submitComputerUseApproval(requestID: requestID, decision: decision)
+                        }
+                    }
                     Divider()
-                    UserInputRequestsPanel(requests: model.selectedUserInputRequests) { requestID, answers in
-                        model.submitUserInput(requestID: requestID, answers: answers)
+                    switch model.threadInputAvailability {
+                    case .checking, .occupied:
+                        ThreadInputUnavailableView(state: model.threadInputAvailability)
+                    case .available:
+                        Composer(mode: .conversation)
                     }
                 }
-                if !model.selectedComputerUseApprovalRequests.isEmpty {
-                    Divider()
-                    ComputerUseApprovalRequestsPanel(requests: model.selectedComputerUseApprovalRequests) { requestID, decision in
-                        model.submitComputerUseApproval(requestID: requestID, decision: decision)
-                    }
+                .frame(width: explicitWidth)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                ContentUnavailableView {
+                    Label("选择一个会话", systemImage: "message")
+                } description: {
+                    Text("从左侧工作区中选择现有会话，或新建一个会话。")
+                } actions: {
+                    Button("新建会话", action: model.prepareNewThread)
                 }
-                Divider()
-                switch model.threadInputAvailability {
-                case .checking, .occupied:
-                    ThreadInputUnavailableView(state: model.threadInputAvailability)
-                case .available:
-                    Composer(mode: .conversation)
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
-            .frame(width: explicitWidth)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        } else {
-            ContentUnavailableView {
-                Label("选择一个会话", systemImage: "message")
-            } description: {
-                Text("从左侧工作区中选择现有会话，或新建一个会话。")
-            } actions: {
-                Button("新建会话", action: model.prepareNewThread)
+        }
+        .background {
+            if !backgroundImagePath.isEmpty, backgroundScope == .conversation {
+                PersonalBackgroundImage(
+                    path: backgroundImagePath,
+                    opacity: backgroundOpacity,
+                    zoom: backgroundZoom,
+                    offsetX: backgroundOffsetX,
+                    offsetY: backgroundOffsetY
+                )
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
     }
 
@@ -1157,7 +1188,7 @@ struct ContentView: View {
     }
 
     private var appearanceSettingsSheet: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: "paintpalette.fill")
                     .font(.system(size: 18, weight: .semibold))
@@ -1175,53 +1206,210 @@ struct ContentView: View {
                 Button("完成") { model.showingAppearanceSettings = false }
                     .keyboardShortcut(.defaultAction)
             }
+            .padding(.bottom, 18)
 
-            Picker("外观模式", selection: $appearancePreference) {
-                ForEach(AppearancePreference.allCases) { preference in
-                    Label(preference.title, systemImage: preference.symbolName)
-                        .tag(preference)
-                }
-            }
-            .pickerStyle(.radioGroup)
-            .labelsHidden()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    GroupBox("外观模式") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Picker("外观模式", selection: $appearancePreference) {
+                                ForEach(AppearancePreference.allCases) { preference in
+                                    Label(preference.title, systemImage: preference.symbolName)
+                                        .tag(preference)
+                                }
+                            }
+                            .pickerStyle(.radioGroup)
+                            .labelsHidden()
 
-            Text(appearancePreference == .system
-                 ? "将跟随 macOS 当前的明亮或暗黑外观。"
-                 : "此选择会立即应用，并保留到下次启动。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("显示会话摘要", isOn: $showConversationPreview)
-                    .toggleStyle(.switch)
-                Toggle("显示已完成未查看红点", isOn: $showUnreadCompletionDot)
-                    .toggleStyle(.switch)
-                Toggle("Dock 显示未查看会话数量", isOn: $showUnreadDockBadge)
-                    .toggleStyle(.switch)
-                Text("控制会话列表中标题下方的内容预览。关闭后列表更紧凑，不影响会话正文与搜索。设置自动保存。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Divider()
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("电脑状态刷新频率")
-                    Text("控制顶部温度、CPU 和存储信息的采样间隔。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Picker("电脑状态刷新频率", selection: $systemMetricsRefreshInterval) {
-                    ForEach(SystemMetricsRefreshInterval.allCases) { interval in
-                        Text(interval.title).tag(interval.rawValue)
+                            Text(appearancePreference == .system
+                                 ? "将跟随 macOS 当前的明亮或暗黑外观。"
+                                 : "此选择会立即应用，并保留到下次启动。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                    }
+
+                    backgroundSettingsSection
+
+                    GroupBox("会话列表") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Toggle("显示会话摘要", isOn: $showConversationPreview)
+                                .toggleStyle(.switch)
+                            Toggle("显示已完成未查看红点", isOn: $showUnreadCompletionDot)
+                                .toggleStyle(.switch)
+                            Toggle("Dock 显示未查看会话数量", isOn: $showUnreadDockBadge)
+                                .toggleStyle(.switch)
+                            Text("关闭摘要后列表更紧凑，不影响会话正文与搜索。设置自动保存。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                    }
+
+                    GroupBox("电脑状态") {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("刷新频率")
+                                Text("控制顶部温度、CPU 和存储信息的采样间隔。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Picker("电脑状态刷新频率", selection: $systemMetricsRefreshInterval) {
+                                ForEach(SystemMetricsRefreshInterval.allCases) { interval in
+                                    Text(interval.title).tag(interval.rawValue)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 92)
+                        }
+                        .padding(.vertical, 6)
                     }
                 }
-                .labelsHidden()
-                .frame(width: 92)
+                .padding(.trailing, 6)
             }
         }
         .padding(24)
-        .frame(width: 400)
+        .frame(width: 640, height: 720)
+    }
+
+    private var backgroundSettingsSection: some View {
+        GroupBox("个性背景") {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    Button(backgroundImagePath.isEmpty ? "选择背景图片" : "更换背景图片") {
+                        chooseBackgroundImage()
+                    }
+                    if !backgroundImagePath.isEmpty {
+                        Button("移除背景") {
+                            backgroundImagePath = ""
+                        }
+                        .foregroundStyle(.red)
+                    }
+                    Spacer()
+                    Text("支持 PNG、JPEG、HEIC 等图片")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Picker("应用范围", selection: $backgroundScope) {
+                    ForEach(BackgroundScope.allCases) { scope in
+                        Label(scope.title, systemImage: scope.symbolName).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                HStack(alignment: .top, spacing: 18) {
+                    if backgroundImagePath.isEmpty {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(.quaternary.opacity(0.45))
+                            VStack(spacing: 8) {
+                                Image(systemName: "photo.on.rectangle.angled")
+                                    .font(.title2)
+                                Text("选择图片后可预览并裁切")
+                                    .font(.caption)
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .aspectRatio(backgroundScope == .entireWindow ? 16 / 10 : 4 / 5, contentMode: .fit)
+                        .frame(width: 250)
+                    } else {
+                        BackgroundCropPreview(
+                            path: backgroundImagePath,
+                            scope: backgroundScope,
+                            zoom: $backgroundZoom,
+                            offsetX: $backgroundOffsetX,
+                            offsetY: $backgroundOffsetY
+                        )
+                        .frame(width: 250)
+                    }
+
+                    VStack(alignment: .leading, spacing: 13) {
+                        Label("推荐尺寸：\(backgroundScope.recommendedSize)", systemImage: "ruler")
+                            .font(.callout.weight(.medium))
+                        Text(backgroundScope.recommendationDetail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        backgroundSlider(
+                            title: "透明度",
+                            value: $backgroundOpacity,
+                            range: 0.05 ... 0.85,
+                            label: "\(Int(backgroundOpacity * 100))%"
+                        )
+                        backgroundSlider(
+                            title: "裁切缩放",
+                            value: $backgroundZoom,
+                            range: 1 ... 3,
+                            label: String(format: "%.1f×", backgroundZoom)
+                        )
+
+                        HStack {
+                            Text("拖动左侧预览调整裁切中心")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("居中") {
+                                backgroundOffsetX = 0
+                                backgroundOffsetY = 0
+                            }
+                            .buttonStyle(.borderless)
+                            Button("重置") {
+                                backgroundOpacity = BackgroundPreference.defaultOpacity
+                                backgroundZoom = BackgroundPreference.defaultZoom
+                                backgroundOffsetX = 0
+                                backgroundOffsetY = 0
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func backgroundSlider(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        label: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(label)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range)
+        }
+    }
+
+    private func chooseBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.title = "选择 CloudCodex 背景图片"
+        panel.prompt = "设为背景"
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            backgroundImagePath = try BackgroundImageStore.importImage(from: url)
+            backgroundZoom = BackgroundPreference.defaultZoom
+            backgroundOffsetX = 0
+            backgroundOffsetY = 0
+        } catch {
+            model.errorMessage = "背景图片无法读取：\(error.localizedDescription)"
+        }
     }
 
 }
