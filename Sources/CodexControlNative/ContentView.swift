@@ -341,6 +341,7 @@ final class DetailColumnSizeProbeView: NSView {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var updateController: CloudCodexUpdateController
     @Environment(\.openWindow) private var openWindow
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var threadListScrollID: String?
@@ -363,8 +364,21 @@ struct ContentView: View {
     @AppStorage(SystemMetricsRefreshInterval.storageKey) private var systemMetricsRefreshInterval = SystemMetricsRefreshInterval.fiveSeconds.rawValue
     private let categoryDragPrefix = "cloudcodex-category://"
 
+    @MainActor
     init(initialColumnVisibility: NavigationSplitViewVisibility = .all) {
+        self.init(
+            initialColumnVisibility: initialColumnVisibility,
+            updateController: CloudCodexUpdateController()
+        )
+    }
+
+    @MainActor
+    init(
+        initialColumnVisibility: NavigationSplitViewVisibility = .all,
+        updateController: CloudCodexUpdateController
+    ) {
         _columnVisibility = State(initialValue: initialColumnVisibility)
+        _updateController = ObservedObject(wrappedValue: updateController)
     }
 
     var body: some View {
@@ -1165,6 +1179,13 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            CloudCodexVersionBadge(
+                currentVersion: updateController.currentVersion,
+                latestVersion: updateController.latestVersion,
+                isChecking: updateController.isChecking
+            )
+        }
         ToolbarItem(placement: .principal) {
             HStack(spacing: 12) {
                 SystemMetricsView(monitor: model.systemMetrics)
@@ -1231,6 +1252,35 @@ struct ContentView: View {
                 Label("关于 CloudCodex", systemImage: "info.circle")
             }
             .help("关于 CloudCodex：功能与工作原理")
+        }
+    }
+
+    private struct CloudCodexVersionBadge: View {
+        let currentVersion: String
+        let latestVersion: String?
+        let isChecking: Bool
+
+        private var latestVersionText: String {
+            if let latestVersion { return latestVersion }
+            return isChecking ? "检查中" : "--"
+        }
+
+        var body: some View {
+            HStack(spacing: 5) {
+                Text("当前 \(currentVersion)")
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                Text("最新 \(latestVersionText)")
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.quaternary, in: Capsule())
+            .fixedSize()
+            .help("当前版本 \(currentVersion)，最新版本 \(latestVersionText)")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("当前版本 \(currentVersion)，最新版本 \(latestVersionText)")
         }
     }
 

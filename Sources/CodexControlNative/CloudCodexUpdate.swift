@@ -102,12 +102,13 @@ final class CloudCodexSparkleUpdater: ObservableObject {
 @MainActor
 final class CloudCodexUpdateController: ObservableObject {
     @Published var notice: CloudCodexUpdateNotice?
+    @Published private(set) var latestVersion: String?
+    @Published private(set) var isChecking = false
 
     private let session: URLSession
     private let endpoint: URL
-    private let currentVersion: String
+    let currentVersion: String
     private var hasChecked = false
-    private var isChecking = false
 
     init(
         session: URLSession = .shared,
@@ -137,6 +138,7 @@ final class CloudCodexUpdateController: ObservableObject {
             guard envelope.status == 0, let config = envelope.data else {
                 throw URLError(.cannotParseResponse)
             }
+            latestVersion = config.latestVersion
             let decision = CloudCodexUpdateDecision.evaluate(currentVersion: currentVersion, config: config)
             guard decision != .none else { return }
             let required = decision == .required

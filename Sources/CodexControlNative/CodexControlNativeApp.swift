@@ -9,7 +9,7 @@ struct CloudCodexApp: App {
 
     var body: some Scene {
         WindowGroup("CloudCodex") {
-            ContentView()
+            ContentView(updateController: updateController)
                 .environmentObject(model)
                 // CloudCodex is a three-column application.  Keeping enough
                 // room for every column prevents a selected long conversation

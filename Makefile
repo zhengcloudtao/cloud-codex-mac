@@ -2,6 +2,7 @@ APP_NAME := CloudCodex
 BUNDLE := dist/$(APP_NAME).app
 EXECUTABLE := CloudCodex
 VERSION := $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)
+STAGED_BUNDLE := dist/staging/$(VERSION)/$(APP_NAME).app
 DMG_NAME := $(APP_NAME)-$(subst .,-,$(VERSION))
 SPARKLE_FRAMEWORK := .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework
 # Keep the code identity stable so the login Keychain can retain the user's
@@ -9,7 +10,7 @@ SPARKLE_FRAMEWORK := .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-
 # producing a build on another Mac.
 CODESIGN_IDENTITY ?= Apple Development: Yuntao Zheng (ZK97MFMJ5H)
 
-.PHONY: build app release sparkle-release dmg run clean
+.PHONY: build app release sparkle-release staged-sparkle-release dmg run clean
 
 build:
 	swift build -c release
@@ -37,6 +38,21 @@ release: app
 
 sparkle-release: app
 	./scripts/prepare-sparkle-release.sh "$(BUNDLE)" "dist/sparkle" "com.zhengyuntao.cloudcodex"
+
+# Build an update candidate without replacing or restarting the app the user is
+# running. Keep its archive and metadata beside the staged bundle.
+staged-sparkle-release: build
+	rm -rf "$(STAGED_BUNDLE)"
+	mkdir -p "$(STAGED_BUNDLE)/Contents/MacOS" "$(STAGED_BUNDLE)/Contents/Resources" "$(STAGED_BUNDLE)/Contents/Frameworks"
+	cp .build/release/$(EXECUTABLE) "$(STAGED_BUNDLE)/Contents/MacOS/$(EXECUTABLE)"
+	install_name_tool -add_rpath "@executable_path/../Frameworks" "$(STAGED_BUNDLE)/Contents/MacOS/$(EXECUTABLE)"
+	ditto "$(SPARKLE_FRAMEWORK)" "$(STAGED_BUNDLE)/Contents/Frameworks/Sparkle.framework"
+	cp Info.plist "$(STAGED_BUNDLE)/Contents/Info.plist"
+	cp Resources/AppIcon.icns "$(STAGED_BUNDLE)/Contents/Resources/AppIcon.icns"
+	cp Resources/CloudCodexMiniProgramCode.png "$(STAGED_BUNDLE)/Contents/Resources/CloudCodexMiniProgramCode.png"
+	cp Resources/CustomerServiceQRCode.jpg "$(STAGED_BUNDLE)/Contents/Resources/CustomerServiceQRCode.jpg"
+	codesign --force --deep --sign "$(CODESIGN_IDENTITY)" "$(STAGED_BUNDLE)"
+	./scripts/prepare-sparkle-release.sh "$(STAGED_BUNDLE)" "dist/staging/$(VERSION)/sparkle" "com.zhengyuntao.cloudcodex"
 
 dmg: app
 	rm -f "dist/$(APP_NAME).dmg" "dist/$(APP_NAME).dmg.sha256" "dist/$(DMG_NAME).dmg" "dist/$(DMG_NAME).dmg.sha256"
