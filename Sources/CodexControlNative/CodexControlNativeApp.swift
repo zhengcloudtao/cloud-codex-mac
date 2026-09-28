@@ -4,6 +4,7 @@ import SwiftUI
 struct CloudCodexApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var updateController = CloudCodexUpdateController()
+    @StateObject private var sparkleUpdater = CloudCodexSparkleUpdater()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -17,14 +18,9 @@ struct CloudCodexApp: App {
                 .task { await model.start() }
                 .task { await updateController.check() }
                 .sheet(item: $updateController.notice) { notice in
-                    CloudCodexUpdateSheet(notice: notice, controller: updateController)
-                }
-                .alert(item: $updateController.checkResult) { result in
-                    Alert(
-                        title: Text(result.title),
-                        message: Text(result.message),
-                        dismissButton: .default(Text("好"))
-                    )
+                    CloudCodexUpdateSheet(notice: notice) {
+                        sparkleUpdater.checkForUpdates()
+                    }
                 }
         }
         .defaultSize(width: 1220, height: 780)
@@ -33,9 +29,8 @@ struct CloudCodexApp: App {
                 Button("关于 CloudCodex") { openWindow(id: "about-cloudcodex") }
                 Divider()
                 Button("检查更新…") {
-                    Task { await updateController.check(force: true, reportsResult: true) }
+                    sparkleUpdater.checkForUpdates()
                 }
-                .disabled(updateController.isChecking)
             }
             CommandGroup(replacing: .newItem) {
                 Button("新建会话", action: model.prepareNewThread)

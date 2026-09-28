@@ -30,7 +30,17 @@
     <string>用于把你的语音转换为 Codex 输入内容。</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>用于使用 macOS 语音识别生成 Codex 消息。</string>
-    <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>SUAllowsAutomaticUpdates</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://api.cloudslow.com/ai/api/public/cloud-codex/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>CXBN8eKyiijdz6ekv8izM9bbK4CyHS6fOOSLVmyd8AQ=</string>
 </dict>
 </plist>

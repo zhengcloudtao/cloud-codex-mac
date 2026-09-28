@@ -327,8 +327,7 @@ struct AccountOverviewView: View {
                 }
                 if let account = model.accountOverview {
                     TimelineView(.periodic(from: .now, by: 60)) { context in
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 12) {
                                 Text("订阅套餐：\(account.planDisplayName)").fontWeight(.semibold)
                                 Text(subscriptionPeriodLabel(account.subscriptionPeriodEnd))
                                     .foregroundStyle(.secondary)
@@ -434,10 +433,9 @@ struct AccountOverviewView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                                 Text("使用重置前会再次确认；多个额度窗口按接口返回分别列出。")
                                     .font(.caption).foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                     }
                 } else { Text("尚未读取到套餐或额度，请检查本机 Codex 登录和连接状态。") }
                 if let error = model.accountOverviewError {
@@ -445,7 +443,8 @@ struct AccountOverviewView: View {
                 }
             }
             .padding(20)
-            .frame(width: 460, height: 520)
+            .frame(width: 460)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .alert(
             "确认使用重置次数？",

@@ -2932,6 +2932,9 @@ private struct FileChangeReviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     let group: ConversationFileChangeGroup
 
+    private static let minimumSize = NSSize(width: 860, height: 520)
+    private static let defaultSize = NSSize(width: 1_120, height: 720)
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -2985,7 +2988,119 @@ private struct FileChangeReviewSheet: View {
                 .padding(18)
             }
         }
-        .frame(width: 860, height: 520)
+        .frame(
+            minWidth: Self.minimumSize.width,
+            idealWidth: Self.defaultSize.width,
+            minHeight: Self.minimumSize.height,
+            idealHeight: Self.defaultSize.height
+        )
+        .background(
+            FileChangeReviewWindowConfigurator(
+                minimumSize: Self.minimumSize,
+                defaultSize: Self.defaultSize
+            )
+        )
+    }
+}
+
+private struct FileChangeReviewWindowConfigurator: NSViewRepresentable {
+    let minimumSize: NSSize
+    let defaultSize: NSSize
+
+    func makeNSView(context: Context) -> FileChangeReviewWindowProbe {
+        let view = FileChangeReviewWindowProbe()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ view: FileChangeReviewWindowProbe, context: Context) {
+        update(view)
+    }
+
+    static func dismantleNSView(_ view: FileChangeReviewWindowProbe, coordinator: ()) {
+        view.disconnect()
+    }
+
+    private func update(_ view: FileChangeReviewWindowProbe) {
+        view.minimumSize = minimumSize
+        view.defaultSize = defaultSize
+        view.connectWhenReady()
+    }
+}
+
+private final class FileChangeReviewWindowProbe: NSView {
+    private static let widthKey = "cloudcodex.fileChangeReviewWindowWidth"
+    private static let heightKey = "cloudcodex.fileChangeReviewWindowHeight"
+
+    var minimumSize = NSSize(width: 860, height: 520)
+    var defaultSize = NSSize(width: 1_120, height: 720)
+
+    private weak var observedWindow: NSWindow?
+    private var resizeObservations: [NSObjectProtocol] = []
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        connectWhenReady()
+    }
+
+    func connectWhenReady() {
+        DispatchQueue.main.async { [weak self] in self?.connect() }
+    }
+
+    func disconnect() {
+        persistCurrentSize()
+        resizeObservations.forEach { NotificationCenter.default.removeObserver($0) }
+        resizeObservations.removeAll()
+        observedWindow = nil
+    }
+
+    deinit {
+        disconnect()
+    }
+
+    private func connect() {
+        guard let window, observedWindow !== window else { return }
+        disconnect()
+        observedWindow = window
+
+        window.styleMask.insert(.resizable)
+        window.contentMinSize = minimumSize
+        window.contentMaxSize = NSSize(width: 10_000, height: 10_000)
+        window.standardWindowButton(.zoomButton)?.isEnabled = true
+
+        let defaults = UserDefaults.standard
+        let savedWidth = defaults.double(forKey: Self.widthKey)
+        let savedHeight = defaults.double(forKey: Self.heightKey)
+        let restoredSize = NSSize(
+            width: max(minimumSize.width, savedWidth > 0 ? savedWidth : defaultSize.width),
+            height: max(minimumSize.height, savedHeight > 0 ? savedHeight : defaultSize.height)
+        )
+        window.setContentSize(restoredSize)
+
+        let center = NotificationCenter.default
+        resizeObservations.append(center.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in self?.persistCurrentSize() })
+        if let contentView = window.contentView {
+            contentView.postsFrameChangedNotifications = true
+            resizeObservations.append(center.addObserver(
+                forName: NSView.frameDidChangeNotification,
+                object: contentView,
+                queue: .main
+            ) { [weak self] _ in self?.persistCurrentSize() })
+        }
+        persistCurrentSize()
+    }
+
+    private func persistCurrentSize() {
+        guard let size = observedWindow?.contentView?.bounds.size else { return }
+        let width = max(minimumSize.width, size.width)
+        let height = max(minimumSize.height, size.height)
+        let defaults = UserDefaults.standard
+        defaults.set(width, forKey: Self.widthKey)
+        defaults.set(height, forKey: Self.heightKey)
     }
 }
 
