@@ -48,6 +48,7 @@ final class WorkspaceOrganizationTests: XCTestCase {
     func testOrganizationRoundTripsThroughJSON() throws {
         var organization = WorkspaceOrganization()
         let category = try XCTUnwrap(organization.addCategory(named: "常用项目"))
+        XCTAssertTrue(organization.addFolder(path: "/work/new-project"))
         organization.assignFolders(["/work/school"], to: category.id)
         organization.moveFolders(
             ["/work/school"],
@@ -61,7 +62,24 @@ final class WorkspaceOrganizationTests: XCTestCase {
 
         XCTAssertEqual(decoded, organization)
         XCTAssertEqual(decoded.categoryID(forFolder: "/work/school"), category.id)
-        XCTAssertEqual(decoded.folderOrder, ["/work/school"])
+        XCTAssertEqual(decoded.folderOrder, ["/work/new-project", "/work/school"])
+        XCTAssertEqual(decoded.addedFolderPaths, ["/work/new-project"])
+    }
+
+    func testAddingFolderIsUniqueAndMovesItToFront() {
+        var organization = WorkspaceOrganization()
+        organization.moveFolders(
+            ["/work/existing"],
+            to: nil,
+            before: nil,
+            knownFolderPaths: ["/work/existing"]
+        )
+
+        XCTAssertTrue(organization.addFolder(path: "  /work/new-project  "))
+        XCTAssertFalse(organization.addFolder(path: "/work/new-project"))
+
+        XCTAssertEqual(organization.addedFolderPaths, ["/work/new-project"])
+        XCTAssertEqual(organization.folderOrder, ["/work/new-project", "/work/existing"])
     }
 
     func testFoldersCanBeReorderedAndMovedAcrossCategories() throws {
@@ -133,6 +151,7 @@ final class WorkspaceOrganizationTests: XCTestCase {
         XCTAssertEqual(decoded.categories.map(\.name), ["cloud"])
         XCTAssertEqual(decoded.categoryID(forFolder: "/work/school"), "cloud-id")
         XCTAssertTrue(decoded.folderOrder.isEmpty)
+        XCTAssertTrue(decoded.addedFolderPaths.isEmpty)
     }
 
     private func folders(paths: [String]) -> [WorkspaceFolder] {

@@ -544,23 +544,25 @@ struct ContentView: View {
     }
 
     private var folderSidebar: some View {
-        List(selection: Binding(
-            get: { showingFavoriteThreads ? "__favorites__" : model.selectedFolder ?? "__all__" },
-            set: { selection in
-                guard let selection else { return }
-                if selection == "__favorites__" {
-                    showingFavoriteThreads = true
-                    return
+        VStack(spacing: 0) {
+            workspaceSidebarHeader
+
+            List(selection: Binding(
+                get: { showingFavoriteThreads ? "__favorites__" : model.selectedFolder ?? "__all__" },
+                set: { selection in
+                    guard let selection else { return }
+                    if selection == "__favorites__" {
+                        showingFavoriteThreads = true
+                        return
+                    }
+                    showingFavoriteThreads = false
+                    let previous = model.selectedFolder
+                    DispatchQueue.main.async {
+                        guard model.selectedFolder == previous else { return }
+                        model.selectFolder(selection == "__all__" ? nil : selection)
+                    }
                 }
-                showingFavoriteThreads = false
-                let previous = model.selectedFolder
-                DispatchQueue.main.async {
-                    guard model.selectedFolder == previous else { return }
-                    model.selectFolder(selection == "__all__" ? nil : selection)
-                }
-            }
-        )) {
-            Section {
+            )) {
                 Label("最近会话", systemImage: "tray.full")
                     .padding(.vertical, 3)
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
@@ -569,45 +571,16 @@ struct ContentView: View {
                     .padding(.vertical, 3)
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
                     .tag("__favorites__")
-            } header: {
-                HStack {
-                    Text("工作区")
-                    Spacer()
-                    Button {
-                        model.showingCategoryManager = true
-                    } label: {
-                        Image(systemName: "folder.badge.gearshape")
-                    }
-                    .buttonStyle(.plain)
-                    .help("管理分类")
-                }
-                .padding(.trailing, 12)
-                .padding(.bottom, 4)
-            }
 
-            ForEach(model.workspaceCategories) { category in
-                workspaceCategorySection(category)
-            }
-
-            Section(isExpanded: categoryExpansionBinding(nil)) {
-                if model.uncategorizedFolders.isEmpty {
-                    categoryDropPlaceholder("拖动工作区到这里", categoryID: nil)
-                } else {
-                    ForEach(model.uncategorizedFolders) { folder in
-                        workspaceRow(folder)
-                    }
+                ForEach(model.workspaceCategories) { category in
+                    workspaceCategorySection(category)
                 }
-            } header: {
-                categoryDropHeader(
-                    "未分类",
-                    systemImage: "tray",
-                    categoryID: nil,
-                    isExpanded: categoryExpansionBinding(nil)
-                )
+
+                uncategorizedWorkspaceRows
             }
+            .listStyle(.sidebar)
+            .environment(\.defaultMinListRowHeight, 0)
         }
-        .listStyle(.sidebar)
-        .environment(\.defaultMinListRowHeight, 0)
         .safeAreaInset(edge: .bottom) {
             ConnectionHealthView(health: model.connectionHealth, localStatus: model.connectionText)
             .padding(12)
@@ -615,8 +588,59 @@ struct ContentView: View {
         }
     }
 
+    private var workspaceSidebarHeader: some View {
+        HStack(spacing: 4) {
+            Text("工作区")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button {
+                model.chooseWorkspaceFolder()
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("新增工作区")
+            .accessibilityLabel("新增工作区")
+
+            Button {
+                model.showingCategoryManager = true
+            } label: {
+                Image(systemName: "folder.badge.gearshape")
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("管理分类")
+            .accessibilityLabel("管理工作区分类")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 10)
+        .frame(height: 32)
+    }
+
+    @ViewBuilder
     private func workspaceCategorySection(_ category: WorkspaceCategory) -> some View {
-        Section(isExpanded: categoryExpansionBinding(category.id)) {
+        let isExpanded = categoryExpansionBinding(category.id)
+        categoryDropHeader(
+            category.name,
+            systemImage: "folder.fill",
+            categoryID: category.id,
+            isExpanded: isExpanded
+        )
+        .contextMenu {
+            Button("重命名") {
+                model.showingCategoryManager = true
+                model.beginRenamingCategory(category)
+            }
+            Button("删除分类", role: .destructive) {
+                model.deleteCategory(category.id)
+            }
+        }
+
+        if isExpanded.wrappedValue {
             let folders = model.folders(inCategory: category.id)
             if folders.isEmpty {
                 categoryDropPlaceholder("拖动工作区到这里", categoryID: category.id)
@@ -625,22 +649,27 @@ struct ContentView: View {
                     workspaceRow(folder)
                 }
             }
-        } header: {
-            categoryDropHeader(
-                category.name,
-                systemImage: "folder.fill",
-                categoryID: category.id,
-                isExpanded: categoryExpansionBinding(category.id)
-            )
-                .contextMenu {
-                    Button("重命名") {
-                        model.showingCategoryManager = true
-                        model.beginRenamingCategory(category)
-                    }
-                    Button("删除分类", role: .destructive) {
-                        model.deleteCategory(category.id)
-                    }
+        }
+    }
+
+    @ViewBuilder
+    private var uncategorizedWorkspaceRows: some View {
+        let isExpanded = categoryExpansionBinding(nil)
+        categoryDropHeader(
+            "未分类",
+            systemImage: "tray",
+            categoryID: nil,
+            isExpanded: isExpanded
+        )
+
+        if isExpanded.wrappedValue {
+            if model.uncategorizedFolders.isEmpty {
+                categoryDropPlaceholder("拖动工作区到这里", categoryID: nil)
+            } else {
+                ForEach(model.uncategorizedFolders) { folder in
+                    workspaceRow(folder)
                 }
+            }
         }
     }
 
@@ -707,10 +736,25 @@ struct ContentView: View {
         categoryID: String?,
         isExpanded: Binding<Bool>
     ) -> some View {
-        let header = Label(title, systemImage: systemImage)
+        let header = HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.blue)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.primary)
+                .frame(width: 18, height: 18)
+                .accessibilityHidden(true)
+        }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 2)
-            .padding(.bottom, 1)
+            // Keep the selected workspace capsule visually separate from its
+            // category label. A one-point gap makes the sidebar selection look
+            // attached to the header, especially in the uncategorized section.
+            .padding(.bottom, 7)
             .contentShape(Rectangle())
             .onTapGesture {
                 isExpanded.wrappedValue.toggle()
@@ -719,6 +763,7 @@ struct ContentView: View {
                 handleCategoryDrop(paths, targetCategoryID: categoryID, location: location)
             }
             .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(title)
             .accessibilityValue(isExpanded.wrappedValue ? "已展开" : "已收起")
             .accessibilityHint("点击收起或展开；也可将工作区拖到此分类")
             .help(isExpanded.wrappedValue
@@ -731,8 +776,10 @@ struct ContentView: View {
                     .padding(8)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
             }
+            .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 0, trailing: 10))
         } else {
             header
+                .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 0, trailing: 10))
         }
     }
 
@@ -1596,26 +1643,70 @@ private struct RemoteControlSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     } else if model.remoteControlEnabled && !model.remoteControlPaired {
-                        VStack(alignment: .center, spacing: 12) {
-                            Text("使用 AI 小程序扫码配对")
-                                .font(.subheadline.weight(.semibold))
-                            Text("打开 CloudCodex → 设备管理 → 扫一扫配对")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if let payload = model.remotePairingQRCodePayload,
-                               let image = RemotePairingQRCode.image(payload: payload) {
-                                Image(nsImage: image)
-                                    .interpolation(.none)
-                                    .resizable()
-                                    .frame(width: 190, height: 190)
-                                    .padding(14)
-                                    .background(.white, in: RoundedRectangle(cornerRadius: 12))
-                                    .accessibilityLabel("CloudCodex 小程序配对二维码")
-                            } else {
-                                ProgressView("正在生成配对二维码…")
-                                    .controlSize(.small)
-                                    .frame(height: 218)
+                        VStack(alignment: .leading, spacing: 16) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("首次配对指引")
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text("需要先进入 CloudCodex 小程序，再使用小程序内的扫一扫完成设备配对。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
+
+                            HStack(alignment: .top, spacing: 16) {
+                                pairingStepCard(
+                                    number: 1,
+                                    title: "微信扫描小程序码",
+                                    detail: "先用微信扫描下方小程序码，打开 CloudCodex 小程序。"
+                                ) {
+                                    if let image = Self.miniProgramCodeImage {
+                                        Image(nsImage: image)
+                                            .interpolation(.high)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 220, height: 220)
+                                            .background(.white)
+                                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                            .overlay {
+                                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                                    .stroke(.secondary.opacity(0.16))
+                                            }
+                                            .accessibilityLabel("CloudCodex 小程序码")
+                                    } else {
+                                        Label("小程序码资源不可用", systemImage: "exclamationmark.triangle")
+                                            .font(.caption)
+                                            .foregroundStyle(.orange)
+                                            .frame(width: 220, height: 220)
+                                    }
+                                }
+
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, height: 220)
+                                    .accessibilityHidden(true)
+
+                                pairingStepCard(
+                                    number: 2,
+                                    title: "在小程序中扫码配对",
+                                    detail: "进入「设备管理」，点击「扫一扫配对」，再扫描下方二维码。"
+                                ) {
+                                    if let payload = model.remotePairingQRCodePayload,
+                                       let image = RemotePairingQRCode.image(payload: payload) {
+                                        Image(nsImage: image)
+                                            .interpolation(.none)
+                                            .resizable()
+                                            .frame(width: 190, height: 190)
+                                            .padding(15)
+                                            .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                                            .accessibilityLabel("CloudCodex 设备配对二维码")
+                                    } else {
+                                        ProgressView("正在生成配对二维码…")
+                                            .controlSize(.small)
+                                            .frame(width: 220, height: 220)
+                                    }
+                                }
+                            }
+
                             HStack {
                                 Text("二维码临近过期时会自动更新")
                                     .font(.caption2)
@@ -1673,7 +1764,7 @@ private struct RemoteControlSheet: View {
                 .padding(20)
             }
         }
-        .frame(width: 520, height: 510)
+        .frame(width: 760, height: 680)
         .confirmationDialog(
             "解除这台 Mac 的远程控制配对？",
             isPresented: $confirmingRemoteUnpair,
@@ -1692,6 +1783,44 @@ private struct RemoteControlSheet: View {
         if !model.remoteControlEnabled { return .secondary }
         if model.remoteControlPaired { return .green }
         return .orange
+    }
+
+    private static let miniProgramCodeImage: NSImage? = {
+        guard let url = Bundle.main.url(
+            forResource: "CloudCodexMiniProgramCode",
+            withExtension: "png"
+        ) else { return nil }
+        return NSImage(contentsOf: url)
+    }()
+
+    private func pairingStepCard<Content: View>(
+        number: Int,
+        title: String,
+        detail: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .top, spacing: 9) {
+                Text(String(number))
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(.blue, in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(14)
+        .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func detailRow(_ title: String, _ value: String) -> some View {
@@ -1909,17 +2038,6 @@ private struct ConversationHeader: View {
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
-            if let model = thread.model {
-                Text(TurnModelMetadata(model: model, reasoningEffort: thread.reasoningEffort).displayLabel ?? model)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(.quaternary, in: Capsule())
-                    .frame(maxWidth: 190, alignment: .trailing)
-            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)
@@ -2700,7 +2818,7 @@ private struct MessageBubble: View, Equatable {
 private struct FileChangeSummaryCard: View {
     @EnvironmentObject private var model: AppModel
     let group: ConversationFileChangeGroup
-    @State private var showingReview = false
+    @State private var reviewRequest: FileChangeReviewRequest?
     @State private var showingUndoConfirmation = false
 
     private var isReverted: Bool { model.isFileChangeTurnReverted(group.turnID) }
@@ -2741,7 +2859,9 @@ private struct FileChangeSummaryCard: View {
                 .disabled(isReverted || isReverting || !hasRevertableDiff || model.isSelectedThreadProcessing)
                 .help(hasRevertableDiff ? "安全检查通过后反向应用本轮补丁" : "该会话没有返回可撤销的差异")
 
-                Button("审核") { showingReview = true }
+                Button("审核") {
+                    reviewRequest = FileChangeReviewRequest(group: group)
+                }
                     .buttonStyle(.bordered)
             }
             .padding(16)
@@ -2750,7 +2870,14 @@ private struct FileChangeSummaryCard: View {
 
             VStack(spacing: 0) {
                 ForEach(Array(group.changes.enumerated()), id: \.element.id) { index, change in
-                    Button { showingReview = true } label: {
+                    Button {
+                        reviewRequest = FileChangeReviewRequest(
+                            group: ConversationFileChangeGroup(
+                                turnID: group.turnID,
+                                changes: [change]
+                            )
+                        )
+                    } label: {
                         HStack(spacing: 12) {
                             Image(systemName: change.kind == .add ? "doc.badge.plus" : (change.kind == .delete ? "doc.badge.minus" : "doc.text"))
                                 .foregroundStyle(.secondary)
@@ -2778,8 +2905,8 @@ private struct FileChangeSummaryCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
-        .sheet(isPresented: $showingReview) {
-            FileChangeReviewSheet(group: group)
+        .sheet(item: $reviewRequest) { request in
+            FileChangeReviewSheet(group: request.group)
         }
         .confirmationDialog(
             "撤销本轮文件修改？",
@@ -2794,6 +2921,11 @@ private struct FileChangeSummaryCard: View {
             Text("CloudCodex 会先确认所有文件仍与本轮补丁一致，再一次性反向应用；检查不通过时不会修改任何文件。")
         }
     }
+}
+
+private struct FileChangeReviewRequest: Identifiable {
+    let id = UUID()
+    let group: ConversationFileChangeGroup
 }
 
 private struct FileChangeReviewSheet: View {
@@ -2861,29 +2993,76 @@ private struct UnifiedDiffCodeView: View {
     let diff: String
 
     var body: some View {
+        let lines = UnifiedDiffPresentation.lines(from: diff)
         ScrollView(.horizontal) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(UnifiedDiffPresentation.lines(from: diff)) { line in
-                    HStack(spacing: 0) {
-                        Text(line.oldLine.map(String.init) ?? "")
-                            .frame(width: 44, alignment: .trailing)
-                        Text(line.newLine.map(String.init) ?? "")
-                            .frame(width: 44, alignment: .trailing)
-                        Rectangle()
-                            .fill(markerColor(for: line.kind))
-                            .frame(width: 3)
-                            .padding(.horizontal, 8)
-                        Text(line.text.isEmpty ? " " : line.text)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .textSelection(.enabled)
-                        Spacer(minLength: 18)
+            ZStack(alignment: .topLeading) {
+                VStack(spacing: 0) {
+                    ForEach(lines) { line in
+                        backgroundColor(for: line.kind)
+                            .frame(minWidth: 760, minHeight: 22, maxHeight: 22)
                     }
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(foregroundColor(for: line.kind))
-                    .frame(minWidth: 760, minHeight: 22, alignment: .leading)
-                    .background(backgroundColor(for: line.kind))
+                }
+
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(lines) { line in
+                            HStack(spacing: 0) {
+                                Text(line.oldLine.map(String.init) ?? "")
+                                    .frame(width: 44, alignment: .trailing)
+                                Text(line.newLine.map(String.init) ?? "")
+                                    .frame(width: 44, alignment: .trailing)
+                            }
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(foregroundColor(for: line.kind))
+                            .frame(height: 22)
+                        }
+                    }
+                    .frame(width: 88)
+                    .fixedSize(horizontal: true, vertical: true)
+
+                    ZStack(alignment: .topLeading) {
+                        HStack(alignment: .top, spacing: 0) {
+                            VStack(spacing: 0) {
+                                ForEach(lines) { line in
+                                    ZStack(alignment: .leading) {
+                                        Rectangle()
+                                            .fill(markerColor(for: line.kind))
+                                            .frame(width: 3)
+                                        Text(markerSymbol(for: line.kind))
+                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundStyle(foregroundColor(for: line.kind))
+                                            .frame(width: 24, alignment: .trailing)
+                                    }
+                                    .frame(height: 22)
+                                    .allowsHitTesting(false)
+                                }
+                            }
+                            .frame(width: 28)
+                            .fixedSize(horizontal: true, vertical: true)
+
+                            ReliableSelectableAttributedText(
+                                text: UnifiedDiffTextDocument.attributed(from: lines),
+                                maximumWidth: 20_000
+                            )
+                            .fixedSize(horizontal: true, vertical: true)
+
+                            Spacer(minLength: 18)
+                        }
+
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(lines) { line in
+                                Text(line.kind == .hunk ? line.text : "")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(Color.blue)
+                                    .frame(height: 22, alignment: .leading)
+                            }
+                        }
+                        .padding(.leading, 28)
+                        .allowsHitTesting(false)
+                    }
                 }
             }
+            .frame(minWidth: 760, alignment: .leading)
             .fixedSize(horizontal: true, vertical: true)
         }
         .background(Color.black.opacity(0.08))
@@ -2895,6 +3074,14 @@ private struct UnifiedDiffCodeView: View {
         case .deletion: return .red
         case .hunk: return .blue
         case .metadata, .context: return .clear
+        }
+    }
+
+    private func markerSymbol(for kind: DiffDisplayLine.Kind) -> String {
+        switch kind {
+        case .addition: return "+"
+        case .deletion: return "−"
+        case .metadata, .hunk, .context: return ""
         }
     }
 

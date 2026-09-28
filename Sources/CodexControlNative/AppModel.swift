@@ -49,7 +49,6 @@ final class AppModel: ObservableObject {
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
     private let revertedFileChangesKey = "cloudcodex.revertedFileChanges.v1"
     private var quotaConsumptionTracker = QuotaConsumptionTracker()
-    private let eventNotifier: CodexEventNotifier?
     @Published private(set) var revertedFileChanges: Set<String> = []
     @Published private(set) var revertingFileChanges: String?
 
@@ -95,14 +94,12 @@ final class AppModel: ObservableObject {
     }
 
     func recordCompletedConversation(_ threadID: String, turnID: String, viewed: Bool) {
-        let isNewCompletion = unreadCompletions.complete(
+        _ = unreadCompletions.complete(
             threadID: threadID,
             turnID: turnID,
             viewed: viewed
         )
         saveUnreadCompletions()
-        guard isNewCompletion, let eventNotifier else { return }
-        Task { await eventNotifier.notify(.conversationCompleted) }
     }
 
     private func saveUnreadCompletions() {
@@ -784,7 +781,6 @@ final class AppModel: ObservableObject {
         remoteDefaults: UserDefaults = .standard,
         userInputTimeoutSeconds: TimeInterval = 60,
         computerControlTimeoutSeconds: TimeInterval = 120,
-        eventNotifier: CodexEventNotifier? = nil,
         remoteAPILoader: @escaping @Sendable (Bool) async throws -> RemoteControlAPI = {
             try await RemoteControlAPI.connect(allowInteraction: $0)
         }
@@ -792,7 +788,6 @@ final class AppModel: ObservableObject {
         self.remoteDefaults = remoteDefaults
         self.userInputTimeoutSeconds = userInputTimeoutSeconds
         self.computerControlTimeoutSeconds = computerControlTimeoutSeconds
-        self.eventNotifier = eventNotifier
         self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
         if let data = remoteDefaults.data(forKey: unreadCompletionsKey),
@@ -868,6 +863,45 @@ final class AppModel: ObservableObject {
 
     func categoryID(forFolder path: String) -> String? {
         workspaceOrganization.categoryID(forFolder: path)
+    }
+
+    func chooseWorkspaceFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "新增 CloudCodex 工作区"
+        panel.prompt = "新增工作区"
+        panel.message = "选择一个文件夹。CloudCodex 会将它保留在工作区列表中，不会移动或修改其中的文件。"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        addWorkspace(at: url)
+    }
+
+    @discardableResult
+    func addWorkspace(at url: URL) -> Bool {
+        let standardizedURL = url.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard standardizedURL.isFileURL,
+              FileManager.default.fileExists(atPath: standardizedURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            errorMessage = "所选工作区不存在或不是文件夹。"
+            return false
+        }
+
+        let path = standardizedURL.path
+        let wasAdded = workspaceOrganization.addFolder(path: path)
+        saveWorkspaceOrganization()
+        if let index = folderCatalog.firstIndex(where: { $0.path == path }) {
+            let folder = folderCatalog.remove(at: index)
+            folderCatalog.insert(folder, at: 0)
+        } else {
+            folderCatalog.insert(
+                WorkspaceFolder(path: path, threadCount: 0, latestUpdate: Date()),
+                at: 0
+            )
+        }
+        selectFolder(path)
+        return wasAdded
     }
 
     func assignFolders(_ paths: [String], to categoryID: String?) {
@@ -1154,17 +1188,10 @@ final class AppModel: ObservableObject {
     }
 
     private func applyAccountOverview(_ overview: AccountOverview) {
-        let shouldNotify = CodexEventNotifier.shouldNotifyQuotaUpdated(
-            previous: accountOverview,
-            current: overview
-        )
         accountOverview = overview
         recentThirtyMinuteConsumptionRate = quotaConsumptionTracker.record(account: overview)
         if let data = try? JSONEncoder().encode(quotaConsumptionTracker) {
             remoteDefaults.set(data, forKey: quotaConsumptionHistoryKey)
-        }
-        if shouldNotify, let eventNotifier {
-            Task { await eventNotifier.notify(.quotaUpdated) }
         }
     }
 
@@ -2356,6 +2383,19 @@ final class AppModel: ObservableObject {
             // folders will still populate the sidebar on the next request.
             folderCatalog = []
         }
+        mergeAddedWorkspaces()
+    }
+
+    private func mergeAddedWorkspaces() {
+        let existingPaths = Set(folderCatalog.map(\.path))
+        let addedFolders = workspaceOrganization.addedFolderPaths.compactMap { path -> WorkspaceFolder? in
+            guard !existingPaths.contains(path) else { return nil }
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return nil }
+            return WorkspaceFolder(path: path, threadCount: 0, latestUpdate: .distantPast)
+        }
+        folderCatalog.append(contentsOf: addedFolders)
     }
 
     private func loadComposerOptions(cwd: String?) async {

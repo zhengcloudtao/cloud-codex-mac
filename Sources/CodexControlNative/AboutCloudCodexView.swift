@@ -3,6 +3,14 @@ import SwiftUI
 
 /// Read-only introduction: opening this window never starts or modifies a task.
 struct AboutCloudCodexView: View {
+    private var customerServiceQRCode: NSImage? {
+        guard let url = Bundle.main.url(
+            forResource: "CustomerServiceQRCode",
+            withExtension: "jpg"
+        ) else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
     private var version: String {
         let info = Bundle.main.infoDictionary ?? [:]
         let release = info["CFBundleShortVersionString"] as? String ?? "开发版"
@@ -38,10 +46,41 @@ struct AboutCloudCodexView: View {
                         item("远程能力是额外入口", "Codex 仍在这台 Mac 上执行。CloudCodex 只是把经过配对的手机请求转交给本机 Codex，再将任务状态和结果同步回小程序。")
                     }
                     section("远程控制：手机发起，Mac 执行", symbol: "antenna.radiowaves.left.and.right") {
-                        item("扫码后使用", "在 Mac 上主动开启“允许远程任务”，再使用 AI 小程序扫描限时二维码完成配对。没有开启或没有完成配对时，CloudCodex 不会领取远程任务。")
+                        item("扫码后使用", "在 Mac 上主动开启“允许远程任务”，先用微信扫描 CloudCodex 小程序码进入小程序，再在“设备管理”中使用“扫一扫配对”扫描 Mac 上的限时二维码。没有开启或没有完成配对时，CloudCodex 不会领取远程任务。")
                         item("远程发起与查看", "可在小程序中选择这台 Mac 已授权的工作区和会话，发送新任务，并查看排队状态、执行进度、完成结果、Codex 额度与设备状态。")
                         item("执行仍受本机控制", "任务由这台 Mac 上正在运行的 CloudCodex 领取，并交给本机 Codex 执行；使用的模型和权限以任务设置及本机可用能力为准。关闭远程任务后不再领取新任务，已经开始的任务会继续完成。")
                         item("不开放公网端口", "CloudCodex 主动通过 HTTPS 与远程服务同步，不在 Mac 上开放公网监听端口。设备凭据保存在 macOS 钥匙串中，远程服务只负责配对、转发和状态同步。")
+                    }
+                    section("客服与反馈", symbol: "person.crop.circle.badge.questionmark") {
+                        HStack(alignment: .top, spacing: 20) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                item("添加客服微信", "使用 CloudCodex 遇到问题时，可用微信扫描右侧二维码添加客服。")
+                                item("反馈时请说明", "建议附上问题现象、复现步骤、CloudCodex 版本和必要截图，方便更快定位。")
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            if let customerServiceQRCode {
+                                Image(nsImage: customerServiceQRCode)
+                                    .resizable()
+                                    .interpolation(.high)
+                                    .scaledToFit()
+                                    .frame(width: 210)
+                                    .background(.white)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                                    }
+                                    .accessibilityLabel("CloudCodex 客服微信二维码")
+                            } else {
+                                ContentUnavailableView(
+                                    "客服二维码不可用",
+                                    systemImage: "qrcode",
+                                    description: Text("请检查应用资源后重新打开。")
+                                )
+                                .frame(width: 210, height: 210)
+                            }
+                        }
                     }
                     section("CloudCodex 优化了什么", symbol: "sparkles") {
                         item("多工作区集中管理", "在一个原生窗口中浏览工作区、最近会话和收藏会话；支持搜索，并按最近一次用户发起消息的时间整理会话。")

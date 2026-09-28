@@ -1,5 +1,7 @@
 import XCTest
 import AppKit
+import SwiftUI
+import WebKit
 @testable import CloudCodex
 
 @MainActor
@@ -77,6 +79,34 @@ final class EmbeddedBrowserTests: XCTestCase {
         }
     }
 
+    func testLoadingStateDoesNotResizeWebView() throws {
+        let tab = BrowserTab(threadID: "stable-loading-layout")
+        let contentSize = NSSize(width: 720, height: 680)
+        let hostingView = NSHostingView(rootView: BrowserPageView(tab: tab))
+        let window = NSWindow(
+            contentRect: NSRect(origin: NSPoint(x: -4_000, y: -4_000), size: contentSize),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hostingView
+        hostingView.frame = NSRect(origin: .zero, size: contentSize)
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+
+        settleLayout(hostingView)
+        let webView = try XCTUnwrap(descendants(of: hostingView).compactMap { $0 as? WKWebView }.first)
+        let baseline = webView.frame
+
+        for loading in [true, false, true, false, true, false] {
+            tab.loading = loading
+            settleLayout(hostingView)
+            XCTAssertEqual(webView.frame.minY, baseline.minY, accuracy: 0.5)
+            XCTAssertEqual(webView.frame.height, baseline.height, accuracy: 0.5)
+        }
+    }
+
     func testWebKitInteractionAndIsolation() async throws {
         guard ProcessInfo.processInfo.environment["CLOUDCODEX_BROWSER_TEST"] == "1" else { throw XCTSkip("Opt-in WebKit integration test") }
         let browser = EmbeddedBrowser()
@@ -107,5 +137,17 @@ final class EmbeddedBrowserTests: XCTestCase {
         XCTAssertEqual(stale["success"] as? Bool, false)
         let screenshot = await browser.execute(threadID: "test-a", arguments: ["action": "screenshot", "tabId": tab.id])
         XCTAssertEqual(screenshot["success"] as? Bool, true)
+    }
+
+    private func settleLayout(_ view: NSView) {
+        for _ in 0..<4 {
+            view.needsLayout = true
+            view.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        }
+    }
+
+    private func descendants(of view: NSView) -> [NSView] {
+        view.subviews + view.subviews.flatMap(descendants(of:))
     }
 }

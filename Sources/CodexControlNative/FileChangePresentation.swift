@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct ConversationFileChange: Identifiable, Hashable {
@@ -247,5 +248,48 @@ enum UnifiedDiffPresentation {
               let old = Int(oldPart.split(separator: ",").first ?? ""),
               let new = Int(line[newStart..<newEnd]) else { return nil }
         return (old, new)
+    }
+}
+
+enum UnifiedDiffTextDocument {
+    static func attributed(from lines: [DiffDisplayLine]) -> NSAttributedString {
+        let document = NSMutableAttributedString()
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = 22
+        paragraph.maximumLineHeight = 22
+
+        for (index, line) in lines.enumerated() {
+            let lineBreak = index < lines.count - 1 ? "\n" : ""
+            document.append(NSAttributedString(
+                string: selectableText(for: line) + lineBreak,
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                    .foregroundColor: foregroundColor(for: line.kind),
+                    .paragraphStyle: paragraph
+                ]
+            ))
+        }
+        return document
+    }
+
+    private static func selectableText(for line: DiffDisplayLine) -> String {
+        switch line.kind {
+        case .addition, .deletion, .context:
+            return String(line.text.dropFirst())
+        case .hunk:
+            return ""
+        case .metadata:
+            return line.text
+        }
+    }
+
+    private static func foregroundColor(for kind: DiffDisplayLine.Kind) -> NSColor {
+        switch kind {
+        case .addition: return .systemGreen
+        case .deletion: return .systemRed
+        case .hunk: return .systemBlue
+        case .metadata: return .secondaryLabelColor
+        case .context: return .labelColor
+        }
     }
 }

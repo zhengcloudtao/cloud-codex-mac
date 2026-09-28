@@ -51,6 +51,19 @@ final class FileChangePresentationTests: XCTestCase {
         XCTAssertEqual(lines[7].newLine, 22)
     }
 
+    func testSelectableDiffDocumentOmitsLineNumbersDiffMarkersAndHunkHeaders() {
+        let diff = "@@ -1,2 +1,2 @@\n-old\n+new\n context"
+        let lines = UnifiedDiffPresentation.lines(from: diff)
+
+        let document = UnifiedDiffTextDocument.attributed(from: lines)
+
+        XCTAssertEqual(document.string, "\nold\nnew\ncontext")
+        XCTAssertFalse(document.string.contains("   1"))
+        XCTAssertFalse(document.string.contains("@@"))
+        XCTAssertFalse(document.string.contains("\n-old"))
+        XCTAssertFalse(document.string.contains("\n+new"))
+    }
+
     func testReversePatchChecksAndRestoresCurrentPostImage() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("CloudCodexFileUndo-\(UUID().uuidString)", isDirectory: true)

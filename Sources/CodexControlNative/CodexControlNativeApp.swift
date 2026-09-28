@@ -2,7 +2,8 @@ import SwiftUI
 
 @main
 struct CloudCodexApp: App {
-    @StateObject private var model = AppModel(eventNotifier: .live)
+    @StateObject private var model = AppModel()
+    @StateObject private var updateController = CloudCodexUpdateController()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -14,11 +15,27 @@ struct CloudCodexApp: App {
                 // from forcing the workspace column into a compressed layout.
                 .frame(minWidth: 1_140, minHeight: 640)
                 .task { await model.start() }
+                .task { await updateController.check() }
+                .sheet(item: $updateController.notice) { notice in
+                    CloudCodexUpdateSheet(notice: notice, controller: updateController)
+                }
+                .alert(item: $updateController.checkResult) { result in
+                    Alert(
+                        title: Text(result.title),
+                        message: Text(result.message),
+                        dismissButton: .default(Text("好"))
+                    )
+                }
         }
         .defaultSize(width: 1220, height: 780)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("关于 CloudCodex") { openWindow(id: "about-cloudcodex") }
+                Divider()
+                Button("检查更新…") {
+                    Task { await updateController.check(force: true, reportsResult: true) }
+                }
+                .disabled(updateController.isChecking)
             }
             CommandGroup(replacing: .newItem) {
                 Button("新建会话", action: model.prepareNewThread)

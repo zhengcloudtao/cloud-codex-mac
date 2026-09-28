@@ -1,5 +1,35 @@
 import Foundation
 
+enum CodexExecutableLocator {
+    static let bundledCandidates = [
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "/Applications/Codex.app/Contents/Resources/codex",
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex"
+    ]
+
+    static func locate(
+        bundledCandidates: [String] = bundledCandidates,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        if let path = bundledCandidates.first(where: fileManager.isExecutableFile(atPath:)) {
+            return URL(fileURLWithPath: path)
+        }
+        if let path = environment["PATH"] {
+            for directory in path.split(separator: ":") {
+                let candidate = String(directory) + "/codex"
+                if fileManager.isExecutableFile(atPath: candidate) {
+                    return URL(fileURLWithPath: candidate)
+                }
+            }
+        }
+        throw CodexClientError.binaryNotFound
+    }
+}
+
 @MainActor
 final class AppServerClient {
     typealias JSON = [String: Any]
@@ -49,7 +79,7 @@ final class AppServerClient {
         output?.readabilityHandler = nil
         errorOutput?.readabilityHandler = nil
         decodingWorker = JSONLineDecodingWorker()
-        let executable = try locateCodex()
+        let executable = try CodexExecutableLocator.locate()
         let process = Process()
         let stdin = Pipe()
         let stdout = Pipe()
@@ -745,27 +775,6 @@ final class AppServerClient {
     private func timeoutRequest(_ id: Int, method: String) {
         guard let request = pending.removeValue(forKey: id) else { return }
         request.continuation.resume(throwing: CodexClientError.timeout(method))
-    }
-
-    private func locateCodex() throws -> URL {
-        let candidates = [
-            "/Applications/ChatGPT.app/Contents/Resources/codex",
-            "/Applications/Codex.app/Contents/Resources/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex"
-        ]
-        if let path = candidates.first(where: FileManager.default.isExecutableFile(atPath:)) {
-            return URL(fileURLWithPath: path)
-        }
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            for directory in path.split(separator: ":") {
-                let candidate = String(directory) + "/codex"
-                if FileManager.default.isExecutableFile(atPath: candidate) {
-                    return URL(fileURLWithPath: candidate)
-                }
-            }
-        }
-        throw CodexClientError.binaryNotFound
     }
 
     nonisolated static func parseMessages<S: Sequence>(

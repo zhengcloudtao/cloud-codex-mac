@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f5f1e8">
+  <meta name="description" content="下载 CloudCodex——在 macOS 上以更清晰的方式管理和继续 Codex 会话。">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%23132b42'/%3E%3Cpath d='M16 19h32v26H16z' fill='none' stroke='%235bc8e8' stroke-width='4'/%3E%3Cpath d='m23 28 6 5-6 5M35 38h7' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <title>CloudCodex — 下载 macOS 版</title>
+  <style>
+    :root {
+      --paper: #f5f1e8;
+      --paper-soft: #fbf9f4;
+      --ink: #101922;
+      --muted: #56616b;
+      --line: rgba(16, 25, 34, .13);
+      --navy: #132b42;
+      --blue: #1769e0;
+      --cyan: #5bc8e8;
+      --lime: #c8f05a;
+      --shadow: 0 24px 70px rgba(19, 43, 66, .16);
+      --radius: 26px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 4%, rgba(91, 200, 232, .20), transparent 27rem),
+        radial-gradient(circle at 90% 20%, rgba(200, 240, 90, .15), transparent 25rem),
+        var(--paper);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+
+    .shell {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      min-height: 78px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
+      text-decoration: none;
+      font-size: 17px;
+      font-weight: 760;
+      letter-spacing: -.02em;
+    }
+
+    .brand img {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      box-shadow: 0 7px 18px rgba(23, 105, 224, .19);
+    }
+
+    .nav-links { display: flex; align-items: center; gap: 28px; }
+    .nav-links a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 620; }
+    .nav-links a:hover { color: var(--ink); }
+
+    .nav-download {
+      padding: 10px 15px;
+      color: #fff !important;
+      background: var(--navy);
+      border-radius: 999px;
+    }
+
+    .hero {
+      min-height: 690px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(520px, 1.12fr);
+      align-items: center;
+      gap: clamp(48px, 6vw, 76px);
+      padding: 74px 0 88px;
+    }
+
+    .hero-copy { min-width: 0; }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 19px;
+      color: var(--navy);
+      font-size: 13px;
+      font-weight: 760;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--lime);
+      box-shadow: 0 0 0 5px rgba(200, 240, 90, .25);
+    }
+
+    h1 {
+      max-width: 560px;
+      margin: 0;
+      font-size: clamp(54px, 5.1vw, 76px);
+      line-height: .96;
+      letter-spacing: -.065em;
+      font-weight: 780;
+    }
+
+    .headline-line {
+      display: block;
+      color: var(--ink);
+      white-space: nowrap;
+    }
+
+    .headline-accent {
+      color: var(--blue);
+      padding-top: .06em;
+    }
+
+    .lead {
+      max-width: 520px;
+      margin: 25px 0 0;
+      color: var(--muted);
+      font-size: clamp(17px, 2vw, 20px);
+      line-height: 1.7;
+      letter-spacing: -.015em;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .button {
+      min-height: 54px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 0 21px;
+      border: 1px solid transparent;
+      border-radius: 15px;
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 720;
+      transition: transform .2s ease, box-shadow .2s ease, background .2s ease;
+    }
+
+    .button:hover { transform: translateY(-2px); }
+    .button-primary { color: #fff; background: var(--blue); box-shadow: 0 15px 30px rgba(23, 105, 224, .25); }
+    .button-primary:hover { box-shadow: 0 18px 38px rgba(23, 105, 224, .34); }
+    .button-secondary { background: rgba(255, 255, 255, .48); border-color: var(--line); }
+    .button svg { width: 18px; height: 18px; }
+
+    .release-meta {
+      margin-top: 15px;
+      color: #6d767e;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .app-stage { position: relative; padding: 28px 0 0 24px; }
+    .app-stage::before {
+      content: "";
+      position: absolute;
+      inset: 0 10% 12% 4%;
+      border-radius: 48% 52% 45% 55%;
+      background: linear-gradient(145deg, var(--cyan), var(--blue));
+      filter: blur(1px);
+      transform: rotate(-5deg);
+      opacity: .95;
+    }
+
+    .app-stage::after {
+      content: "";
+      position: absolute;
+      width: 120px;
+      height: 120px;
+      right: -18px;
+      top: 16px;
+      border: 1px solid rgba(19, 43, 66, .22);
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 18px rgba(245, 241, 232, .44);
+    }
+
+    .app-window {
+      position: relative;
+      z-index: 1;
+      aspect-ratio: 1.28;
+      overflow: hidden;
+      background: rgba(250, 251, 253, .93);
+      border: 1px solid rgba(255, 255, 255, .78);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      transform: rotate(2.2deg);
+    }
+
+    .window-bar {
+      height: 43px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 15px;
+      background: rgba(244, 246, 249, .92);
+      border-bottom: 1px solid #dfe4ea;
+    }
+
+    .traffic { width: 10px; height: 10px; border-radius: 50%; background: #ff5f57; }
+    .traffic:nth-child(2) { background: #febc2e; }
+    .traffic:nth-child(3) { background: #28c840; }
+    .window-title { margin-left: auto; margin-right: auto; color: #66717c; font-size: 11px; font-weight: 650; }
+
+    .window-body { height: calc(100% - 43px); display: grid; grid-template-columns: 31% 69%; }
+    .sidebar { padding: 14px 11px; background: rgba(232, 237, 243, .83); border-right: 1px solid #d9e0e8; }
+    .side-label { margin: 7px 8px 9px; color: #89929c; font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .side-row { height: 31px; display: flex; align-items: center; gap: 8px; padding: 0 9px; border-radius: 8px; color: #3f4c58; font-size: 10px; font-weight: 570; }
+    .side-row.active { color: #fff; background: var(--blue); }
+    .side-dot { width: 7px; height: 7px; flex: none; border-radius: 2px; background: currentColor; opacity: .65; }
+
+    .chat { display: flex; flex-direction: column; background: #fff; }
+    .chat-head { height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 0 17px; border-bottom: 1px solid #e5e8ec; }
+    .chat-title { color: #1d2934; font-size: 11px; font-weight: 730; }
+    .status { display: flex; align-items: center; gap: 5px; color: #77818b; font-size: 8px; }
+    .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #29ba6a; }
+    .messages { flex: 1; padding: 17px; background: linear-gradient(#fff, #fbfcfd); }
+    .bubble { max-width: 82%; margin-bottom: 11px; padding: 10px 12px; color: #42505d; background: #f0f3f6; border-radius: 6px 12px 12px 12px; font-size: 8px; line-height: 1.55; }
+    .bubble.user { margin-left: auto; color: #fff; background: var(--blue); border-radius: 12px 6px 12px 12px; }
+    .process { margin: 12px 0; padding: 10px 12px; border: 1px solid #e0e5ea; border-radius: 11px; }
+    .process strong { display: flex; align-items: center; gap: 6px; color: #2b3946; font-size: 8px; }
+    .process strong::before { content: ""; width: 6px; height: 6px; border: 2px solid var(--blue); border-top-color: transparent; border-radius: 50%; }
+    .process-lines { display: grid; gap: 5px; margin-top: 8px; }
+    .process-lines i { display: block; height: 4px; border-radius: 5px; background: #e9edf1; }
+    .process-lines i:nth-child(2) { width: 76%; }
+    .composer { height: 57px; display: flex; align-items: center; gap: 9px; margin: 0 14px 14px; padding: 0 9px 0 13px; border: 1px solid #dce1e7; border-radius: 13px; color: #8b949c; font-size: 8px; box-shadow: 0 5px 18px rgba(27, 46, 66, .06); }
+    .send { width: 27px; height: 27px; display: grid; place-items: center; margin-left: auto; color: #fff; background: var(--blue); border-radius: 8px; font-size: 12px; }
+
+    .section { padding: 106px 0; border-top: 1px solid var(--line); }
+    .section-head { display: grid; grid-template-columns: .75fr 1.25fr; gap: 50px; margin-bottom: 54px; }
+    .kicker { color: var(--blue); font-size: 13px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
+    h2 { max-width: 700px; margin: 0; font-size: clamp(36px, 5vw, 62px); line-height: 1.02; letter-spacing: -.055em; }
+
+    .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .feature { min-height: 260px; padding: 28px; background: rgba(255, 255, 255, .46); border: 1px solid var(--line); border-radius: 20px; }
+    .feature-number { color: var(--blue); font-size: 13px; font-weight: 760; }
+    .feature h3 { margin: 62px 0 12px; font-size: 21px; letter-spacing: -.035em; }
+    .feature p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
+
+    .privacy {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      overflow: hidden;
+      background: var(--navy);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .privacy-copy { padding: clamp(38px, 6vw, 72px); color: #fff; }
+    .privacy-copy .kicker { color: var(--lime); }
+    .privacy-copy h2 { margin-top: 18px; }
+    .privacy-copy p { max-width: 590px; margin: 23px 0 0; color: #c4d0db; font-size: 16px; line-height: 1.75; }
+    .privacy-list { display: grid; align-content: center; gap: 1px; padding: 28px; background: rgba(255, 255, 255, .04); }
+    .privacy-item { display: flex; align-items: center; gap: 13px; padding: 19px; color: #eaf1f7; background: rgba(255, 255, 255, .055); font-size: 14px; }
+    .check { width: 22px; height: 22px; display: grid; place-items: center; flex: none; color: var(--navy); background: var(--lime); border-radius: 50%; font-size: 12px; font-weight: 800; }
+
+    .install-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; counter-reset: steps; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .step { position: relative; min-height: 200px; padding: 34px 34px 34px 0; counter-increment: steps; }
+    .step + .step { padding-left: 34px; border-left: 1px solid var(--line); }
+    .step::before { content: "0" counter(steps); display: block; margin-bottom: 43px; color: var(--blue); font-size: 13px; font-weight: 760; }
+    .step strong { display: block; margin-bottom: 9px; font-size: 18px; }
+    .step span { color: var(--muted); font-size: 14px; line-height: 1.65; }
+
+    .download-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 40px;
+      margin: 106px auto;
+      padding: clamp(36px, 6vw, 68px);
+      background: var(--lime);
+      border-radius: var(--radius);
+    }
+    .download-card h2 { max-width: 700px; font-size: clamp(34px, 5vw, 58px); }
+    .download-card .button { flex: none; color: #fff; background: var(--navy); box-shadow: 0 16px 30px rgba(19, 43, 66, .2); }
+
+    footer { display: flex; justify-content: space-between; gap: 28px; padding: 28px 0 38px; color: #747d85; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.6; }
+    footer strong { color: var(--ink); }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; padding-top: 56px; }
+      .hero-copy { max-width: 700px; }
+      .app-stage { width: min(680px, 100%); margin: 0 auto; }
+      .section-head, .privacy { grid-template-columns: 1fr; }
+      .features { grid-template-columns: 1fr 1fr; }
+      .feature:last-child { grid-column: 1 / -1; }
+      .download-card { align-items: flex-start; flex-direction: column; }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(100% - 28px, 1180px); }
+      .nav { min-height: 68px; }
+      .nav-links a:not(.nav-download) { display: none; }
+      .hero { min-height: 0; padding: 54px 0 70px; }
+      h1 { font-size: clamp(48px, 13vw, 66px); }
+      .app-stage { padding-left: 4px; }
+      .app-stage::after { display: none; }
+      .section { padding: 78px 0; }
+      .section-head { gap: 18px; margin-bottom: 34px; }
+      .features { grid-template-columns: 1fr; }
+      .feature:last-child { grid-column: auto; }
+      .feature { min-height: 220px; }
+      .feature h3 { margin-top: 44px; }
+      .install-grid { grid-template-columns: 1fr; }
+      .step, .step + .step { min-height: 0; padding: 28px 0; border-left: 0; }
+      .step + .step { border-top: 1px solid var(--line); }
+      .step::before { margin-bottom: 18px; }
+      .download-card { margin: 78px auto; }
+      footer { flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="#top" aria-label="CloudCodex 首页">
+        <img src="./Resources/CodexControlIcon-1024.png" alt="CloudCodex 图标">
+        <span>CloudCodex</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">功能</a>
+        <a href="#privacy">隐私</a>
+        <a href="#install">安装</a>
+        <a class="nav-download" href="https://cdn.cloudslow.com/app/cloudcodex/CloudCodex-0-1-0.dmg">下载</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero shell">
+      <div class="hero-copy">
+        <div class="eyebrow">为 macOS 而生</div>
+        <h1>
+          <span class="headline-line">让每个</span>
+          <span class="headline-line">Codex 会话，</span>
+          <span class="headline-line headline-accent">清晰可控。</span>
+        </h1>
+        <p class="lead">在一个原生界面里浏览工作区、继续会话、查看执行过程，并按你的方式组织正在进行的开发工作。</p>
+        <div class="actions">
+          <a class="button button-primary" href="https://cdn.cloudslow.com/app/cloudcodex/CloudCodex-0-1-0.dmg">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            下载 CloudCodex
+          </a>
+          <a class="button button-secondary" href="#install">查看安装方法</a>
+        </div>
+        <p class="release-meta">版本 0.1.0 · Build 56 · 需要 macOS 14 或更高版本</p>
+      </div>
+
+      <div class="app-stage" aria-label="CloudCodex 界面预览">
+        <div class="app-window">
+          <div class="window-bar">
+            <i class="traffic"></i><i class="traffic"></i><i class="traffic"></i>
+            <span class="window-title">CloudCodex</span>
+          </div>
+          <div class="window-body">
+            <aside class="sidebar">
+              <div class="side-label">工作区</div>
+              <div class="side-row active"><i class="side-dot"></i>最近会话</div>
+              <div class="side-row"><i class="side-dot"></i>收藏会话</div>
+              <div class="side-label">项目</div>
+              <div class="side-row"><i class="side-dot"></i>Cloud</div>
+              <div class="side-row"><i class="side-dot"></i>School</div>
+              <div class="side-row"><i class="side-dot"></i>AI Lab</div>
+            </aside>
+            <div class="chat">
+              <div class="chat-head"><span class="chat-title">继续当前开发任务</span><span class="status">Codex 已连接</span></div>
+              <div class="messages">
+                <div class="bubble user">请检查当前改动并运行相关测试。</div>
+                <div class="process"><strong>正在执行 · 4 个步骤</strong><div class="process-lines"><i></i><i></i><i></i></div></div>
+                <div class="bubble">检查完成。相关测试已经通过，变更保持在当前工作区中。</div>
+              </div>
+              <div class="composer">继续这个会话…<span class="send">↑</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell" id="features">
+      <div class="section-head">
+        <div class="kicker">核心体验</div>
+        <h2>不替换 Codex，只让它更适合你的工作流。</h2>
+      </div>
+      <div class="features">
+        <article class="feature">
+          <div class="feature-number">01</div>
+          <h3>会话一目了然</h3>
+          <p>按工作文件夹浏览、搜索和收藏会话，快速回到真正需要继续的任务。</p>
+        </article>
+        <article class="feature">
+          <div class="feature-number">02</div>
+          <h3>过程完整可见</h3>
+          <p>实时查看思考摘要、命令、文件变更、工具调用和最终回复，不丢失执行上下文。</p>
+        </article>
+        <article class="feature">
+          <div class="feature-number">03</div>
+          <h3>原生输入体验</h3>
+          <p>支持图片和文件附件、截图粘贴、中文语音输入，以及模型、推理强度和权限选择。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell" id="privacy">
+      <div class="privacy">
+        <div class="privacy-copy">
+          <div class="kicker">本机优先</div>
+          <h2>你的会话，由本机 Codex 处理。</h2>
+          <p>CloudCodex 复用本机 Codex 的登录、模型和配置，不要求填写新的 API Key。远程控制默认关闭，只有主动开启并完成配对后才会连接远程服务。</p>
+        </div>
+        <div class="privacy-list" aria-label="隐私特点">
+          <div class="privacy-item"><span class="check">✓</span>无需额外填写 API Key</div>
+          <div class="privacy-item"><span class="check">✓</span>远程控制由用户主动开启</div>
+          <div class="privacy-item"><span class="check">✓</span>关闭时不领取或执行远程任务</div>
+          <div class="privacy-item"><span class="check">✓</span>原生 macOS 应用，不含网页统计脚本</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell" id="install">
+      <div class="section-head">
+        <div class="kicker">开始使用</div>
+        <h2>三步，回到你的 Codex 工作现场。</h2>
+      </div>
+      <div class="install-grid">
+        <div class="step"><strong>下载安装包</strong><span>下载并解压 CloudCodex，将应用拖入“应用程序”文件夹。</span></div>
+        <div class="step"><strong>确认 Codex 已登录</strong><span>需要已安装并登录 ChatGPT/Codex 桌面版，或可用的 Codex CLI。</span></div>
+        <div class="step"><strong>打开 CloudCodex</strong><span>应用会连接本机 Codex，并加载已有的工作区与会话。</span></div>
+      </div>
+    </section>
+
+    <section class="download-card shell" aria-labelledby="download-title">
+      <h2 id="download-title">准备好，更清晰地使用 Codex 了吗？</h2>
+      <a class="button" href="https://cdn.cloudslow.com/app/cloudcodex/CloudCodex-0-1-0.dmg">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        下载 macOS 版
+      </a>
+    </section>
+  </main>
+
+  <footer class="shell">
+    <span><strong>CloudCodex</strong> · 原生 macOS Codex 会话控制台</span>
+    <span>版本 0.1.0 · Build 56 · macOS 14+</span>
+  </footer>
+</body>
+</html>

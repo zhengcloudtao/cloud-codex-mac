@@ -73,11 +73,13 @@ struct WorkspaceOrganization: Codable, Equatable {
     var categories: [WorkspaceCategory] = []
     var folderAssignments: [String: String] = [:]
     var folderOrder: [String] = []
+    var addedFolderPaths: [String] = []
 
     private enum CodingKeys: String, CodingKey {
         case categories
         case folderAssignments
         case folderOrder
+        case addedFolderPaths
     }
 
     init() {}
@@ -87,6 +89,7 @@ struct WorkspaceOrganization: Codable, Equatable {
         categories = try container.decodeIfPresent([WorkspaceCategory].self, forKey: .categories) ?? []
         folderAssignments = try container.decodeIfPresent([String: String].self, forKey: .folderAssignments) ?? [:]
         folderOrder = try container.decodeIfPresent([String].self, forKey: .folderOrder) ?? []
+        addedFolderPaths = try container.decodeIfPresent([String].self, forKey: .addedFolderPaths) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -94,6 +97,18 @@ struct WorkspaceOrganization: Codable, Equatable {
         try container.encode(categories, forKey: .categories)
         try container.encode(folderAssignments, forKey: .folderAssignments)
         try container.encode(folderOrder, forKey: .folderOrder)
+        try container.encode(addedFolderPaths, forKey: .addedFolderPaths)
+    }
+
+    @discardableResult
+    mutating func addFolder(path rawPath: String) -> Bool {
+        let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return false }
+        let wasAdded = !addedFolderPaths.contains(path)
+        if wasAdded { addedFolderPaths.append(path) }
+        folderOrder.removeAll { $0 == path }
+        folderOrder.insert(path, at: 0)
+        return wasAdded
     }
 
     @discardableResult

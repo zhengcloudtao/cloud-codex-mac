@@ -211,11 +211,19 @@ struct BrowserPageView: View {
                 TextField("https://…", text: $input).textFieldStyle(.roundedBorder).onSubmit {
                     do { try tab.navigate(input) } catch { tab.error = error.localizedDescription }
                 }
+                // Keep loading feedback inside a fixed-size toolbar slot. Inserting
+                // and removing a separate row resized WKWebView every time WebKit
+                // toggled isLoading, which made redirect-heavy pages visibly shake.
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(tab.loading ? 1 : 0)
+                    .frame(width: 16, height: 16)
+                    .accessibilityHidden(!tab.loading)
                 Button { tab.error = nil; tab.webView.reload() } label: { Image(systemName: "arrow.clockwise") }.help("刷新")
             }.padding(8)
-            if tab.loading { ProgressView().controlSize(.small) }
             if let error = tab.error { Text(error).font(.caption).foregroundStyle(.orange).padding(6) }
             BrowserWebView(tab: tab)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }.onAppear { input = tab.address }.onChange(of: tab.address) { _, value in input = value }
     }
 }
