@@ -3,9 +3,31 @@ import XCTest
 
 @MainActor
 final class ReasoningMenuTests: XCTestCase {
-    private func option(_ efforts: [String], defaultEffort: String = "medium") -> CodexModelOption {
+    func testUnchangedFastModeDoesNotNeedServerSync() {
+        XCTAssertFalse(AppModel.fastModeNeedsSync(current: false, requested: false))
+        XCTAssertFalse(AppModel.fastModeNeedsSync(current: true, requested: true))
+        XCTAssertTrue(AppModel.fastModeNeedsSync(current: false, requested: true))
+        XCTAssertTrue(AppModel.fastModeNeedsSync(current: true, requested: false))
+    }
+
+    func testUnsupportedLiveTurnSettingsErrorIsSilentButOtherFailuresRemainVisible() {
+        XCTAssertTrue(AppModel.shouldSuppressTurnSettingsError(
+            "turn settings updates require the step_model_switching feature"
+        ))
+        XCTAssertTrue(AppModel.shouldSuppressTurnSettingsError(
+            "Turn settings updates require a supported capability"
+        ))
+        XCTAssertFalse(AppModel.shouldSuppressTurnSettingsError("connection lost"))
+    }
+
+    private func option(
+        _ efforts: [String],
+        defaultEffort: String = "medium",
+        id: String = "test-model",
+        displayName: String = "Test Model"
+    ) -> CodexModelOption {
         CodexModelOption(json: [
-            "id": "test-model", "model": "test-model", "displayName": "Test Model",
+            "id": id, "model": id, "displayName": displayName,
             "defaultReasoningEffort": defaultEffort,
             "supportedReasoningEfforts": efforts.map { ["reasoningEffort": $0] }
         ])!
@@ -74,5 +96,25 @@ final class ReasoningMenuTests: XCTestCase {
         XCTAssertEqual(model.selectedModelDisplayName, "默认")
         XCTAssertEqual(model.selectedEffort, "medium")
         XCTAssertEqual(recommended.pickerName, "GPT-6 Astra")
+    }
+
+    func testGodConversationSelectsAstraAndUltraRegardlessOfCatalogPosition() throws {
+        let sol = option(["low", "medium", "xhigh"], id: "gpt-6-sol", displayName: "GPT-6-Sol")
+        let astra = option(["low", "medium", "xhigh", "ultra"], id: "gpt-6-astra", displayName: "GPT-6-Astra")
+
+        let preset = try XCTUnwrap(ModelSelectionPreset.godConversation(in: [sol, astra]))
+
+        XCTAssertEqual(preset, ModelSelectionPreset(modelID: "gpt-6-astra", effort: "ultra"))
+    }
+
+    func testGodConversationFallsBackToFirstUsableModelAndHighestVisibleEffort() throws {
+        let unavailable = option(["max"], defaultEffort: "max", id: "hidden-only")
+        let firstUsable = option(["low", "persistent", "high", "xhigh"], id: "future-flagship")
+        let later = option(["low", "ultra"], id: "later-model")
+
+        let preset = try XCTUnwrap(ModelSelectionPreset.godConversation(in: [unavailable, firstUsable, later]))
+
+        XCTAssertEqual(preset, ModelSelectionPreset(modelID: "future-flagship", effort: "xhigh"))
+        XCTAssertNil(ModelSelectionPreset.godConversation(in: [unavailable]))
     }
 }

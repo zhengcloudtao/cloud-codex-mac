@@ -121,9 +121,39 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
 
     let text: NSAttributedString
     var maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
+    @Environment(\.openURL) private var openURL
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var openURL: (URL) -> Void
+
+        init(openURL: @escaping (URL) -> Void) {
+            self.openURL = openURL
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            clickedOnLink link: Any,
+            at charIndex: Int
+        ) -> Bool {
+            guard let url = Self.url(from: link) else { return false }
+            openURL(url)
+            return true
+        }
+
+        static func url(from link: Any) -> URL? {
+            if let url = link as? URL { return url }
+            if let value = link as? String { return URL(string: value) }
+            return nil
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(openURL: { openURL($0) })
+    }
 
     func makeNSView(context: Context) -> ReliableSelectableNSTextView {
         let textView = ReliableSelectableNSTextView(frame: .zero)
+        textView.delegate = context.coordinator
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true
@@ -146,6 +176,7 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
     }
 
     func updateNSView(_ textView: ReliableSelectableNSTextView, context: Context) {
+        context.coordinator.openURL = { openURL($0) }
         textView.setAttributedStringIfNeeded(text)
     }
 

@@ -2256,6 +2256,11 @@ final class AppModel: ObservableObject {
 
     func setFastModeEnabled(_ enabled: Bool) {
         guard !enabled || supportsFastMode else { return }
+        // The model picker confirms model, effort, and speed together. Avoid
+        // sending a service-tier update when the user only changed the model
+        // or reasoning effort; an active turn may reject that redundant
+        // update because step-level model switching is unavailable.
+        guard Self.fastModeNeedsSync(current: isFastModeEnabled, requested: enabled) else { return }
         let previousEnabled = isFastModeEnabled
         isFastModeEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: fastModeKey)
@@ -2283,7 +2288,9 @@ final class AppModel: ObservableObject {
                             serviceTier: serviceTier
                         )
                     } catch {
-                        self.errorMessage = "会话速度已同步，但当前正在执行的任务未能立即切换：\(error.localizedDescription)"
+                        if !Self.shouldSuppressTurnSettingsError(error.localizedDescription) {
+                            self.errorMessage = "会话速度已同步，但当前正在执行的任务未能立即切换：\(error.localizedDescription)"
+                        }
                     }
                 }
             } catch {
@@ -2295,6 +2302,16 @@ final class AppModel: ObservableObject {
                 self.errorMessage = "同步响应速度失败：\(error.localizedDescription)"
             }
         }
+    }
+
+    static func fastModeNeedsSync(current: Bool, requested: Bool) -> Bool {
+        current != requested
+    }
+
+    static func shouldSuppressTurnSettingsError(_ message: String) -> Bool {
+        let normalized = message.lowercased()
+        return normalized.contains("step_model_switching")
+            || normalized.contains("turn settings updates require")
     }
 
     func prepareNewThread() {

@@ -269,6 +269,8 @@ final class AccountOverviewTests: XCTestCase {
         let behind = try XCTUnwrap(account(used: 20).weeklyPaceStatus(now: now))
         XCTAssertEqual(behind.state, .behind)
         XCTAssertEqual(behind.compactLabel, "追赶")
+        XCTAssertTrue(behind.detail.contains("当前少用了"))
+        XCTAssertFalse(behind.detail.contains("建议按24小时建议提高使用速度"))
 
         let expectedUsed = 100 - 4.0 / 7.0 * 100
         XCTAssertEqual(try XCTUnwrap(account(used: expectedUsed).weeklyPaceStatus(now: now)).state, .onTrack)

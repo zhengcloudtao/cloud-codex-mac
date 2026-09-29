@@ -135,7 +135,7 @@ struct AccountOverview {
                 state: .behind,
                 compactLabel: "追赶",
                 label: "需追赶 \(gap)",
-                detail: "当前剩余 \(actualLabel)，按本周已过去的时间，理想剩余约 \(expectedLabel)。当前少用了 \(gap)，建议按24小时建议提高使用速度。"
+                detail: "当前剩余 \(actualLabel)，按本周已过去的时间，理想剩余约 \(expectedLabel)。当前少用了 \(gap)。"
             )
         }
         if difference < -0.5 {
