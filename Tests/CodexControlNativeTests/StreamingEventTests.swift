@@ -61,6 +61,159 @@ final class StreamingEventTests: XCTestCase {
         ]))
     }
 
+    func testOnlyCommandExecutionItemsUseCommandInactivityTimeout() {
+        XCTAssertTrue(AppModel.isCommandExecutionItem([
+            "type": "commandExecution", "id": "shell"
+        ]))
+        XCTAssertFalse(AppModel.isCommandExecutionItem([
+            "type": "dynamicToolCall", "namespace": "shell", "tool": "run"
+        ]))
+    }
+
+    func testCommandInactivityPreferenceIsClampedAndPersisted() {
+        let defaults = UserDefaults(suiteName: "command-timeout-setting-\(UUID().uuidString)")!
+        defaults.set(15, forKey: AppModel.commandInactivityTimeoutMinutesKey)
+        let model = AppModel(remoteDefaults: defaults)
+
+        XCTAssertEqual(model.commandInactivityTimeoutMinutes, 15)
+        model.setCommandInactivityTimeoutMinutes(120)
+        XCTAssertEqual(model.commandInactivityTimeoutMinutes, 60)
+        XCTAssertEqual(defaults.integer(forKey: AppModel.commandInactivityTimeoutMinutesKey), 60)
+        model.setCommandInactivityTimeoutMinutes(0)
+        XCTAssertEqual(model.commandInactivityTimeoutMinutes, 1)
+    }
+
+    func testCommandInactivityTimeoutTextInputAcceptsDirectIntegerEntry() {
+        XCTAssertEqual(CommandInactivityTimeoutInput.minutes(from: "12"), 12)
+        XCTAssertEqual(CommandInactivityTimeoutInput.minutes(from: " 7 "), 7)
+        XCTAssertNil(CommandInactivityTimeoutInput.minutes(from: ""))
+        XCTAssertNil(CommandInactivityTimeoutInput.minutes(from: "0"))
+        XCTAssertNil(CommandInactivityTimeoutInput.minutes(from: "61"))
+        XCTAssertNil(CommandInactivityTimeoutInput.minutes(from: "五"))
+        XCTAssertNil(CommandInactivityTimeoutInput.minutes(from: "2.5"))
+    }
+
+    func testStalledCommandStopsTurnAfterConfiguredInactivity() async throws {
+        let defaults = UserDefaults(suiteName: "command-timeout-\(UUID().uuidString)")!
+        let model = AppModel(
+            remoteDefaults: defaults,
+            commandInactivityTimeoutSeconds: 0.02
+        )
+        model.selectedThreadID = "thread-command-timeout"
+
+        model.handleEvent("turn/started", [
+            "threadId": "thread-command-timeout",
+            "turn": ["id": "turn-command-timeout", "status": "inProgress"]
+        ])
+        model.handleEvent("item/started", [
+            "threadId": "thread-command-timeout",
+            "turnId": "turn-command-timeout",
+            "item": [
+                "id": "command-timeout",
+                "type": "commandExecution",
+                "command": "curl https://example.invalid/file > /tmp/file",
+                "status": "inProgress"
+            ]
+        ])
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let activity = try XCTUnwrap(model.messages.first { $0.id == "command-timeout" })
+        XCTAssertFalse(activity.isStreaming)
+        XCTAssertEqual(activity.activityStatus, "无输出超时")
+        XCTAssertTrue(activity.text.contains("没有任何输出"))
+        XCTAssertEqual(model.threadOutcomes["thread-command-timeout"], .running)
+        XCTAssertFalse(model.isSending)
+        let recovery = try XCTUnwrap(model.waitingMessages.first)
+        XCTAssertTrue(recovery.isAutomaticRecovery)
+        XCTAssertTrue(recovery.text.contains("直到完整交付原任务"))
+        XCTAssertTrue(recovery.text.contains("不要原样重复"))
+    }
+
+    func testCommandTimeoutRecoverySurvivesInterruptedCompletionEvent() async throws {
+        let defaults = UserDefaults(suiteName: "command-recovery-terminal-\(UUID().uuidString)")!
+        let model = AppModel(remoteDefaults: defaults, commandInactivityTimeoutSeconds: 0.02)
+        model.selectedThreadID = "thread-command-recovery"
+        model.handleEvent("turn/started", [
+            "threadId": "thread-command-recovery",
+            "turn": ["id": "turn-stalled", "status": "inProgress"]
+        ])
+        model.handleEvent("item/started", [
+            "threadId": "thread-command-recovery", "turnId": "turn-stalled",
+            "item": ["id": "stalled", "type": "commandExecution", "command": "curl", "status": "inProgress"]
+        ])
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        model.handleEvent("turn/completed", [
+            "threadId": "thread-command-recovery",
+            "turn": ["id": "turn-stalled", "status": "interrupted"]
+        ])
+
+        XCTAssertEqual(model.threadOutcomes["thread-command-recovery"], .running)
+        let recovery = try XCTUnwrap(model.waitingMessages.first {
+            $0.threadID == "thread-command-recovery"
+        })
+        XCTAssertTrue(recovery.isAutomaticRecovery)
+    }
+
+    func testCommandTimeoutRecoveryIsPersistedAcrossModelRestart() async throws {
+        let defaults = UserDefaults(suiteName: "command-recovery-persist-\(UUID().uuidString)")!
+        var model: AppModel? = AppModel(
+            remoteDefaults: defaults,
+            commandInactivityTimeoutSeconds: 0.02
+        )
+        model?.selectedThreadID = "thread-persist-recovery"
+        model?.handleEvent("turn/started", [
+            "threadId": "thread-persist-recovery",
+            "turn": ["id": "turn-persist-recovery", "status": "inProgress"]
+        ])
+        model?.handleEvent("item/started", [
+            "threadId": "thread-persist-recovery", "turnId": "turn-persist-recovery",
+            "item": ["id": "persist-stalled", "type": "commandExecution", "command": "curl", "status": "inProgress"]
+        ])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(try XCTUnwrap(model?.waitingMessages.first).isAutomaticRecovery)
+
+        model = nil
+        let restored = AppModel(remoteDefaults: defaults)
+        let recovery = try XCTUnwrap(restored.waitingMessages.first)
+        XCTAssertTrue(recovery.isAutomaticRecovery)
+        XCTAssertTrue(recovery.text.contains("直到完整交付原任务"))
+    }
+
+    func testCommandOutputRestartsInactivityTimer() async throws {
+        let model = AppModel(commandInactivityTimeoutSeconds: 0.15)
+        model.selectedThreadID = "thread-command-progress"
+        model.handleEvent("turn/started", [
+            "threadId": "thread-command-progress",
+            "turn": ["id": "turn-command-progress", "status": "inProgress"]
+        ])
+        model.handleEvent("item/started", [
+            "threadId": "thread-command-progress",
+            "turnId": "turn-command-progress",
+            "item": [
+                "id": "command-progress", "type": "commandExecution",
+                "command": "long-build", "status": "inProgress"
+            ]
+        ])
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        model.handleEvent("item/commandExecution/outputDelta", [
+            "threadId": "thread-command-progress",
+            "turnId": "turn-command-progress",
+            "itemId": "command-progress",
+            "delta": "still working\n"
+        ])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(try XCTUnwrap(model.messages.first { $0.id == "command-progress" }).isStreaming)
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(
+            try XCTUnwrap(model.messages.first { $0.id == "command-progress" }).activityStatus,
+            "无输出超时"
+        )
+    }
+
     func testNativePipeFailureIsRecognizedFromCurrentMCPShape() throws {
         let item: [String: Any] = [
             "type": "mcpToolCall",

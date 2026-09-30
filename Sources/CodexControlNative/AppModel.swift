@@ -44,6 +44,11 @@ final class AppModel: ObservableObject {
     private let userInputTimeoutSeconds: TimeInterval
     private var computerControlTimeoutTasks: [PendingItemKey: Task<Void, Never>] = [:]
     private let computerControlTimeoutSeconds: TimeInterval
+    private var commandInactivityTimeoutTasks: [PendingItemKey: Task<Void, Never>] = [:]
+    @Published private(set) var commandInactivityTimeoutMinutes: Int
+    private let commandInactivityTimeoutOverride: TimeInterval?
+    private var commandTimeoutRecoveryAttemptsByThread: [String: Int] = [:]
+    static let maximumAutomaticCommandTimeoutRecoveries = 3
     private let unreadCompletionsKey = "cloudcodex.unreadCompletions.v1"
     private let favoriteConversationsKey = "cloudcodex.favoriteConversations.v1"
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
@@ -213,10 +218,12 @@ final class AppModel: ObservableObject {
         let effort: String?
         let permissions: String?
         let serviceTier: String?
+        let isAutomaticRecovery: Bool
         var error: String?
 
         init(id: UUID = UUID(), threadID: String, text: String, attachments: [ComposerAttachment],
-             model: String?, effort: String?, permissions: String?, serviceTier: String?, error: String? = nil) {
+             model: String?, effort: String?, permissions: String?, serviceTier: String?,
+             isAutomaticRecovery: Bool = false, error: String? = nil) {
             self.id = id
             self.threadID = threadID
             self.text = text
@@ -225,6 +232,7 @@ final class AppModel: ObservableObject {
             self.effort = effort
             self.permissions = permissions
             self.serviceTier = serviceTier
+            self.isAutomaticRecovery = isAutomaticRecovery
             self.error = error
         }
     }
@@ -245,6 +253,7 @@ final class AppModel: ObservableObject {
         let effort: String?
         let permissions: String?
         let serviceTier: String?
+        let isAutomaticRecovery: Bool?
 
         init(_ message: WaitingMessage) {
             id = message.id
@@ -255,12 +264,14 @@ final class AppModel: ObservableObject {
             effort = message.effort
             permissions = message.permissions
             serviceTier = message.serviceTier
+            isAutomaticRecovery = message.isAutomaticRecovery
         }
 
         var message: WaitingMessage {
             WaitingMessage(id: id, threadID: threadID, text: text,
                 attachments: attachmentURLs.compactMap(URL.init(string:)).map(ComposerAttachment.init(url:)),
-                model: model, effort: effort, permissions: permissions, serviceTier: serviceTier)
+                model: model, effort: effort, permissions: permissions, serviceTier: serviceTier,
+                isAutomaticRecovery: isAutomaticRecovery ?? false)
         }
     }
 
@@ -557,7 +568,14 @@ final class AppModel: ObservableObject {
             if selectedThreadID == item.threadID { await loadSelectedThread() }
         } catch {
             if let index = waitingMessages.firstIndex(where: { $0.id == messageID }) {
-                waitingMessages[index].error = error.localizedDescription
+                if waitingMessages[index].isAutomaticRecovery {
+                    // Automatic recovery must survive a reconnect or a short
+                    // active-writer race. The monitor will recheck idle state
+                    // and retry instead of turning recovery into a dead queue.
+                    waitingMessages[index].error = nil
+                } else {
+                    waitingMessages[index].error = error.localizedDescription
+                }
             }
         }
     }
@@ -743,6 +761,7 @@ final class AppModel: ObservableObject {
     private let remotePairingCodeKey = "CloudCodex.remoteControl.pairingCode.v1"
     private let waitingMessagesKey = "CloudCodex.waitingMessages.v1"
     private let capacityRetriesKey = "CloudCodex.capacityRetries.v1"
+    static let commandInactivityTimeoutMinutesKey = "CloudCodex.commandInactivityTimeoutMinutes.v1"
 
     private struct RemoteExecution {
         let taskID: String
@@ -781,6 +800,7 @@ final class AppModel: ObservableObject {
         remoteDefaults: UserDefaults = .standard,
         userInputTimeoutSeconds: TimeInterval = 60,
         computerControlTimeoutSeconds: TimeInterval = 120,
+        commandInactivityTimeoutSeconds: TimeInterval? = nil,
         remoteAPILoader: @escaping @Sendable (Bool) async throws -> RemoteControlAPI = {
             try await RemoteControlAPI.connect(allowInteraction: $0)
         }
@@ -788,6 +808,11 @@ final class AppModel: ObservableObject {
         self.remoteDefaults = remoteDefaults
         self.userInputTimeoutSeconds = userInputTimeoutSeconds
         self.computerControlTimeoutSeconds = computerControlTimeoutSeconds
+        self.commandInactivityTimeoutOverride = commandInactivityTimeoutSeconds
+        let savedCommandTimeout = remoteDefaults.integer(forKey: Self.commandInactivityTimeoutMinutesKey)
+        self.commandInactivityTimeoutMinutes = Self.clampedCommandInactivityTimeoutMinutes(
+            savedCommandTimeout == 0 ? 5 : savedCommandTimeout
+        )
         self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
         if let data = remoteDefaults.data(forKey: unreadCompletionsKey),
@@ -993,6 +1018,32 @@ final class AppModel: ObservableObject {
         } catch {
             isSavingThreadName = false
             threadNameEditorError = error.localizedDescription
+        }
+    }
+
+    private var commandInactivityTimeoutSeconds: TimeInterval {
+        commandInactivityTimeoutOverride ?? TimeInterval(commandInactivityTimeoutMinutes * 60)
+    }
+
+    static func clampedCommandInactivityTimeoutMinutes(_ minutes: Int) -> Int {
+        min(max(minutes, 1), 60)
+    }
+
+    func setCommandInactivityTimeoutMinutes(_ minutes: Int) {
+        let clamped = Self.clampedCommandInactivityTimeoutMinutes(minutes)
+        guard clamped != commandInactivityTimeoutMinutes else { return }
+        commandInactivityTimeoutMinutes = clamped
+        remoteDefaults.set(clamped, forKey: Self.commandInactivityTimeoutMinutesKey)
+
+        // Apply the new preference to commands that are already running. The
+        // timer restarts from this explicit user change, just like fresh output.
+        let activeKeys = Array(commandInactivityTimeoutTasks.keys)
+        for key in activeKeys {
+            refreshCommandInactivityTimeout(
+                itemID: key.itemID,
+                threadID: key.threadID,
+                turnID: activeTurnIDsByThread[key.threadID]
+            )
         }
     }
 
@@ -1423,6 +1474,7 @@ final class AppModel: ObservableObject {
 
     private func clearLocalTurn(_ threadID: String) {
         cancelComputerControlTimeouts(threadID: threadID)
+        cancelCommandInactivityTimeouts(threadID: threadID)
         locallyRunningThreadIDs.remove(threadID)
         activeTurnIDsByThread.removeValue(forKey: threadID)
         activePermissionByThreadID.removeValue(forKey: threadID)
@@ -1440,6 +1492,8 @@ final class AppModel: ObservableObject {
         let retryingThreadIDs = locallyRunningThreadIDs.filter { capacityRetryStates[$0] != nil }
         let interruptedThreadIDs = locallyRunningThreadIDs.subtracting(retryingThreadIDs)
         for threadID in interruptedThreadIDs {
+            cancelComputerControlTimeouts(threadID: threadID)
+            cancelCommandInactivityTimeouts(threadID: threadID)
             markLocalTurnInterrupted(threadID: threadID, message: message)
             setThreadRunning(threadID, running: false)
             threadOutcomes[threadID] = .interrupted
@@ -3391,6 +3445,10 @@ final class AppModel: ObservableObject {
         return normalized == "cua_repl" || normalized.contains("computer-use")
     }
 
+    static func isCommandExecutionItem(_ item: [String: Any]) -> Bool {
+        item["type"] as? String == "commandExecution"
+    }
+
     static func computerControlNativePipeFailure(_ item: [String: Any]) -> String? {
         guard isComputerControlItem(item),
               (item["status"] as? String)?.lowercased() == "failed" else { return nil }
@@ -3455,6 +3513,158 @@ final class AppModel: ObservableObject {
     private func cancelComputerControlTimeouts(threadID: String) {
         let keys = computerControlTimeoutTasks.keys.filter { $0.threadID == threadID }
         keys.forEach { computerControlTimeoutTasks.removeValue(forKey: $0)?.cancel() }
+    }
+
+    private func scheduleCommandInactivityTimeout(
+        item: [String: Any],
+        threadID: String,
+        turnID: String?
+    ) {
+        guard Self.isCommandExecutionItem(item), let itemID = item["id"] as? String else { return }
+        refreshCommandInactivityTimeout(itemID: itemID, threadID: threadID, turnID: turnID)
+    }
+
+    private func refreshCommandInactivityTimeout(
+        itemID: String,
+        threadID: String,
+        turnID: String?
+    ) {
+        let key = PendingItemKey(threadID: threadID, itemID: itemID)
+        commandInactivityTimeoutTasks.removeValue(forKey: key)?.cancel()
+        commandInactivityTimeoutTasks[key] = Task { [weak self] in
+            guard let self else { return }
+            let nanoseconds = UInt64(max(0, self.commandInactivityTimeoutSeconds) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            await self.expireCommandExecution(key: key, turnID: turnID)
+        }
+    }
+
+    private func cancelCommandInactivityTimeout(itemID: String, threadID: String) {
+        let key = PendingItemKey(threadID: threadID, itemID: itemID)
+        commandInactivityTimeoutTasks.removeValue(forKey: key)?.cancel()
+    }
+
+    private func cancelCommandInactivityTimeouts(threadID: String) {
+        let keys = commandInactivityTimeoutTasks.keys.filter { $0.threadID == threadID }
+        keys.forEach { commandInactivityTimeoutTasks.removeValue(forKey: $0)?.cancel() }
+    }
+
+    private func expireCommandExecution(key: PendingItemKey, turnID: String?) async {
+        commandInactivityTimeoutTasks.removeValue(forKey: key)
+        var history = conversationMessages(for: key.threadID)
+        guard let index = history.firstIndex(where: { $0.id == key.itemID && $0.isStreaming }) else { return }
+
+        history[index].isStreaming = false
+        history[index].activityStatus = "无输出超时"
+        history[index].completedAt = Date()
+        let minutes = max(1, Int(commandInactivityTimeoutSeconds / 60))
+        let timeoutText = "执行命令连续 \(minutes) 分钟没有任何输出，CloudCodex 已自动停止本轮任务，避免会话长期卡死。已完成的文件修改仍会保留。"
+        history[index].text = history[index].text.isEmpty ? timeoutText : history[index].text + "\n\n" + timeoutText
+        storeMessages(history, for: key.threadID)
+
+        guard locallyRunningThreadIDs.contains(key.threadID),
+              let activeTurnID = activeTurnIDsByThread[key.threadID],
+              turnID == nil || turnID == activeTurnID else { return }
+
+        do {
+            try await client.interruptTurn(threadID: key.threadID, turnID: activeTurnID)
+        } catch {
+            // A wedged child process may prevent app-server from answering the
+            // interrupt request. Restart it as the bounded fallback so both the
+            // shell process and the optimistic running state are released.
+            if client.connected {
+                forceStoppingThreadID = key.threadID
+                client.terminateUnresponsiveServer()
+            }
+        }
+
+        markLocalTurnInterrupted(
+            threadID: key.threadID,
+            message: timeoutText,
+            title: "命令无输出超时",
+            status: "已停止"
+        )
+        let willContinue = scheduleCommandTimeoutContinuation(
+            threadID: key.threadID,
+            timeoutDescription: timeoutText
+        )
+        clearLocalTurn(key.threadID)
+        setThreadRunning(key.threadID, running: false)
+        threadOutcomes[key.threadID] = willContinue ? .running : .interrupted
+        if selectedThreadID == key.threadID { isExternalThreadProcessing = false }
+    }
+
+    @discardableResult
+    private func scheduleCommandTimeoutContinuation(
+        threadID: String,
+        timeoutDescription: String
+    ) -> Bool {
+        if waitingMessages.contains(where: { $0.threadID == threadID && $0.isAutomaticRecovery }) {
+            return true
+        }
+
+        let attempt = commandTimeoutRecoveryAttemptsByThread[threadID, default: 0] + 1
+        commandTimeoutRecoveryAttemptsByThread[threadID] = attempt
+        guard attempt <= Self.maximumAutomaticCommandTimeoutRecoveries else {
+            upsertConversationActivity(
+                threadID: threadID,
+                id: "command-timeout-recovery-limit",
+                title: "自动续跑已暂停",
+                text: "同一任务已连续 \(Self.maximumAutomaticCommandTimeoutRecoveries) 次因命令无输出而超时。为避免无限循环和持续消耗额度，CloudCodex 已暂停自动续跑；请检查命令或网络环境后手动继续。",
+                status: "需要处理"
+            )
+            return false
+        }
+
+        var settings = turnLaunchSettingsByThreadID[threadID] ?? TurnLaunchSettings(
+            model: nil,
+            effort: nil,
+            permissions: activePermissionByThreadID[threadID],
+            serviceTier: threadSummaries[threadID]?.serviceTier,
+            approvalPolicy: nil,
+            approvalsReviewer: nil
+        )
+        if let metadata = liveTurnMetadataByThread[threadID] {
+            settings.model = metadata.model ?? settings.model
+            settings.effort = metadata.reasoningEffort ?? settings.effort
+        }
+        let continuation = """
+        上一轮出现命令无输出超时，但原任务尚未完成。请从当前会话和工作区现状自动继续，直到完整交付原任务。
+
+        恢复要求：
+        1. 先检查超时命令是否其实已经产生了文件或完成了部分工作，不要重复已经完成的修改或外部操作。
+        2. 不要原样重复刚才可能永久等待的命令；对 curl 等网络命令增加连接和总时限，对其他命令使用有界等待、输出进度、拆分步骤或可靠替代方案。
+        3. 保持用户原始任务范围，继续完成剩余实现和相应验证。不要只解释超时，也不要把“已停止”当作最终结果。
+        4. 若某项确实需要用户提供新信息或授权，明确说明唯一阻塞点；否则自主继续到最终结果。
+
+        本次恢复原因：\(timeoutDescription)
+        这是第 \(attempt) 次自动恢复。
+        """
+        let recovery = WaitingMessage(
+            threadID: threadID,
+            text: continuation,
+            attachments: [],
+            model: settings.model,
+            effort: settings.effort,
+            permissions: settings.permissions,
+            serviceTier: settings.serviceTier,
+            isAutomaticRecovery: true
+        )
+        if let firstForThread = waitingMessages.firstIndex(where: { $0.threadID == threadID }) {
+            waitingMessages.insert(recovery, at: firstForThread)
+        } else {
+            waitingMessages.append(recovery)
+        }
+        upsertConversationActivity(
+            threadID: threadID,
+            id: "command-timeout-recovery-\(attempt)",
+            title: "命令超时，准备自动续跑",
+            text: "CloudCodex 将在会话释放后自动发起第 \(attempt) 次恢复，先核对现状并换用有界命令继续完成原任务。",
+            status: "等待继续"
+        )
+        startWaitingMonitorIfNeeded()
+        return true
     }
 
     private func expireComputerControl(key: PendingItemKey, turnID: String?) async {
@@ -3563,10 +3773,14 @@ final class AppModel: ObservableObject {
             clearLocalTurn(eventThreadID)
             setThreadRunning(eventThreadID, running: false)
             if let status = turn?["status"] as? String {
-                threadOutcomes[eventThreadID] = capacityFailure == nil
-                    ? ConversationOutcome(rawValue: status)
-                    : .running
+                let hasPendingCommandRecovery = waitingMessages.contains {
+                    $0.threadID == eventThreadID && $0.isAutomaticRecovery
+                }
+                threadOutcomes[eventThreadID] = hasPendingCommandRecovery || capacityFailure != nil
+                    ? .running
+                    : ConversationOutcome(rawValue: status)
                 if status == "completed", let turnID = turn?["id"] as? String {
+                    commandTimeoutRecoveryAttemptsByThread.removeValue(forKey: eventThreadID)
                     recordCompletedConversation(eventThreadID, turnID: turnID,
                         viewed: selectedThreadID == eventThreadID)
                 }
@@ -3630,6 +3844,11 @@ final class AppModel: ObservableObject {
             guard let item = params["item"] as? [String: Any] else { return }
             updateActivityItem(item, completed: false)
             scheduleComputerControlTimeout(
+                item: item,
+                threadID: eventThreadID,
+                turnID: params["turnId"] as? String
+            )
+            scheduleCommandInactivityTimeout(
                 item: item,
                 threadID: eventThreadID,
                 turnID: params["turnId"] as? String
@@ -3700,8 +3919,16 @@ final class AppModel: ObservableObject {
             )
         case "item/commandExecution/outputDelta":
             guard let delta = params["delta"] as? String else { return }
+            let itemID = params["itemId"] as? String ?? "command"
+            if !delta.isEmpty {
+                refreshCommandInactivityTimeout(
+                    itemID: itemID,
+                    threadID: eventThreadID,
+                    turnID: params["turnId"] as? String
+                )
+            }
             enqueueActivityDelta(
-                id: params["itemId"] as? String ?? "command",
+                id: itemID,
                 kind: .command,
                 title: "执行命令",
                 delta: delta
@@ -3744,6 +3971,7 @@ final class AppModel: ObservableObject {
             guard let item = params["item"] as? [String: Any] else { return }
             if let itemID = item["id"] as? String {
                 cancelComputerControlTimeout(itemID: itemID, threadID: eventThreadID)
+                cancelCommandInactivityTimeout(itemID: itemID, threadID: eventThreadID)
             }
             if let message = Self.computerControlNativePipeFailure(item) {
                 handleComputerControlNativePipeFailure(
@@ -3790,6 +4018,10 @@ final class AppModel: ObservableObject {
                 )
                 break
             }
+            if waitingMessages.contains(where: { $0.threadID == eventThreadID && $0.isAutomaticRecovery }) {
+                finishTurnProgress(status: "等待自动继续")
+                break
+            }
             finishTurnProgress(status: localizedTurnStatus(status))
             Task {
                 await refreshThreads()
@@ -3818,6 +4050,11 @@ final class AppModel: ObservableObject {
             clearLocalTurn(eventThreadID)
             if selectedThreadID == eventThreadID { isExternalThreadProcessing = false }
             setThreadRunning(eventThreadID, running: false)
+            if waitingMessages.contains(where: { $0.threadID == eventThreadID && $0.isAutomaticRecovery }) {
+                finishTurnProgress(status: "等待自动继续")
+                threadOutcomes[eventThreadID] = .running
+                break
+            }
             finishTurnProgress(status: "失败")
             threadOutcomes[eventThreadID] = .failed
         default:

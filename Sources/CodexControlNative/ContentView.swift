@@ -29,6 +29,18 @@ enum WorkspaceCategoryDisclosureState {
     }
 }
 
+enum CommandInactivityTimeoutInput {
+    static let validRange = 1 ... 60
+
+    static func minutes(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let minutes = Int(trimmed),
+              validRange.contains(minutes) else { return nil }
+        return minutes
+    }
+}
+
 private struct ColumnResizeHandle: View {
     @Binding var width: Double
     let range: ClosedRange<Double>
@@ -348,6 +360,9 @@ struct ContentView: View {
     @State private var filePreview: LocalFilePreviewTarget?
     @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
+    @State private var commandInactivityTimeoutDraft = ""
+    @State private var commandInactivityTimeoutInputError: String?
+    @FocusState private var isCommandInactivityTimeoutFocused: Bool
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
     @AppStorage(BackgroundPreference.imagePathKey) private var backgroundImagePath = ""
     @AppStorage(BackgroundScope.storageKey) private var backgroundScope: BackgroundScope = .conversation
@@ -1231,9 +1246,9 @@ struct ContentView: View {
             Button {
                 model.showingAppearanceSettings = true
             } label: {
-                Label("个性设置", systemImage: "paintpalette")
+                Label("偏好设置", systemImage: "slider.horizontal.3")
             }
-            .help("个性设置：选择外观模式")
+            .help("偏好设置：调整外观、显示与执行保护")
             Button {
                 model.showingPersonalSkills = true
             } label: {
@@ -1287,15 +1302,15 @@ struct ContentView: View {
     private var appearanceSettingsSheet: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
-                Image(systemName: "paintpalette.fill")
+                Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 42, height: 42)
                     .background(.purple.gradient, in: RoundedRectangle(cornerRadius: 11))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("个性设置")
+                    Text("偏好设置")
                         .font(.headline)
-                    Text("调整 CloudCodex 的外观与显示偏好")
+                    Text("调整 CloudCodex 的外观、显示与执行保护")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1365,12 +1380,99 @@ struct ContentView: View {
                         }
                         .padding(.vertical, 6)
                     }
+
+                    GroupBox("执行保护") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("命令无输出超时")
+                                    Text("命令在这段时间内没有任何新输出时，自动停止本轮任务。")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                HStack(spacing: 6) {
+                                    TextField("超时分钟数", text: $commandInactivityTimeoutDraft)
+                                    .textFieldStyle(.roundedBorder)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(width: 52)
+                                    .focused($isCommandInactivityTimeoutFocused)
+                                    .onSubmit {
+                                        commitCommandInactivityTimeoutDraft()
+                                        isCommandInactivityTimeoutFocused = false
+                                    }
+                                    .onChange(of: isCommandInactivityTimeoutFocused) { _, focused in
+                                        if !focused {
+                                            commitCommandInactivityTimeoutDraft()
+                                        }
+                                    }
+                                    .accessibilityLabel("命令无输出超时分钟数")
+                                    .help("可直接输入 1 到 60 之间的分钟数")
+
+                                    Text("分钟")
+                                        .foregroundStyle(.secondary)
+
+                                    Stepper(
+                                        "命令无输出超时分钟数",
+                                        value: commandInactivityTimeoutBinding,
+                                        in: 1...60
+                                    )
+                                    .labelsHidden()
+                                    .fixedSize()
+                                }
+                            }
+                            if let commandInactivityTimeoutInputError {
+                                Text(commandInactivityTimeoutInputError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                            Text("范围 1–60 分钟，默认 5 分钟。命令每次产生新输出都会重新计时；正常持续输出的长任务不会因总耗时而被停止。设置自动保存。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                    }
                 }
                 .padding(.trailing, 6)
             }
         }
         .padding(24)
         .frame(width: 640, height: 720)
+        .onAppear {
+            syncCommandInactivityTimeoutDraft()
+        }
+        .onChange(of: model.commandInactivityTimeoutMinutes) { _, _ in
+            if !isCommandInactivityTimeoutFocused {
+                syncCommandInactivityTimeoutDraft()
+            }
+        }
+    }
+
+    private var commandInactivityTimeoutBinding: Binding<Int> {
+        Binding(
+            get: { model.commandInactivityTimeoutMinutes },
+            set: { minutes in
+                model.setCommandInactivityTimeoutMinutes(minutes)
+                syncCommandInactivityTimeoutDraft()
+            }
+        )
+    }
+
+    private func syncCommandInactivityTimeoutDraft() {
+        commandInactivityTimeoutDraft = String(model.commandInactivityTimeoutMinutes)
+        commandInactivityTimeoutInputError = nil
+    }
+
+    private func commitCommandInactivityTimeoutDraft() {
+        guard let minutes = CommandInactivityTimeoutInput.minutes(
+            from: commandInactivityTimeoutDraft
+        ) else {
+            commandInactivityTimeoutInputError = "请输入 1–60 之间的整数。"
+            return
+        }
+        model.setCommandInactivityTimeoutMinutes(minutes)
+        syncCommandInactivityTimeoutDraft()
     }
 
     private var backgroundSettingsSection: some View {
