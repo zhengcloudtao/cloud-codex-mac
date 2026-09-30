@@ -107,6 +107,26 @@ final class ReasoningMenuTests: XCTestCase {
         XCTAssertEqual(preset, ModelSelectionPreset(modelID: "gpt-6-astra", effort: "ultra"))
     }
 
+    func testGPT61SolCatalogEntryCanBeSelectedWithItsCapabilities() throws {
+        let sol = try XCTUnwrap(CodexModelOption(json: [
+            "id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1-Sol",
+            "isDefault": true, "defaultReasoningEffort": "low",
+            "supportedReasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"].map {
+                ["reasoningEffort": $0]
+            },
+            "serviceTiers": [["id": "priority", "name": "Fast", "description": "2x speed, increased usage"]]
+        ]))
+        let model = AppModel()
+        model.modelOptions = [sol]
+        model.selectModel(sol.id, preferredEffort: "ultra")
+
+        XCTAssertEqual(sol.pickerName, "GPT-6.1 Sol")
+        XCTAssertEqual(model.selectedModel?.model, "gpt-6.1-sol")
+        XCTAssertEqual(model.selectedEffort, "ultra")
+        XCTAssertEqual(sol.fastServiceTierID, "priority")
+        XCTAssertEqual(model.recommendedModel?.id, sol.id)
+    }
+
     func testGodConversationFallsBackToFirstUsableModelAndHighestVisibleEffort() throws {
         let unavailable = option(["max"], defaultEffort: "max", id: "hidden-only")
         let firstUsable = option(["low", "persistent", "high", "xhigh"], id: "future-flagship")

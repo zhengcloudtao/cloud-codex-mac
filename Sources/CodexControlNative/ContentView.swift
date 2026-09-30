@@ -4886,6 +4886,7 @@ private struct Composer: View {
         // retaining the ScrollView for unusually small displays or future
         // catalogs with more entries.
         .frame(width: 560, height: 640)
+        .task { await model.refreshModelCatalog() }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
         .overlay(RoundedRectangle(cornerRadius: 13).stroke(.quaternary))
         .shadow(color: .black.opacity(0.3), radius: 18, y: 7)

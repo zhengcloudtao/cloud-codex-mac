@@ -2469,6 +2469,16 @@ final class AppModel: ObservableObject {
         folderCatalog.append(contentsOf: addedFolders)
     }
 
+    /// Refresh the catalog without applying settings to the current conversation.
+    /// New models can become available while this app-server connection stays open.
+    func refreshModelCatalog() async {
+        do {
+            modelOptions = try await client.listModels()
+        } catch {
+            errorMessage = "无法读取 Codex 模型列表：\(error.localizedDescription)"
+        }
+    }
+
     private func loadComposerOptions(cwd: String?) async {
         do {
             modelOptions = try await client.listModels()
