@@ -54,7 +54,7 @@
 ## 构建与运行
 
 ```bash
-cd /Users/zhengyuntao/coding/codex-util/codex-control-native
+cd /Users/zhengyuntao/coding/codex-util/cloud-codex-mac
 make run
 ```
 
