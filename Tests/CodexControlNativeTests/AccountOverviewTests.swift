@@ -2,6 +2,52 @@ import XCTest
 @testable import CloudCodex
 
 final class AccountOverviewTests: XCTestCase {
+    func testCreditBalanceUsesCodexBucketAndFormatsCurrentBalance() {
+        let account = AccountOverview.parse([
+            "rateLimits": ["credits": ["balance": "1", "unlimited": false]],
+            "rateLimitsByLimitId": ["codex": [
+                "credits": ["balance": "62417", "hasCredits": true, "unlimited": false]
+            ]],
+            "rateLimitResetCredits": ["availableCount": 2]
+        ])
+        XCTAssertEqual(account.creditBalance?.displayValue, "62,417.0")
+        XCTAssertEqual(account.usage.resetCredits?.availableCount, 2)
+    }
+
+    func testCreditBalanceSupportsLegacyResponseAndFractionalCredits() {
+        let account = AccountOverview.parse([
+            "rateLimits": ["credits": ["balance": "1234.56", "hasCredits": true, "unlimited": false]]
+        ])
+        XCTAssertEqual(account.creditBalance?.displayValue, "1,234.6")
+    }
+
+    func testCreditBalanceDistinguishesMissingZeroAndUnlimited() {
+        XCTAssertNil(AccountOverview.parse([:]).creditBalance)
+        for balance in [NSNull(), "invalid", "-1"] as [Any] {
+            let account = AccountOverview.parse([
+                "rateLimits": ["credits": ["balance": balance, "hasCredits": false, "unlimited": false]]
+            ])
+            XCTAssertEqual(account.creditBalance?.displayValue, "未提供")
+        }
+        let zero = AccountOverview.parse([
+            "rateLimits": ["credits": ["balance": "0", "hasCredits": false, "unlimited": false]]
+        ])
+        XCTAssertEqual(zero.creditBalance?.displayValue, "0.0")
+        let unlimited = AccountOverview.parse([
+            "rateLimits": ["credits": ["balance": NSNull(), "hasCredits": true, "unlimited": true]]
+        ])
+        XCTAssertEqual(unlimited.creditBalance?.displayValue, "无限额")
+    }
+
+    func testCreditBalanceRoundsHalfUpToOneDecimalWithoutChangingStoredPrecision() {
+        for (raw, expected) in [("62416.7822067", "62,416.8"), ("1.25", "1.3"),
+                                ("1.24", "1.2"), ("999.95", "1,000.0")] {
+            let credits = AccountOverview.CreditBalance(balance: raw, unlimited: false)
+            XCTAssertEqual(credits.displayValue, expected)
+            XCTAssertEqual(credits.decimalBalance, Decimal(string: raw))
+        }
+    }
+
     func testTokenRevokedErrorBecomesConciseReloginGuidance() {
         let raw = #"failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage failed: 401 Unauthorized; body={"error":{"message":"Encountered invalidated oauth token for user","code":"token_revoked"}}"#
 

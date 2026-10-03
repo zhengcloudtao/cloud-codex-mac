@@ -25,10 +25,11 @@ protocol RemoteCredentialKeychain: Sendable {
 }
 
 private struct SystemRemoteCredentialKeychain: RemoteCredentialKeychain {
+    var account = "remote-control-device-secret-v1"
     private var identity: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: "com.cloudslow.CloudCodex",
-         kSecAttrAccount as String: "remote-control-device-secret-v1"]
+         kSecAttrAccount as String: account]
     }
 
     // These legacy APIs are necessary for the existing file-based login
@@ -66,6 +67,9 @@ private struct SystemRemoteCredentialKeychain: RemoteCredentialKeychain {
 /// flag is process-wide, so its save/restore scope must not overlap or suspend.
 final class RemoteCredentialStore: @unchecked Sendable {
     static let shared = RemoteCredentialStore()
+    static func forServer(_ url: URL) -> RemoteCredentialStore {
+        RemoteCredentialStore(keychain: SystemRemoteCredentialKeychain(account: RemoteServerConfiguration.credentialAccount(for: url)))
+    }
     private static let queue = DispatchQueue(label: "CloudCodex.remote-credentials", qos: .userInitiated)
     private let keychain: any RemoteCredentialKeychain
     private let generate: @Sendable () throws -> Data

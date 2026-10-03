@@ -24,16 +24,16 @@ final class UnreadCompletionTests: XCTestCase {
         XCTAssertEqual(restored, state)
     }
 
-    func testOpeningRecentConversationsAcknowledgesEveryExistingCompletion() {
+    func testReadingOneConversationPreservesOtherCompletions() {
         var state = UnreadCompletions()
         state.complete(threadID: "one", turnID: "a", viewed: false)
         state.complete(threadID: "two", turnID: "b", viewed: false)
-        state.markAllRead()
-        XCTAssertTrue(state.unread.isEmpty)
+        state.markRead("one")
+        XCTAssertEqual(state.unread, ["two"])
 
         // A task that finishes later is still allowed to create a fresh badge.
         state.complete(threadID: "three", turnID: "c", viewed: false)
-        XCTAssertEqual(state.unread, ["three"])
+        XCTAssertEqual(state.unread, ["two", "three"])
     }
 
     @MainActor
@@ -53,17 +53,24 @@ final class UnreadCompletionTests: XCTestCase {
     }
 
     @MainActor
-    func testModelPersistsMarkAllReadAcrossRestart() throws {
+    func testModelPreservesUnreadAcrossRestartAndOnlyClearsClickedConversation() throws {
         let suite = "UnreadCompletionTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(remoteDefaults: defaults)
         model.recordCompletedConversation("one", turnID: "a", viewed: false)
         model.recordCompletedConversation("two", turnID: "b", viewed: false)
-        model.markAllConversationsRead()
-
         let restored = AppModel(remoteDefaults: defaults)
-        XCTAssertTrue(restored.unreadCompletions.unread.isEmpty)
+        XCTAssertEqual(restored.unreadCompletions.unread, ["one", "two"])
+        restored.selectedThreadID = "one"
+        restored.selectThread("one")
+        XCTAssertEqual(restored.unreadCompletions.unread, ["two"])
+
+        let reopened = AppModel(remoteDefaults: defaults)
+        XCTAssertEqual(reopened.unreadCompletions.unread, ["two"])
+        reopened.selectedThreadID = "two"
+        reopened.selectThread("two")
+        XCTAssertTrue(reopened.unreadCompletions.unread.isEmpty)
     }
 
     @MainActor

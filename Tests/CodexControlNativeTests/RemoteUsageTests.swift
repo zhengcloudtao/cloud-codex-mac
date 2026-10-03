@@ -18,7 +18,7 @@ final class RemoteUsageTests: XCTestCase {
 
     func testBucketWindowsAreNotAssumedToBeFiveHoursAndWeek() throws {
         let response: [String: Any] = ["accountId": "do-not-forward", "rateLimitsByLimitId": [
-            "codex": ["planType": "pro", "primary": ["usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1800000000]],
+            "codex": ["planType": "pro", "credits": ["balance": "62416.782067", "unlimited": false], "primary": ["usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1800000000]],
             "spark": ["limitName": "Spark", "primary": ["usedPercent": 0, "windowDurationMins": 300]]
         ], "rateLimitResetCredits": ["availableCount": 3, "credits": [
             ["id": "do-not-forward", "status": "available", "expiresAt": 1800000100],
@@ -30,6 +30,7 @@ final class RemoteUsageTests: XCTestCase {
         XCTAssertEqual(snapshot.buckets[0].windows[0].usedPercent, 4)
         XCTAssertEqual(snapshot.plan, "pro")
         XCTAssertEqual(snapshot.subscriptionPeriodEnd, 1_900_000_000)
+        XCTAssertEqual(snapshot.creditBalance, .init(balance: "62416.782067", unlimited: false))
         XCTAssertEqual(snapshot.resetCredits?.availableCount, 3)
         XCTAssertEqual(snapshot.resetCredits?.expirations?.count, 2)
         XCTAssertEqual(snapshot.resetCredits?.expirations?.first!, 1800000100)
@@ -38,6 +39,7 @@ final class RemoteUsageTests: XCTestCase {
         XCTAssertFalse(encoded.contains("accountId"))
         XCTAssertTrue(encoded.contains("\"plan\":\"pro\""))
         XCTAssertTrue(encoded.contains("\"subscriptionPeriodEnd\":1900000000"))
+        XCTAssertTrue(encoded.contains("\"creditBalance\""))
     }
 
     func testUnknownIsDifferentFromZeroAndLegacyResponseIsSupported() {
@@ -45,6 +47,7 @@ final class RemoteUsageTests: XCTestCase {
         XCTAssertNil(unknown.buckets[0].windows[0].usedPercent)
         XCTAssertNil(unknown.resetCredits)
         XCTAssertNil(unknown.subscriptionPeriodEnd)
+        XCTAssertNil(unknown.creditBalance)
         let countOnly = RemoteUsageSnapshot.parse(["rateLimitResetCredits": ["availableCount": 0]])
         XCTAssertEqual(countOnly.resetCredits?.availableCount, 0)
         XCTAssertNil(countOnly.resetCredits?.expirations)

@@ -20,6 +20,31 @@ struct AccountOverview {
     let plan: String
     let usage: RemoteUsageSnapshot
     let subscriptionPeriodEnd: Date?
+    var creditBalance: CreditBalance? = nil
+
+    struct CreditBalance: Equatable {
+        let balance: String?
+        let unlimited: Bool
+
+        var decimalBalance: Decimal? {
+            guard let balance,
+                  let value = Decimal(string: balance, locale: Locale(identifier: "en_US_POSIX")),
+                  !value.isNaN, value >= 0 else { return nil }
+            return value
+        }
+
+        var displayValue: String {
+            if unlimited { return "无限额" }
+            guard let value = decimalBalance else { return "未提供" }
+            let formatter = NumberFormatter()
+            formatter.locale = Locale(identifier: "en_US")
+            formatter.numberStyle = .decimal
+            formatter.minimumFractionDigits = 1
+            formatter.maximumFractionDigits = 1
+            formatter.roundingMode = .halfUp
+            return formatter.string(from: NSDecimalNumber(decimal: value)) ?? "未提供"
+        }
+    }
 
     // Matches the installed official client's personal.pro/proLite tier labels.
     var planDisplayName: String {
@@ -40,7 +65,13 @@ struct AccountOverview {
             ?? buckets["codex"]?["planType"] as? String
             ?? buckets.keys.sorted().compactMap { buckets[$0]?["planType"] as? String }.first
             ?? "未提供"
-        return .init(plan: plan, usage: .parse(json), subscriptionPeriodEnd: subscriptionPeriodEnd)
+        let credits = buckets["codex"]?["credits"] as? [String: Any]
+            ?? legacy?["credits"] as? [String: Any]
+        let creditBalance = credits.map {
+            CreditBalance(balance: $0["balance"] as? String, unlimited: $0["unlimited"] as? Bool ?? false)
+        }
+        return .init(plan: plan, usage: .parse(json), subscriptionPeriodEnd: subscriptionPeriodEnd,
+                     creditBalance: creditBalance)
     }
 
     static func remaining(_ window: RemoteUsageSnapshot.Window?) -> String {
@@ -298,6 +329,9 @@ struct AccountOverviewView: View {
                         if let value = account.compactResetCredits {
                             quotaColumn("可用重置", value: value)
                         }
+                        if let credits = account.creditBalance {
+                            quotaColumn("剩余额度", value: credits.displayValue, help: "当前额度余额")
+                        }
                         Image(systemName: model.accountOverviewError == nil ? "chevron.down" : "exclamationmark.circle")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(model.accountOverviewError == nil ? Color.secondary : Color.orange)
@@ -332,6 +366,13 @@ struct AccountOverviewView: View {
                                 Text(subscriptionPeriodLabel(account.subscriptionPeriodEnd))
                                     .foregroundStyle(.secondary)
                                 Divider()
+                                if let credits = account.creditBalance {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("剩余额度：\(credits.displayValue)").fontWeight(.semibold)
+                                        Text("当前余额").foregroundStyle(.secondary)
+                                    }
+                                    Divider()
+                                }
                                 ForEach(account.usage.buckets, id: \.id) { bucket in
                                     Text(bucket.name).fontWeight(.semibold)
                                     ForEach(Array(bucket.windows.enumerated()), id: \.offset) { _, window in

@@ -157,25 +157,31 @@ final class RemoteControlAPI: @unchecked Sendable {
     let deviceName: String
     private let baseURL: URL
     private let session: URLSession
+    private let ownsSession: Bool
 
-    static func connect(allowInteraction: Bool) async throws -> RemoteControlAPI {
-        let secret = try await RemoteCredentialStore.shared.load(allowInteraction: allowInteraction)
+    deinit { if ownsSession { session.invalidateAndCancel() } }
+
+    static func connect(allowInteraction: Bool, configuration: RemoteServerConfiguration = .init(),
+                        defaults: UserDefaults = .standard) async throws -> RemoteControlAPI {
+        let url = try configuration.validatedURL()
+        let secret = try await RemoteCredentialStore.forServer(url).load(allowInteraction: allowInteraction)
         try Task.checkCancellation()
-        return RemoteControlAPI(deviceSecret: secret)
+        return RemoteControlAPI(deviceSecret: secret, baseURL: url, defaults: defaults)
     }
 
     // Constructing the HTTP client never performs Keychain I/O.
     init(
         deviceSecret: String,
         baseURL: URL = RemoteControlAPI.defaultBaseURL,
-        session: URLSession = .shared,
+        session: URLSession? = nil,
         defaults: UserDefaults = .standard
     ) {
         self.baseURL = baseURL
-        self.session = session
+        self.ownsSession = session == nil
+        self.session = session ?? URLSession(configuration: .ephemeral, delegate: RemoteRelayRedirectPolicy(), delegateQueue: nil)
         self.deviceSecret = deviceSecret
 
-        let deviceKey = "CloudCodex.remoteControl.deviceID.v1"
+        let deviceKey = RemoteServerConfiguration.deviceIDKey(for: baseURL)
         if let saved = defaults.string(forKey: deviceKey), !saved.isEmpty {
             deviceID = saved
         } else {
@@ -239,6 +245,16 @@ final class RemoteControlAPI: @unchecked Sendable {
             bodyData: data
         )
         let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: responseData)
+        guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
+    }
+
+    func sendNotificationEvent(_ body: RemoteNotificationEventBody) async throws {
+        let data = try await perform(
+            path: "/api/cloud-codex/agent/events",
+            method: "POST",
+            bodyData: JSONEncoder().encode(body)
+        )
+        let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
         guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
     }
 
@@ -310,4 +326,13 @@ final class RemoteControlAPI: @unchecked Sendable {
         return envelope.data
     }
 
+}
+
+/// Never forward a device credential to an HTTP redirect destination.
+final class RemoteRelayRedirectPolicy: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 }

@@ -6,6 +6,7 @@ struct CodexThread: Identifiable, Hashable, Codable {
     var preview: String
     var cwd: String
     var model: String?
+    var modelProvider: String? = nil
     var reasoningEffort: String?
     var serviceTier: String?
     var updatedAt: Date
@@ -35,6 +36,7 @@ struct CodexThread: Identifiable, Hashable, Codable {
         self.preview = json["preview"] as? String ?? ""
         self.cwd = cwd
         self.model = json["model"] as? String
+        self.modelProvider = json["modelProvider"] as? String
         self.reasoningEffort = json["reasoningEffort"] as? String
         self.serviceTier = json["serviceTier"] as? String
         self.path = json["path"] as? String
@@ -297,6 +299,7 @@ struct CodexModelOption: Identifiable, Hashable {
     /// Codex's default composer visibility is narrower than model/list support.
     /// Keep supportedEfforts intact for protocol validation and historical turns.
     var composerEfforts: [String] {
+        if id.hasPrefix("provider:") { return supportedEfforts }
         let visible: Set<String> = ["low", "medium", "high", "xhigh", "ultra", "persistent"]
         return supportedEfforts.filter { visible.contains($0) }
     }
@@ -323,6 +326,7 @@ struct CodexModelOption: Identifiable, Hashable {
     /// while the Codex model picker keeps the GPT family hyphen and separates
     /// the named tier with a space (GPT-6 Astra).
     var pickerName: String {
+        if id.hasPrefix("provider:") { return displayName }
         guard displayName.hasPrefix("GPT-") else {
             return displayName.replacingOccurrences(of: "-", with: " ")
         }

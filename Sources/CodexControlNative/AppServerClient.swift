@@ -36,6 +36,14 @@ final class AppServerClient {
     typealias EventHandler = (String, JSON) -> Void
     typealias ServerRequestHandler = (AppServerRequestID, String, JSON) -> Void
 
+    var customModelProvider = ModelProviderConfiguration()
+    var customModelOptions: [CodexModelOption] = []
+    var providerKeyLoader: (String) async throws -> String? = { try await ModelProviderKeychain.load(account: $0) }
+    private let codexHomeOverride: URL?
+    private var processGeneration = 0
+    private var submittedProviders: [String: ModelProviderConfiguration] = [:]
+    private var turnProviders: [String: ModelProviderConfiguration] = [:]
+    private var customProviderKey: String?
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
@@ -67,6 +75,9 @@ final class AppServerClient {
     var onEvent: EventHandler?
     var onServerRequest: ServerRequestHandler?
     var onDisconnect: ((String) -> Void)?
+    var beforeTurnSubmission: (() async throws -> Void)?
+
+    init(codexHomeOverride: URL? = nil) { self.codexHomeOverride = codexHomeOverride }
 
     deinit {
         output?.readabilityHandler = nil
@@ -85,12 +96,31 @@ final class AppServerClient {
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = executable
-        process.arguments = ["app-server", "--stdio"]
+        let provider = try customModelProvider.validated()
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: ModelProviderConfiguration.environmentKey)
+        if let codexHomeOverride {
+            try FileManager.default.createDirectory(at: codexHomeOverride, withIntermediateDirectories: true)
+            environment["CODEX_HOME"] = codexHomeOverride.path
+        }
+        if provider.enabled {
+            if customProviderKey == nil { customProviderKey = try await providerKeyLoader(provider.credentialAccount) }
+            guard let key = customProviderKey, !key.isEmpty else {
+                throw ModelProviderError.message("第三方 API Key 未保存，请在偏好设置中填写密钥。")
+            }
+            environment[ModelProviderConfiguration.environmentKey] = key
+        }
+        process.environment = environment
+        process.arguments = ["app-server", "--stdio"] + (try provider.launchArguments(models: customModelOptions.map(\.model), options: customModelOptions))
+        if !provider.enabled { process.arguments! += ["-c", "model_provider=\"openai\""] }
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
+        processGeneration += 1
+        let generation = processGeneration
         process.terminationHandler = { [weak self] process in
             Task { @MainActor in
+                guard self?.processGeneration == generation else { return }
                 self?.handleTermination(process.terminationStatus)
             }
         }
@@ -105,6 +135,7 @@ final class AppServerClient {
             decodingWorker.append(data) { objects in
                 guard !objects.isEmpty else { return }
                 Task { @MainActor [weak self] in
+                    guard self?.processGeneration == generation else { return }
                     self?.handle(objects)
                 }
             }
@@ -136,6 +167,55 @@ final class AppServerClient {
         }
         try send(["method": "initialized"])
         connected = true
+    }
+
+    /// Only called while all local turns/queued tasks are idle. Preload the new
+    /// credential before stopping the old process, and never reuse its cached key.
+    func changeProvider(_ configuration: ModelProviderConfiguration, options: [CodexModelOption]) async throws {
+        let value = try configuration.validated()
+        let key = value.enabled ? try await providerKeyLoader(value.credentialAccount) : nil
+        if value.enabled, key?.isEmpty != false {
+            throw ModelProviderError.message("\(value.name)：API Key 未保存，请先在偏好设置中配置。")
+        }
+        processGeneration += 1
+        process?.terminationHandler = nil
+        if process?.isRunning == true { process?.terminate() }
+        let disconnect = onDisconnect
+        onDisconnect = nil
+        handleTermination(0)
+        onDisconnect = disconnect
+        submittedProviders.removeAll(); turnProviders.removeAll()
+        customModelProvider = value; customModelOptions = options; customProviderKey = key
+        try await start()
+    }
+
+    func usageProvider(threadID: String, turnID: String?) -> ModelProviderConfiguration? {
+        if let turnID, let value = turnProviders[threadID + ":" + turnID] { return value }
+        return submittedProviders[threadID]
+    }
+
+    func bundledOpenAIModels() async throws -> [CodexModelOption] {
+        let executable = try CodexExecutableLocator.locate()
+        return try await Task.detached {
+            let process = Process(); let pipe = Pipe()
+            process.executableURL = executable; process.arguments = ["debug", "models", "--bundled"]
+            process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rows = json["models"] as? [[String: Any]] else { throw CodexClientError.invalidResponse }
+            return rows.filter { $0["supported_in_api"] as? Bool == true && $0["visibility"] as? String == "list" }.compactMap { row in
+                guard let slug = row["slug"] as? String else { return nil }
+                let levels = row["supported_reasoning_levels"] as? [[String: Any]] ?? []
+                return CodexModelOption(json: ["id": slug, "model": slug,
+                    "displayName": row["display_name"] as? String ?? slug,
+                    "description": row["description"] as? String ?? "",
+                    "defaultReasoningEffort": row["default_reasoning_level"] as? String ?? "medium",
+                    "supportedReasoningEfforts": levels.map { ["reasoningEffort": $0["effort"] as? String ?? "medium"] }])
+            }
+        }.value
     }
 
     func readRemoteUsage() async throws -> RemoteUsageSnapshot {
@@ -242,6 +322,8 @@ final class AppServerClient {
     }
 
     func listModels() async throws -> [CodexModelOption] {
+        if customModelProvider.enabled, !customModelOptions.isEmpty { return customModelOptions }
+        if customModelProvider.enabled, let option = customModelProvider.modelOption { return [option] }
         let result = try await request("model/list", params: ["limit": 100])
         let rows = result["data"] as? [JSON] ?? []
         return rows.compactMap(CodexModelOption.init(json:))
@@ -512,6 +594,12 @@ final class AppServerClient {
         if let model { params["model"] = model }
         if let permissions { params["permissions"] = permissions }
         if let serviceTier { params["serviceTier"] = serviceTier }
+        if customModelProvider.enabled {
+            params["modelProvider"] = ModelProviderConfiguration.providerID
+            params["model"] = model ?? customModelProvider.modelID
+            params.removeValue(forKey: "serviceTier")
+            params["config"] = ["model_reasoning_effort": customModelProvider.reasoningEffort, "model_reasoning_summary": "none", "service_tier": "default"]
+        }
         let result = try await request(
             "thread/start",
             params: params
@@ -530,7 +618,22 @@ final class AppServerClient {
     @discardableResult
     func resumeThread(_ id: String) async throws -> String? {
         if loadedThreadIDs.contains(id) { return serviceTierByThreadID[id] }
-        let result = try await request("thread/resume", params: ["threadId": id])
+        var params: JSON = ["threadId": id]
+        if customModelProvider.enabled {
+            params["modelProvider"] = ModelProviderConfiguration.providerID
+            params["model"] = customModelProvider.modelID
+            params["config"] = ["model_reasoning_effort": customModelProvider.reasoningEffort, "model_reasoning_summary": "none", "service_tier": "default"]
+        } else if try await readThreadState(id).modelProvider == ModelProviderConfiguration.providerID {
+            // Restore a custom-provider conversation to the user's current local defaults.
+            let result = try await request("config/read", params: ["includeLayers": false])
+            let config = result["config"] as? JSON ?? [:]
+            params["modelProvider"] = config["model_provider"] as? String ?? "openai"
+            let models = try await listModels()
+            if let model = config["model"] as? String ?? models.first(where: \.isDefault)?.model ?? models.first?.model {
+                params["model"] = model
+            }
+        }
+        let result = try await request("thread/resume", params: params)
         if let serviceTier = result["serviceTier"] as? String {
             serviceTierByThreadID[id] = serviceTier
         }
@@ -555,7 +658,8 @@ final class AppServerClient {
         approvalPolicy: String? = nil,
         approvalsReviewer: String? = nil
     ) async throws -> String? {
-        let params = Self.turnStartParameters(
+        try await beforeTurnSubmission?()
+        var params = Self.turnStartParameters(
             threadID: threadID,
             text: text,
             attachments: attachments,
@@ -566,6 +670,15 @@ final class AppServerClient {
             approvalPolicy: approvalPolicy,
             approvalsReviewer: approvalsReviewer
         )
+        if customModelProvider.enabled {
+            params["model"] = model ?? customModelProvider.modelID
+            params["effort"] = effort ?? customModelProvider.reasoningEffort
+            params.removeValue(forKey: "serviceTier")
+        }
+        var submitted = customModelProvider
+        submitted.modelID = params["model"] as? String ?? customModelProvider.modelID
+        submitted.reasoningEffort = params["effort"] as? String ?? customModelProvider.reasoningEffort
+        submittedProviders[threadID] = submitted
         let result = try await request(
             "turn/start",
             params: params
@@ -669,6 +782,7 @@ final class AppServerClient {
     }
 
     func steerTurn(threadID: String, turnID: String, text: String, attachments: [ComposerAttachment]) async throws {
+        try await beforeTurnSubmission?()
         var input: [JSON] = text.isEmpty ? [] : [["type": "text", "text": text]]
         input.append(contentsOf: attachments.map(\.userInput))
         _ = try await request("turn/steer", params: [
@@ -733,6 +847,10 @@ final class AppServerClient {
                let settings = params["threadSettings"] as? JSON,
                settings.keys.contains("serviceTier") {
                 serviceTierByThreadID[threadID] = settings["serviceTier"] as? String ?? "default"
+            }
+            if method == "turn/started", let thread = params["threadId"] as? String,
+               let turn = (params["turn"] as? JSON)?["id"] as? String {
+                turnProviders[thread + ":" + turn] = submittedProviders[thread] ?? customModelProvider
             }
             onEvent?(method, params)
             return

@@ -360,6 +360,7 @@ struct ContentView: View {
     @State private var filePreview: LocalFilePreviewTarget?
     @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
+    @State private var preferencesTab = 0
     @State private var commandInactivityTimeoutDraft = ""
     @State private var commandInactivityTimeoutInputError: String?
     @FocusState private var isCommandInactivityTimeoutFocused: Bool
@@ -397,6 +398,11 @@ struct ContentView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            if let reason = model.creditUsagePauseReason {
+                creditUsageProtectionBanner(reason)
+                Divider()
+            }
         NavigationSplitView(columnVisibility: $columnVisibility) {
             folderSidebar
                 .overlay(alignment: .trailing) {
@@ -467,6 +473,7 @@ struct ContentView: View {
                 )
             }
         }
+        }
         .toolbar { toolbar }
         .environment(\.openURL, OpenURLAction { url in
             if ["https", "http"].contains(url.scheme?.lowercased() ?? ""), let threadID = model.selectedThreadID {
@@ -501,7 +508,7 @@ struct ContentView: View {
             Text(model.errorMessage ?? "未知错误")
         }
         .onAppear(perform: applyAppearancePreference)
-        .onAppear(perform: acknowledgeVisibleCompletions)
+        .onAppear(perform: updateUnreadDockBadge)
         .onAppear(perform: applySystemMetricsRefreshInterval)
         .onChange(of: model.unreadCompletions.unread) { _, _ in updateUnreadDockBadge() }
         .onChange(of: model.selectedThreadID) { _, _ in
@@ -509,11 +516,37 @@ struct ContentView: View {
         }
         .onChange(of: showUnreadDockBadge) { _, _ in updateUnreadDockBadge() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            acknowledgeVisibleCompletions()
+            updateUnreadDockBadge()
         }
         .onChange(of: systemMetricsRefreshInterval) { _, _ in applySystemMetricsRefreshInterval() }
         .onChange(of: appearancePreference) { _, _ in
             applyAppearancePreference()
+        }
+    }
+
+    private func creditUsageProtectionBanner(_ reason: CreditUsageProtection.Reason) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("额外额度保护已触发", systemImage: "pause.circle.fill")
+                .font(.headline)
+            Text(reason.message)
+            if !model.creditUsagePauseFailures.isEmpty {
+                Text("\(model.creditUsagePauseFailures.count) 个会话尚未暂停成功，正在重试；请检查连接或手动停止。")
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Button("检查套餐额度并解除保护") { Task { await model.recheckIncludedQuota() } }
+                Button("打开个性设置") { model.showingAppearanceSettings = true }
+            }
+            Text("排队消息已保留。解除保护后排队消息可继续发送，已中断的任务需手动继续。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .padding(.leading, 12)
+        .background {
+            Color(nsColor: .windowBackgroundColor)
+                .overlay(Color.orange.opacity(0.12))
         }
     }
 
@@ -561,11 +594,6 @@ struct ContentView: View {
     private func updateUnreadDockBadge() {
         let count = model.unreadCompletions.unread.count
         NSApp.dockTile.badgeLabel = showUnreadDockBadge && count > 0 ? String(count) : nil
-    }
-
-    private func acknowledgeVisibleCompletions() {
-        model.markAllConversationsRead()
-        updateUnreadDockBadge()
     }
 
     private func applySystemMetricsRefreshInterval() {
@@ -1206,7 +1234,12 @@ struct ContentView: View {
                 SystemMetricsView(monitor: model.systemMetrics)
                 Divider()
                     .frame(height: 26)
-                AccountOverviewView()
+                if model.customModelProvider.enabled {
+                    Text("\(model.customModelProvider.name) · 按服务商计费")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    AccountOverviewView()
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 4)
@@ -1260,7 +1293,7 @@ struct ContentView: View {
             } label: {
                 Label("使用统计", systemImage: "chart.xyaxis.line")
             }
-            .help("查看 Codex Token 活动与连续使用情况")
+            .help("查看 Token 用量与已记录的第三方模型响应次数")
             Button {
                 openWindow(id: "about-cloudcodex")
             } label: {
@@ -1310,7 +1343,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("偏好设置")
                         .font(.headline)
-                    Text("调整 CloudCodex 的外观、显示与执行保护")
+                    Text("按类别配置；拖动窗口边缘调整大小，尺寸自动保存")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1320,125 +1353,29 @@ struct ContentView: View {
             }
             .padding(.bottom, 18)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    GroupBox("外观模式") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Picker("外观模式", selection: $appearancePreference) {
-                                ForEach(AppearancePreference.allCases) { preference in
-                                    Label(preference.title, systemImage: preference.symbolName)
-                                        .tag(preference)
-                                }
-                            }
-                            .pickerStyle(.radioGroup)
-                            .labelsHidden()
-
-                            Text(appearancePreference == .system
-                                 ? "将跟随 macOS 当前的明亮或暗黑外观。"
-                                 : "此选择会立即应用，并保留到下次启动。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-                    }
-
+            TabView(selection: $preferencesTab) {
+                preferencesPage {
+                    appearanceModeSettingsSection
                     backgroundSettingsSection
-
-                    GroupBox("会话列表") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Toggle("显示会话摘要", isOn: $showConversationPreview)
-                                .toggleStyle(.switch)
-                            Toggle("显示已完成未查看红点", isOn: $showUnreadCompletionDot)
-                                .toggleStyle(.switch)
-                            Toggle("Dock 显示未查看会话数量", isOn: $showUnreadDockBadge)
-                                .toggleStyle(.switch)
-                            Text("关闭摘要后列表更紧凑，不影响会话正文与搜索。设置自动保存。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-                    }
-
-                    GroupBox("电脑状态") {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("刷新频率")
-                                Text("控制顶部温度、CPU 和存储信息的采样间隔。")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Picker("电脑状态刷新频率", selection: $systemMetricsRefreshInterval) {
-                                ForEach(SystemMetricsRefreshInterval.allCases) { interval in
-                                    Text(interval.title).tag(interval.rawValue)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 92)
-                        }
-                        .padding(.vertical, 6)
-                    }
-
-                    GroupBox("执行保护") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("命令无输出超时")
-                                    Text("命令在这段时间内没有任何新输出时，自动停止本轮任务。")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                HStack(spacing: 6) {
-                                    TextField("超时分钟数", text: $commandInactivityTimeoutDraft)
-                                    .textFieldStyle(.roundedBorder)
-                                    .multilineTextAlignment(.trailing)
-                                    .frame(width: 52)
-                                    .focused($isCommandInactivityTimeoutFocused)
-                                    .onSubmit {
-                                        commitCommandInactivityTimeoutDraft()
-                                        isCommandInactivityTimeoutFocused = false
-                                    }
-                                    .onChange(of: isCommandInactivityTimeoutFocused) { _, focused in
-                                        if !focused {
-                                            commitCommandInactivityTimeoutDraft()
-                                        }
-                                    }
-                                    .accessibilityLabel("命令无输出超时分钟数")
-                                    .help("可直接输入 1 到 60 之间的分钟数")
-
-                                    Text("分钟")
-                                        .foregroundStyle(.secondary)
-
-                                    Stepper(
-                                        "命令无输出超时分钟数",
-                                        value: commandInactivityTimeoutBinding,
-                                        in: 1...60
-                                    )
-                                    .labelsHidden()
-                                    .fixedSize()
-                                }
-                            }
-                            if let commandInactivityTimeoutInputError {
-                                Text(commandInactivityTimeoutInputError)
-                                    .font(.caption)
-                                    .foregroundStyle(.red)
-                            }
-                            Text("范围 1–60 分钟，默认 5 分钟。命令每次产生新输出都会重新计时；正常持续输出的长任务不会因总耗时而被停止。设置自动保存。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-                    }
                 }
-                .padding(.trailing, 6)
+                .tabItem { Label("外观与背景", systemImage: "paintpalette") }.tag(0)
+
+                preferencesPage { conversationDisplaySettingsSection }
+                    .tabItem { Label("会话与显示", systemImage: "text.bubble") }.tag(1)
+
+                preferencesPage { ModelProviderSettings(library: model.providerLibrary) }
+                    .tabItem { Label("模型服务商", systemImage: "cpu") }.tag(2)
+
+                preferencesPage { executionProtectionSettingsSection }
+                    .tabItem { Label("执行保护", systemImage: "shield") }.tag(3)
             }
         }
-        .padding(24)
-        .frame(width: 640, height: 720)
+        .padding(20)
+        .frame(minWidth: PreferencesWindowSizing.minimum.width,
+               idealWidth: PreferencesWindowSizing.initial.width, maxWidth: .infinity,
+               minHeight: PreferencesWindowSizing.minimum.height,
+               idealHeight: PreferencesWindowSizing.initial.height, maxHeight: .infinity)
+        .background(PreferencesWindowSizing())
         .onAppear {
             syncCommandInactivityTimeoutDraft()
         }
@@ -1446,6 +1383,146 @@ struct ContentView: View {
             if !isCommandInactivityTimeoutFocused {
                 syncCommandInactivityTimeoutDraft()
             }
+        }
+    }
+
+    private func preferencesPage<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18, content: content)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+        }
+    }
+
+    private var appearanceModeSettingsSection: some View {
+        GroupBox("外观模式") {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("外观模式", selection: $appearancePreference) {
+                    ForEach(AppearancePreference.allCases) { preference in
+                        Label(preference.title, systemImage: preference.symbolName)
+                            .tag(preference)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+
+                Text(appearancePreference == .system
+                     ? "将跟随 macOS 当前的明亮或暗黑外观。"
+                     : "此选择会立即应用，并保留到下次启动。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private var conversationDisplaySettingsSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("会话列表") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("显示会话摘要", isOn: $showConversationPreview)
+                        .toggleStyle(.switch)
+                    Toggle("显示已完成未查看红点", isOn: $showUnreadCompletionDot)
+                        .toggleStyle(.switch)
+                    Toggle("Dock 显示未查看会话数量", isOn: $showUnreadDockBadge)
+                        .toggleStyle(.switch)
+                    Text("关闭摘要后列表更紧凑，不影响会话正文与搜索。设置自动保存。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+            }
+
+            GroupBox("电脑状态") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("刷新频率")
+                        Text("控制顶部温度、CPU 和存储信息的采样间隔。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Picker("电脑状态刷新频率", selection: $systemMetricsRefreshInterval) {
+                        ForEach(SystemMetricsRefreshInterval.allCases) { interval in
+                            Text(interval.title).tag(interval.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 92)
+                }
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    private var executionProtectionSettingsSection: some View {
+        GroupBox("执行保护") {
+            VStack(alignment: .leading, spacing: 10) {
+                if model.customModelProvider.enabled {
+                    Text("第三方 API 的费用由服务商管理，ChatGPT 额度保护不适用。")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Toggle("允许使用额外额度", isOn: Binding(
+                        get: { model.allowsExtraCreditUsage },
+                        set: { model.setAllowsExtraCreditUsage($0) }
+                    ))
+                    Text("默认关闭。套餐额度耗尽或检测到额外额度余额下降时，暂停所有会话，并阻止排队消息和自动重试。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("保护依赖额度更新和中断响应，无法撤销检测前已发生的额度消耗。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("命令无输出超时")
+                        Text("命令在这段时间内没有任何新输出时，自动停止本轮任务。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    HStack(spacing: 6) {
+                        TextField("超时分钟数", text: $commandInactivityTimeoutDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 52)
+                        .focused($isCommandInactivityTimeoutFocused)
+                        .onSubmit {
+                            commitCommandInactivityTimeoutDraft()
+                            isCommandInactivityTimeoutFocused = false
+                        }
+                        .onChange(of: isCommandInactivityTimeoutFocused) { _, focused in
+                            if !focused {
+                                commitCommandInactivityTimeoutDraft()
+                            }
+                        }
+                        .accessibilityLabel("命令无输出超时分钟数")
+                        .help("可直接输入 1 到 60 之间的分钟数")
+
+                        Text("分钟")
+                            .foregroundStyle(.secondary)
+
+                        Stepper(
+                            "命令无输出超时分钟数",
+                            value: commandInactivityTimeoutBinding,
+                            in: 1...60
+                        )
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+                if let commandInactivityTimeoutInputError {
+                    Text(commandInactivityTimeoutInputError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                Text("范围 1–60 分钟，默认 5 分钟。命令每次产生新输出都会重新计时；正常持续输出的长任务不会因总耗时而被停止。设置自动保存。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
         }
     }
 
@@ -1734,7 +1811,7 @@ private struct RemoteControlSheet: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("远程控制")
                         .font(.headline)
-                    Text("通过 AI 小程序向这台 Mac 发送任务")
+                    Text("通过内置或自建服务向这台 Mac 发送任务")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1766,6 +1843,8 @@ private struct RemoteControlSheet: View {
                     .padding(16)
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
 
+                    RemoteServerSettingsView()
+
                     HStack(spacing: 10) {
                         Circle()
                             .fill(statusColor)
@@ -1794,6 +1873,29 @@ private struct RemoteControlSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                    } else if model.remoteControlEnabled && !model.remoteControlPaired && model.remoteServerConfiguration.mode == .custom {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("在自己的小程序中配对").font(.headline)
+                            Text("打开已接入当前后端的小程序，扫描下方设备二维码；也可以输入配对码。")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if let payload = model.remotePairingQRCodePayload,
+                               let image = RemotePairingQRCode.image(payload: payload) {
+                                Image(nsImage: image).interpolation(.none).resizable()
+                                    .frame(width: 190, height: 190).padding(15)
+                                    .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                                    .accessibilityLabel("自定义服务设备配对二维码")
+                                Text("配对码：\(model.remotePairingCode)").monospacedDigit().textSelection(.enabled)
+                            } else {
+                                Text("连接自定义后端后显示配对二维码。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            HStack {
+                                Text("二维码临近过期时会自动更新").font(.caption2).foregroundStyle(.secondary)
+                                Spacer()
+                                Button("刷新二维码") { model.resetRemotePairingCode() }.buttonStyle(.link)
+                            }
+                        }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
                     } else if model.remoteControlEnabled && !model.remoteControlPaired {
                         VStack(alignment: .leading, spacing: 16) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -1877,7 +1979,7 @@ private struct RemoteControlSheet: View {
                             Label("这台 Mac 已完成配对", systemImage: "checkmark.circle.fill")
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.green)
-                            Text("解除后，当前小程序账号将不能再控制这台 Mac。CloudCodex 会立即生成新的二维码，供原账号或其他账号重新绑定。")
+                            Text("解除后，当前服务绑定的账号将不能再控制这台 Mac。CloudCodex 会立即生成新的二维码，供原账号或其他账号重新绑定。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1908,7 +2010,7 @@ private struct RemoteControlSheet: View {
                     .padding(16)
                     .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
 
-                    Label("CloudCodex 主动通过 HTTPS 领取任务，不会在 Mac 上开放公网监听端口。设备密钥存放在系统钥匙串，服务端只保存不可逆摘要。", systemImage: "lock.shield")
+                    Label("CloudCodex 主动通过 HTTPS 领取任务，不会在 Mac 上开放公网监听端口。设备密钥按服务分别存放在系统钥匙串；自建后端应只保存不可逆摘要。", systemImage: "lock.shield")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -4393,6 +4495,8 @@ private struct Composer: View {
     let mode: ComposerMode
     @State private var showingModelPicker = false
     @State private var draftModelID: String?
+    @State private var draftProviderID = ModelProviderLibrary.openAI
+    @State private var modelSelectionError: String?
     @State private var draftEffort: String?
     @State private var draftFastMode = false
 
@@ -4776,7 +4880,7 @@ private struct Composer: View {
     private var modelSelectionPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("模型设置").font(.headline)
+                Text("全局模型设置").font(.headline)
                 Spacer()
                 Button {
                     showingModelPicker = false
@@ -4796,18 +4900,34 @@ private struct Composer: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    selectionSection("快捷选择") {
-                        godConversationSelectionRow
-                            .disabled(godConversationPreset == nil)
+                    Picker("厂商", selection: $draftProviderID) {
+                        Text("OpenAI（本机 Codex）").tag(ModelProviderLibrary.openAI)
+                        ForEach(model.providerLibrary.profiles.filter { $0.configuration.enabled }) { profile in
+                            Text(profile.configuration.name).tag(profile.id)
+                        }
+                    }
+                    .onChange(of: draftProviderID) { _, provider in
+                        let options = model.modelOptions.filter { model.providerID(for: $0.id) == provider }
+                        if let option = options.first(where: \.isDefault) ?? options.first {
+                            draftModelID = option.id
+                            draftEffort = option.defaultComposerEffort
+                            draftFastMode = false
+                        }
+                        modelSelectionError = nil
+                    }
+                    if draftProviderID == ModelProviderLibrary.openAI {
+                        selectionSection("快捷选择") {
+                            godConversationSelectionRow.disabled(godConversationPreset == nil)
+                        }
                     }
 
                     Divider()
 
                     HStack(alignment: .top, spacing: 18) {
                         selectionSection("模型") {
-                            selectionRow(
+                            if draftProviderID == model.currentModelProviderID { selectionRow(
                                 "默认",
-                                subtitle: "推荐模型集",
+                                subtitle: model.customModelProvider.enabled ? model.customModelProvider.name : "OpenAI · 本机 Codex",
                                 selected: draftModelID == AppModel.recommendedModelSelectionID
                             ) {
                                 draftModelID = AppModel.recommendedModelSelectionID
@@ -4815,13 +4935,15 @@ private struct Composer: View {
                                    !recommended.composerEfforts.contains(draftEffort ?? "") {
                                     draftEffort = recommended.defaultComposerEffort
                                 }
-                            }
-                            ForEach(model.modelOptions) { option in
-                                selectionRow(option.pickerName, selected: draftModelID == option.id) {
-                                    draftModelID = option.id
-                                    if !option.composerEfforts.contains(draftEffort ?? "") {
+                            } }
+                            ForEach(model.modelOptions.filter { model.providerID(for: $0.id) == draftProviderID }) { option in
+                                selectionRow(option.pickerName,
+                                             subtitle: option.id.hasPrefix("provider:") ? option.model : nil,
+                                             selected: draftModelID == option.id) {
+                                    if draftModelID != option.id {
                                         draftEffort = option.defaultComposerEffort
                                     }
+                                    draftModelID = option.id
                                     if option.fastServiceTierID == nil { draftFastMode = false }
                                 }
                             }
@@ -4870,13 +4992,15 @@ private struct Composer: View {
 
             Divider()
             HStack {
-                Text("选择后点击确定才会应用")
+                Text(modelSelectionError ?? (model.canApplyModelSelection(draftModelID)
+                    ? "全局选择：影响所有对话的后续请求；跨厂商需等待任务结束"
+                    : "请等待运行中及排队任务结束后再切换厂商"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("确定", action: applyModelSelection)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(draftModelID == nil)
+                    .disabled(draftModelID == nil || !model.canApplyModelSelection(draftModelID))
             }
             .padding(12)
             .fixedSize(horizontal: false, vertical: true)
@@ -4984,6 +5108,8 @@ private struct Composer: View {
     private func beginModelSelection() {
         if showingModelPicker { return }
         draftModelID = model.selectedModelID
+        draftProviderID = model.currentModelProviderID
+        modelSelectionError = nil
         draftEffort = model.selectedEffort
         draftFastMode = model.isFastModeEnabled && model.supportsFastMode
         showingModelPicker = true
@@ -4991,9 +5117,13 @@ private struct Composer: View {
 
     private func applyModelSelection() {
         guard let draftModelID else { return }
-        model.selectModel(draftModelID, preferredEffort: draftEffort)
-        model.setFastModeEnabled(draftFastMode && model.supportsFastMode)
-        showingModelPicker = false
+        Task {
+            do {
+                try await model.applyConversationModel(draftModelID, effort: draftEffort)
+                model.setFastModeEnabled(draftFastMode && model.supportsFastMode)
+                showingModelPicker = false
+            } catch { modelSelectionError = error.localizedDescription }
+        }
     }
 
     private var modelAndEffortCompactLabel: String {
@@ -5111,6 +5241,14 @@ private struct WaitingMessageQueueRow: View {
     let item: AppModel.WaitingMessage
     let position: Int
 
+    private var displayedError: String? {
+        guard let error = item.error else { return nil }
+        let protectionReasons: [CreditUsageProtection.Reason] = [
+            .balanceDecreased, .includedQuotaExhausted, .usageUnavailable
+        ]
+        return protectionReasons.contains { $0.message == error } ? nil : error
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             dragHandle
@@ -5188,7 +5326,7 @@ private struct WaitingMessageQueueRow: View {
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    if let error = item.error {
+                    if let error = displayedError {
                         Text(error)
                             .foregroundStyle(.orange)
                             .lineLimit(3)
@@ -5219,7 +5357,7 @@ private struct WaitingMessageQueueRow: View {
                 }
                 .buttonStyle(WaitingMessagePrimaryActionButtonStyle())
                 .help("将这条消息补充给正在执行的任务，沿用当前任务的模型。")
-            } else if item.error != nil {
+            } else if displayedError != nil {
                 Button {
                     Task { await model.deliverWaitingMessage(item.id, steer: false) }
                 } label: {

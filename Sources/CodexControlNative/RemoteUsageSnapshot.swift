@@ -10,6 +10,7 @@ struct RemoteUsageSnapshot: Codable, Equatable {
     let resetCredits: ResetCredits?
     var plan: String? = nil
     var subscriptionPeriodEnd: Double? = nil
+    var creditBalance: CreditBalance? = nil
 
     struct Window: Codable, Equatable {
         let usedPercent: Double?
@@ -32,6 +33,10 @@ struct RemoteUsageSnapshot: Codable, Equatable {
         let expiresAt: Double?
         let resetType: String
     }
+    struct CreditBalance: Codable, Equatable {
+        let balance: String?
+        let unlimited: Bool
+    }
     static func creditReference(_ id: String) -> String {
         SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -53,6 +58,12 @@ struct RemoteUsageSnapshot: Codable, Equatable {
         let plan = legacy?["planType"] as? String
             ?? snapshots["codex"]?["planType"] as? String
             ?? snapshots.keys.sorted().compactMap { snapshots[$0]?["planType"] as? String }.first
+        let credits = snapshots["codex"]?["credits"] as? [String: Any]
+            ?? legacy?["credits"] as? [String: Any]
+        let creditBalance = credits.map {
+            CreditBalance(balance: $0["balance"] as? String,
+                          unlimited: $0["unlimited"] as? Bool ?? false)
+        }
         let buckets = snapshots.keys.sorted().prefix(20).compactMap { id -> Bucket? in
             guard let bucket = snapshots[id] else { return nil }
             let windows = ["primary", "secondary"].compactMap { key -> Window? in
@@ -84,7 +95,8 @@ struct RemoteUsageSnapshot: Codable, Equatable {
             buckets: buckets,
             resetCredits: resets,
             plan: plan,
-            subscriptionPeriodEnd: subscriptionPeriodEnd?.timeIntervalSince1970
+            subscriptionPeriodEnd: subscriptionPeriodEnd?.timeIntervalSince1970,
+            creditBalance: creditBalance
         )
     }
 }

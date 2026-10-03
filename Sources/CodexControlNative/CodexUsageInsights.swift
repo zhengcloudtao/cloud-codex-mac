@@ -115,6 +115,7 @@ struct CodexUsageInsightsSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var range: UsageActivityRange = .daily
+    @State private var showProviderUsage = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -122,12 +123,16 @@ struct CodexUsageInsightsSheet: View {
                 Label("使用统计", systemImage: "chart.xyaxis.line")
                     .font(.headline)
                 Spacer()
+                Picker("统计来源", selection: $showProviderUsage) {
+                    Text("Codex 账号").tag(false)
+                    Text("第三方 API").tag(true)
+                }.frame(width: 160)
                 Button {
                     Task { await model.refreshUsageInsights() }
                 } label: {
                     Label("刷新", systemImage: "arrow.clockwise")
                 }
-                .disabled(model.isLoadingUsageInsights)
+                .disabled(model.isLoadingUsageInsights || showProviderUsage)
                 Button("完成") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
@@ -136,7 +141,12 @@ struct CodexUsageInsightsSheet: View {
             Divider()
 
             Group {
-                if let insights = model.usageInsights {
+                if showProviderUsage {
+                    ProviderUsageView()
+                } else if model.customModelProvider.enabled {
+                    ContentUnavailableView("当前使用第三方 API", systemImage: "chart.bar",
+                        description: Text("请选择第三方 API 查看本机用量统计；账号额度请在服务商控制台查看。"))
+                } else if let insights = model.usageInsights {
                     ScrollView {
                         VStack(spacing: 30) {
                             profile(insights)
@@ -166,6 +176,7 @@ struct CodexUsageInsightsSheet: View {
         }
         .frame(width: 940, height: 690)
         .task {
+            showProviderUsage = model.customModelProvider.enabled
             if model.usageInsights == nil { await model.refreshUsageInsights() }
         }
     }

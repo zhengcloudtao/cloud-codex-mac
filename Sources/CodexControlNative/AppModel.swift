@@ -11,6 +11,11 @@ enum ThreadInputAvailability: Equatable {
 final class AppModel: ObservableObject {
     static let recommendedModelSelectionID = "__cloudcodex_recommended__"
 
+    @Published private(set) var customModelProvider: ModelProviderConfiguration
+    @Published private(set) var providerLibrary: ModelProviderLibrary
+    @Published private(set) var isSwitchingModelProvider = false
+    private var openAIModelOptions: [CodexModelOption] = []
+
     let browser = EmbeddedBrowser()
     let connectionHealth = ConnectionHealth()
     let systemMetrics = SystemMetricsMonitor()
@@ -24,6 +29,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var usageInsightsError: String?
     @Published private(set) var isLoadingUsageInsights = false
     @Published var showingUsageInsights = false
+    @Published private(set) var providerUsage = ProviderUsageLedger()
     @Published private(set) var personalSkills: [CodexPersonalSkill] = []
     @Published private(set) var personalSkillsError: String?
     @Published private(set) var isLoadingPersonalSkills = false
@@ -54,6 +60,17 @@ final class AppModel: ObservableObject {
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
     private let revertedFileChangesKey = "cloudcodex.revertedFileChanges.v1"
     private var quotaConsumptionTracker = QuotaConsumptionTracker()
+    @Published private(set) var allowsExtraCreditUsage = false
+    @Published private(set) var creditUsagePauseReason: CreditUsageProtection.Reason?
+    @Published private(set) var creditUsagePauseFailures: [String: String] = [:]
+    private var creditUsageProtection = CreditUsageProtection()
+    private var creditUsageMonitorTask: Task<Void, Never>?
+    private var creditUsageRefreshTask: Task<Void, Never>?
+    private var creditInterruptingThreadIDs: Set<String> = []
+    private let creditUsageReader: (() async throws -> AccountOverview)?
+    private let creditTurnInterrupter: ((String, String) async throws -> Void)?
+    private static let allowsExtraCreditUsageKey = "cloudcodex.allowsExtraCreditUsage.v1"
+    private static let creditUsagePauseKey = "cloudcodex.creditUsagePause.v1"
     @Published private(set) var revertedFileChanges: Set<String> = []
     @Published private(set) var revertingFileChanges: String?
 
@@ -92,19 +109,20 @@ final class AppModel: ObservableObject {
         saveUnreadCompletions()
     }
 
-    func markAllConversationsRead() {
-        guard !unreadCompletions.unread.isEmpty else { return }
-        unreadCompletions.markAllRead()
-        saveUnreadCompletions()
-    }
-
     func recordCompletedConversation(_ threadID: String, turnID: String, viewed: Bool) {
-        _ = unreadCompletions.complete(
+        let isNewCompletion = unreadCompletions.complete(
             threadID: threadID,
             turnID: turnID,
             viewed: viewed
         )
         saveUnreadCompletions()
+        guard isNewCompletion else { return }
+        enqueueRemoteNotification(.init(
+            type: RemoteNotificationEventBody.conversationCompleted,
+            eventId: "conversation:\(threadID):\(turnID)",
+            threadId: threadID,
+            turnId: turnID
+        ))
     }
 
     private func saveUnreadCompletions() {
@@ -156,6 +174,7 @@ final class AppModel: ObservableObject {
         decision: ComputerUseApprovalRequest.Decision
     ) {
         guard let index = computerUseApprovalRequests.firstIndex(where: { $0.id == requestID }) else { return }
+        if creditUsagePauseReason != nil, decision == .allowSession || decision == .allowAlways { return }
         if decision == .allowAlways, !computerUseApprovalRequests[index].allowsAlways { return }
         computerUseApprovalRequests[index].isSubmitting = true
         computerUseApprovalRequests[index].error = nil
@@ -182,6 +201,7 @@ final class AppModel: ObservableObject {
     }
 
     func submitUserInput(requestID: String, answers: [String: String]) {
+        guard creditUsagePauseReason == nil else { return }
         guard let index = userInputRequests.firstIndex(where: { $0.id == requestID }),
               userInputRequests[index].questions.allSatisfy({ !(answers[$0.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return }
         userInputRequests[index].isSubmitting = true
@@ -348,7 +368,7 @@ final class AppModel: ObservableObject {
     }
 
     func submitInterruptedMessageEdit() async {
-        guard canSubmitInterruptedMessageEdit,
+        guard creditUsagePauseReason == nil, canSubmitInterruptedMessageEdit,
               var edit = interruptedMessageEdit,
               selectedThreadID == edit.threadID,
               !isSelectedThreadProcessing else { return }
@@ -362,6 +382,7 @@ final class AppModel: ObservableObject {
         interruptedMessageEdit = edit
 
         do {
+            try await checkCreditUsageBeforeSubmission()
             if !edit.historyWasReverted {
                 try await client.revertThread(edit.threadID, beforeTurnID: edit.turnID)
                 edit.historyWasReverted = true
@@ -463,7 +484,8 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self, !self.waitingMessages.isEmpty else { break }
                 for threadID in Set(self.waitingMessages.map(\.threadID)) {
-                    guard !self.locallyRunningThreadIDs.contains(threadID),
+                    guard self.creditUsagePauseReason == nil,
+                          !self.locallyRunningThreadIDs.contains(threadID),
                           let first = self.waitingMessages.first(where: { $0.threadID == threadID }),
                           first.error == nil, first.id != self.editingWaitingMessageID else { continue }
                     do {
@@ -518,7 +540,8 @@ final class AppModel: ObservableObject {
     }
 
     func deliverWaitingMessage(_ messageID: UUID, steer: Bool) async {
-        guard messageID != editingWaitingMessageID,
+        guard creditUsagePauseReason == nil,
+              messageID != editingWaitingMessageID,
               let item = waitingMessages.first(where: { $0.id == messageID }),
               !waitingMessages.contains(where: { $0.threadID == item.threadID && deliveringWaitingMessages.contains($0.id) }) else { return }
         deliveringWaitingMessages.insert(messageID)
@@ -637,10 +660,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var remoteLastSyncAt: Date?
     @Published private(set) var remoteCredentialIssue: String?
     @Published private(set) var isLoadingRemoteCredential = false
+    @Published private(set) var remoteServerConfiguration: RemoteServerConfiguration
+    @Published private(set) var remoteServerConfigurationError: String?
+    @Published private(set) var isSendingRemoteOfflineHeartbeat = false
 
     private let client = AppServerClient()
     private var remoteControlAPI: RemoteControlAPI?
-    private let remoteAPILoader: @Sendable (Bool) async throws -> RemoteControlAPI
+    private let remoteAPILoader: (@Sendable (Bool) async throws -> RemoteControlAPI)?
     private let remoteDefaults: UserDefaults
     private let speech = SpeechInputController()
     private var hasStarted = false
@@ -739,6 +765,8 @@ final class AppModel: ObservableObject {
     private var remoteClaimTask: Task<Void, Never>?
     private var remoteProgressUploadTask: Task<Void, Never>?
     private let remoteStatusOutbox: RemoteStatusOutbox
+    private let remoteNotificationOutbox: RemoteNotificationOutbox
+    private var remoteNotificationUploadTask: Task<Void, Never>?
     private var remoteUsageSnapshot: RemoteUsageSnapshot?
     private var remoteUsageLastAttempt: Date?
     private var remoteExecutions: [String: RemoteExecution] = [:]
@@ -801,11 +829,22 @@ final class AppModel: ObservableObject {
         userInputTimeoutSeconds: TimeInterval = 60,
         computerControlTimeoutSeconds: TimeInterval = 120,
         commandInactivityTimeoutSeconds: TimeInterval? = nil,
-        remoteAPILoader: @escaping @Sendable (Bool) async throws -> RemoteControlAPI = {
-            try await RemoteControlAPI.connect(allowInteraction: $0)
-        }
+        creditUsageReader: (() async throws -> AccountOverview)? = nil,
+        creditTurnInterrupter: ((String, String) async throws -> Void)? = nil,
+        remoteAPILoader: (@Sendable (Bool) async throws -> RemoteControlAPI)? = nil
     ) {
+        let library = ModelProviderLibrary.load(from: remoteDefaults)
+        self.providerLibrary = library
+        self.customModelProvider = library.activeConfiguration
+        self.client.customModelProvider = library.activeConfiguration
+        self.client.customModelOptions = library.profiles.first {
+            $0.id == library.defaultProviderID
+        }?.options ?? []
         self.remoteDefaults = remoteDefaults
+        self.remoteServerConfiguration = RemoteServerConfiguration.load(remoteDefaults)
+        self.providerUsage = ProviderUsageLedger.load(remoteDefaults)
+        self.creditUsageReader = creditUsageReader
+        self.creditTurnInterrupter = creditTurnInterrupter
         self.userInputTimeoutSeconds = userInputTimeoutSeconds
         self.computerControlTimeoutSeconds = computerControlTimeoutSeconds
         self.commandInactivityTimeoutOverride = commandInactivityTimeoutSeconds
@@ -814,6 +853,7 @@ final class AppModel: ObservableObject {
             savedCommandTimeout == 0 ? 5 : savedCommandTimeout
         )
         self.remoteStatusOutbox = RemoteStatusOutbox(defaults: remoteDefaults)
+        self.remoteNotificationOutbox = RemoteNotificationOutbox(defaults: remoteDefaults)
         self.remoteAPILoader = remoteAPILoader
         if let data = remoteDefaults.data(forKey: unreadCompletionsKey),
            let saved = try? JSONDecoder().decode(UnreadCompletions.self, from: data) {
@@ -831,6 +871,15 @@ final class AppModel: ObservableObject {
         revertedFileChanges = Set(remoteDefaults.stringArray(forKey: revertedFileChangesKey) ?? [])
         isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
         remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
+        allowsExtraCreditUsage = remoteDefaults.bool(forKey: Self.allowsExtraCreditUsageKey)
+        if !customModelProvider.enabled, !allowsExtraCreditUsage,
+           let saved = remoteDefaults.string(forKey: Self.creditUsagePauseKey),
+           let reason = CreditUsageProtection.Reason(rawValue: saved), reason != .usageUnavailable {
+            creditUsageProtection.reason = reason
+            creditUsagePauseReason = reason
+        } else if !customModelProvider.enabled, remoteDefaults.string(forKey: Self.creditUsagePauseKey) == CreditUsageProtection.Reason.usageUnavailable.rawValue {
+            remoteDefaults.removeObject(forKey: Self.creditUsagePauseKey)
+        }
         remotePairingCode = remoteDefaults.string(forKey: remotePairingCodeKey) ?? ""
         if let data = UserDefaults.standard.data(forKey: workspaceOrganizationKey),
            let saved = try? JSONDecoder().decode(WorkspaceOrganization.self, from: data) {
@@ -839,6 +888,9 @@ final class AppModel: ObservableObject {
         if let data = remoteDefaults.data(forKey: waitingMessagesKey),
            let saved = try? JSONDecoder().decode([PersistedWaitingMessage].self, from: data) {
             waitingMessages = saved.map(\.message)
+            for index in waitingMessages.indices where waitingMessages[index].error == CreditUsageProtection.Reason.usageUnavailable.message {
+                waitingMessages[index].error = nil
+            }
         }
         if let data = remoteDefaults.data(forKey: capacityRetriesKey),
            let saved = try? JSONDecoder().decode([String: CapacityRetryState].self, from: data) {
@@ -862,6 +914,14 @@ final class AppModel: ObservableObject {
             return self.speechTargetsNewThread ? self.newThreadPrompt : self.composerText
         }
         speech.onError = { [weak self] message in self?.errorMessage = message }
+        client.beforeTurnSubmission = { [weak self] in
+            guard let self else { throw CodexClientError.notRunning }
+            guard !self.isSwitchingModelProvider else {
+                throw ModelProviderError.message("正在切换模型厂商，请稍后发送。")
+            }
+            if self.customModelProvider.enabled { return }
+            try await self.checkCreditUsageBeforeSubmission()
+        }
         waitingPersistenceReady = true
         startWaitingMonitorIfNeeded()
     }
@@ -1100,12 +1160,18 @@ final class AppModel: ObservableObject {
     }
 
     var selectedModel: CodexModelOption? {
-        guard selectedModelID != Self.recommendedModelSelectionID else { return nil }
+        if selectedModelID == Self.recommendedModelSelectionID {
+            guard !customModelProvider.enabled, let configured = providerLibrary.openAIDefaultModelID else { return nil }
+            return modelOptions.first { $0.model == configured && providerID(for: $0.id) == ModelProviderLibrary.openAI }
+        }
         return modelOptions.first { $0.id == selectedModelID }
     }
 
     var recommendedModel: CodexModelOption? {
-        modelOptions.first(where: \.isDefault) ?? modelOptions.first
+        let options = modelOptions.filter { providerID(for: $0.id) == currentModelProviderID }
+        if currentModelProviderID == ModelProviderLibrary.openAI,
+           let preferred = options.first(where: { $0.model == providerLibrary.openAIDefaultModelID }) { return preferred }
+        return options.first(where: \.isDefault) ?? options.first
     }
 
     var selectedModelCapabilities: CodexModelOption? {
@@ -1180,7 +1246,9 @@ final class AppModel: ObservableObject {
     var canSend: Bool {
         (!composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
             && selectedThreadID != nil
+            && !isSwitchingModelProvider
             && threadInputAvailability == .available
+            && (customModelProvider.enabled || creditUsagePauseReason == nil)
     }
 
     var isSelectedThreadOwnedElsewhere: Bool {
@@ -1192,6 +1260,8 @@ final class AppModel: ObservableObject {
             && (!newThreadPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !newThreadAttachments.isEmpty)
             && !isCreatingThread
+            && !isSwitchingModelProvider
+            && (customModelProvider.enabled || creditUsagePauseReason == nil)
     }
 
     func start() async {
@@ -1214,6 +1284,7 @@ final class AppModel: ObservableObject {
         }
         client.onDisconnect = { [weak self] message in
             guard let self else { return }
+            guard !self.isSwitchingModelProvider else { return }
             if let threadID = self.forceStoppingThreadID {
                 self.forceStoppingThreadID = nil
                 self.handleForcedStopDisconnect(threadID: threadID)
@@ -1224,13 +1295,14 @@ final class AppModel: ObservableObject {
         }
         do {
             try await client.start()
-            connectionText = "已连接本机 Codex"
+            connectionText = customModelProvider.enabled ? "已连接：\(customModelProvider.name)" : "已连接本机 Codex"
             Task { await connectionHealth.check() }
             await loadComposerOptions(cwd: nil)
             await loadFolderCatalog()
             await refreshThreads()
             resumePersistedCapacityRetries()
             startThreadStatusMonitor()
+            startCreditUsageMonitor()
             startRemoteControlIfNeeded()
         } catch {
             connectionText = "连接失败"
@@ -1239,10 +1311,173 @@ final class AppModel: ObservableObject {
     }
 
     private func applyAccountOverview(_ overview: AccountOverview) {
+        guard !customModelProvider.enabled else { return }
+        let restored = Self.didRestoreFiveHourQuota(from: accountOverview, to: overview)
         accountOverview = overview
+        if restored {
+            enqueueRemoteNotification(.init(
+                type: RemoteNotificationEventBody.quotaRestored,
+                eventId: "quota:\(Int(overview.usage.capturedAt))"
+            ))
+        }
+        observeCreditUsage(overview)
         recentThirtyMinuteConsumptionRate = quotaConsumptionTracker.record(account: overview)
         if let data = try? JSONEncoder().encode(quotaConsumptionTracker) {
             remoteDefaults.set(data, forKey: quotaConsumptionHistoryKey)
+        }
+    }
+
+    static func didRestoreFiveHourQuota(from previous: AccountOverview?, to current: AccountOverview) -> Bool {
+        guard previous?.usage.available == true, current.usage.available,
+              let old = previous?.primaryBucket?.windows.first(where: { $0.windowDurationMins == 300 })?.usedPercent,
+              let new = current.primaryBucket?.windows.first(where: { $0.windowDurationMins == 300 })?.usedPercent else {
+            return false
+        }
+        return old > 0.001 && new <= 0.001
+    }
+
+    private func enqueueRemoteNotification(_ body: RemoteNotificationEventBody) {
+        // Notification delivery belongs to the relay that owns the current
+        // pairing. The production AI mini program is commonly configured as a
+        // custom relay, so filtering by the local server-mode label would drop
+        // the event before it ever reached the paired backend.
+        guard remoteControlEnabled, remoteControlPaired, let api = remoteControlAPI else { return }
+        remoteNotificationOutbox.enqueue(deviceID: api.deviceID, body: body)
+    }
+
+    func setAllowsExtraCreditUsage(_ allowed: Bool) {
+        guard !customModelProvider.enabled else { return }
+        guard allowed != allowsExtraCreditUsage else { return }
+        allowsExtraCreditUsage = allowed
+        remoteDefaults.set(allowed, forKey: Self.allowsExtraCreditUsageKey)
+        creditUsageProtection.reset()
+        if let accountOverview { observeCreditUsage(accountOverview) }
+        publishCreditUsageProtection()
+        if !allowed { requestCreditUsageRefresh() }
+    }
+
+    func observeCreditUsage(_ overview: AccountOverview) {
+        guard !customModelProvider.enabled else { return }
+        creditUsageProtection.observe(overview, allowsCredits: allowsExtraCreditUsage)
+        publishCreditUsageProtection()
+    }
+
+    private func publishCreditUsageProtection() {
+        creditUsagePauseReason = creditUsageProtection.reason
+        if let reason = creditUsagePauseReason {
+            remoteDefaults.set(reason.rawValue, forKey: Self.creditUsagePauseKey)
+            pauseConversationsForCreditProtection()
+        } else {
+            remoteDefaults.removeObject(forKey: Self.creditUsagePauseKey)
+            creditUsagePauseFailures = [:]
+        }
+    }
+
+    private func readCreditUsage() async throws -> AccountOverview {
+        if let creditUsageReader { return try await creditUsageReader() }
+        return try await client.readAccountOverview()
+    }
+
+    func checkCreditUsageBeforeSubmission() async throws {
+        guard !customModelProvider.enabled else { return }
+        guard !allowsExtraCreditUsage else { return }
+        if let reason = creditUsagePauseReason { throw CreditUsageBlocked(reason: reason) }
+        do {
+            let overview = try await readCreditUsage()
+            applyAccountOverview(overview)
+        } catch {
+            accountOverviewError = error.localizedDescription
+        }
+        if let reason = creditUsagePauseReason { throw CreditUsageBlocked(reason: reason) }
+    }
+
+    func recheckIncludedQuota() async {
+        guard creditInterruptingThreadIDs.isEmpty, creditUsagePauseFailures.isEmpty else {
+            errorMessage = "还有会话正在暂停或暂停失败，请等待暂停成功后再解除额度保护。"
+            return
+        }
+        do {
+            let overview = try await readCreditUsage()
+            guard !allowsExtraCreditUsage else { return }
+            if CreditUsageProtection.hasKnownIncludedQuota(overview) {
+                creditUsageProtection.reset()
+            }
+            applyAccountOverview(overview)
+        } catch {
+            accountOverviewError = error.localizedDescription
+        }
+    }
+
+    private func requestCreditUsageRefresh() {
+        guard !customModelProvider.enabled, !allowsExtraCreditUsage, creditUsageRefreshTask == nil else { return }
+        creditUsageRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.creditUsageRefreshTask = nil }
+            do {
+                let overview = try await self.readCreditUsage()
+                self.applyAccountOverview(overview)
+            } catch {
+                self.accountOverviewError = error.localizedDescription
+            }
+        }
+    }
+
+    private func startCreditUsageMonitor() {
+        guard !customModelProvider.enabled, creditUsageMonitorTask == nil else { return }
+        creditUsageMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if !self.allowsExtraCreditUsage,
+                   !self.locallyRunningThreadIDs.isEmpty || self.threads.contains(where: { $0.status == "active" })
+                        || self.creditUsagePauseReason != nil {
+                    self.requestCreditUsageRefresh()
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    private func pauseConversationsForCreditProtection() {
+        guard let reason = creditUsagePauseReason, !allowsExtraCreditUsage else { return }
+        for threadID in Array(capacityRetryStates.keys) {
+            _ = cancelCapacityRetry(threadID: threadID)
+        }
+        let running = locallyRunningThreadIDs.union(activeTurnIDsByThread.keys)
+            .union(threads.filter { $0.status == "active" }.map(\.id))
+            .union(threadSummaries.values.filter { $0.status == "active" }.map(\.id))
+        for threadID in running where !creditInterruptingThreadIDs.contains(threadID) {
+            creditInterruptingThreadIDs.insert(threadID)
+            Task { [weak self] in
+                guard let self else { return }
+                defer { self.creditInterruptingThreadIDs.remove(threadID) }
+                do {
+                    guard !self.allowsExtraCreditUsage, self.creditUsagePauseReason != nil else { return }
+                    var turnID = self.activeTurnIDsByThread[threadID]
+                    if turnID == nil {
+                        let activity = try await self.client.readLatestThreadActivity(threadID)
+                        if let turn = activity.turn, turn.isActive { turnID = turn.id }
+                    }
+                    if let turnID {
+                        guard !self.allowsExtraCreditUsage, self.creditUsagePauseReason != nil else { return }
+                        if let interrupt = self.creditTurnInterrupter {
+                            try await interrupt(threadID, turnID)
+                        } else {
+                            try await self.client.interruptTurn(threadID: threadID, turnID: turnID)
+                        }
+                    }
+                    // Do not erase a newer turn that arrived during interruption.
+                    guard self.activeTurnIDsByThread[threadID] == nil
+                        || self.activeTurnIDsByThread[threadID] == turnID else { return }
+                    self.markLocalTurnInterrupted(threadID: threadID, message: reason.message,
+                        title: "额外额度保护", status: "已暂停")
+                    self.clearLocalTurn(threadID)
+                    self.setThreadRunning(threadID, running: false)
+                    self.threadOutcomes[threadID] = .interrupted
+                    self.creditUsagePauseFailures.removeValue(forKey: threadID)
+                } catch {
+                    self.creditUsagePauseFailures[threadID] = "暂停未成功：\(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -1282,6 +1517,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshUsageInsights() async {
+        guard !customModelProvider.enabled else { return }
         guard !isLoadingUsageInsights else { return }
         isLoadingUsageInsights = true
         defer { isLoadingUsageInsights = false }
@@ -1318,6 +1554,7 @@ final class AppModel: ObservableObject {
             guard generation == threadRequestGeneration,
                   requestedFolder == selectedFolder else { return }
             applyThreadListSnapshot(page.threads)
+            if creditUsagePauseReason != nil { pauseConversationsForCreditProtection() }
             hasMoreThreads = page.hasMore
             if selectedFolder == nil {
                 mergeRecentFolders(from: page.threads)
@@ -1762,8 +1999,9 @@ final class AppModel: ObservableObject {
                     threadID: id
                 )
                 if let model = updated.model,
-                   modelOptions.contains(where: { $0.id == model }) {
-                    selectModel(model, preferredEffort: updated.reasoningEffort)
+                   let option = modelOptions.first(where: { ($0.id == model || $0.model == model)
+                       && providerID(for: $0.id) == currentModelProviderID }) {
+                    selectModel(option.id, preferredEffort: updated.reasoningEffort)
                 }
                 await loadPermissionProfiles(cwd: updated.cwd)
                 guard !Task.isCancelled, generation == selectionGeneration else { return }
@@ -1791,6 +2029,7 @@ final class AppModel: ObservableObject {
     }
 
     func sendMessage() async {
+        guard creditUsagePauseReason == nil else { return }
         if let id = selectedThreadID, canSend,
            isSelectedThreadProcessing || !selectedWaitingMessages.isEmpty {
             enqueueComposerMessage(threadID: id)
@@ -2291,6 +2530,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectModel(_ id: String, preferredEffort: String? = nil) {
+        guard providerID(for: id) == currentModelProviderID else { return }
         let option: CodexModelOption?
         if id == Self.recommendedModelSelectionID {
             option = recommendedModel
@@ -2306,6 +2546,106 @@ final class AppModel: ObservableObject {
         } else {
             selectedEffort = option.defaultComposerEffort
         }
+        if customModelProvider.enabled {
+            customModelProvider.supportedReasoningEfforts = option.supportedEfforts
+            customModelProvider.modelID = option.model
+            customModelProvider.reasoningEffort = selectedEffort ?? customModelProvider.reasoningEffort
+            client.customModelProvider = customModelProvider
+        }
+    }
+
+    var currentModelProviderID: String {
+        customModelProvider.enabled ? (customModelProvider.service?.rawValue ?? "legacy") : ModelProviderLibrary.openAI
+    }
+
+    func providerID(for optionID: String?) -> String {
+        if optionID == Self.recommendedModelSelectionID { return currentModelProviderID }
+        if let optionID, optionID.hasPrefix("provider:") {
+            let parts = optionID.split(separator: ":", maxSplits: 2)
+            if parts.count == 3 {
+                let id = String(parts[1])
+                if id == ModelProviderLibrary.openAI || providerLibrary.profiles.contains(where: { $0.id == id }) { return id }
+            }
+        }
+        return ModelProviderLibrary.openAI
+    }
+
+    var canChangeProviderConfiguration: Bool {
+        !isSwitchingModelProvider && locallyRunningThreadIDs.isEmpty && remoteExecutions.isEmpty
+            && waitingMessages.isEmpty && !isCreatingThread && !isSelectedThreadProcessing
+    }
+
+    func canApplyModelSelection(_ id: String?) -> Bool {
+        !isSwitchingModelProvider && (providerID(for: id) == currentModelProviderID || canChangeProviderConfiguration)
+    }
+
+    func applyConversationModel(_ id: String, effort: String?) async throws {
+        guard id == Self.recommendedModelSelectionID || modelOptions.contains(where: { $0.id == id }) else {
+            throw ModelProviderError.message("此模型已不在可用列表中，请重新选择。")
+        }
+        let target = providerID(for: id)
+        if target != currentModelProviderID {
+            guard canChangeProviderConfiguration else {
+                throw ModelProviderError.message("请等待运行中及排队任务结束后再切换厂商。同一家可为下一轮选择模型。")
+            }
+            let profile = providerLibrary.profile(for: id)
+            guard target == ModelProviderLibrary.openAI || profile != nil else { return }
+            try await reconnectModelProvider(profile?.configuration ?? ModelProviderConfiguration(), options: profile?.options ?? [])
+        }
+        selectModel(id, preferredEffort: effort)
+    }
+
+    func applyProviderLibrary(_ library: ModelProviderLibrary) async throws {
+        guard canChangeProviderConfiguration else {
+            throw ModelProviderError.message("请等待运行中及排队的任务结束，再保存厂商配置。")
+        }
+        let value = try library.validated()
+        let previousID = selectedModelID
+        let previousEffort = selectedEffort
+        let currentProfile = value.profiles.first { $0.id == currentModelProviderID && $0.configuration.enabled }
+        let keepCurrent = value.providerIDAfterSaving(current: currentModelProviderID) == currentModelProviderID
+        let configuration = keepCurrent ? (currentProfile?.configuration ?? ModelProviderConfiguration()) : value.activeConfiguration
+        let options = keepCurrent ? (currentProfile?.options ?? []) : (value.profiles.first { $0.id == value.defaultProviderID }?.options ?? [])
+        try await reconnectModelProvider(configuration, options: options)
+        providerLibrary = value
+        remoteDefaults.set(try JSONEncoder().encode(value), forKey: ModelProviderLibrary.defaultsKey)
+        // Retain the v1 compatibility view and the original Keychain accounts.
+        remoteDefaults.set(try JSONEncoder().encode(configuration), forKey: ModelProviderConfiguration.defaultsKey)
+        modelOptions = value.composerOptions(openAI: openAIModelOptions)
+        let retained = keepCurrent ? previousID.flatMap { id in modelOptions.first { $0.id == id } } : nil
+        selectedEffort = nil
+        selectModel(retained?.id ?? Self.recommendedModelSelectionID, preferredEffort: retained == nil ? nil : previousEffort)
+    }
+
+    private func reconnectModelProvider(_ configuration: ModelProviderConfiguration, options: [CodexModelOption]) async throws {
+        let previous = customModelProvider
+        let previousOptions = client.customModelOptions
+        isSwitchingModelProvider = true
+        threadStatusMonitorTask?.cancel(); threadStatusMonitorTask = nil
+        creditUsageMonitorTask?.cancel(); creditUsageMonitorTask = nil
+        creditUsageRefreshTask?.cancel(); creditUsageRefreshTask = nil
+        clientReconnectTask?.cancel(); clientReconnectTask = nil
+        defer {
+            isSwitchingModelProvider = false
+            if hasStarted { startThreadStatusMonitor(); startCreditUsageMonitor() }
+        }
+        do {
+            try await client.changeProvider(configuration, options: options)
+        } catch {
+            // Restore the previous route if the new local service failed to initialize.
+            try? await client.changeProvider(previous, options: previousOptions)
+            throw error
+        }
+        customModelProvider = configuration
+        creditUsageProtection.reset(); creditUsagePauseReason = nil
+        if configuration.enabled { isFastModeEnabled = false }
+        if !configuration.enabled {
+            if let fresh = try? await client.listModels() { openAIModelOptions = fresh }
+            modelOptions = providerLibrary.composerOptions(openAI: openAIModelOptions)
+        }
+        connectionText = configuration.enabled ? "已连接：\(configuration.name)" : "已连接 OpenAI（本机 Codex）"
+        // All loaded-thread caches were cleared with the subprocess. The next
+        // submission resumes persisted history through the newly selected route.
     }
 
     func setFastModeEnabled(_ enabled: Bool) {
@@ -2408,6 +2748,7 @@ final class AppModel: ObservableObject {
     }
 
     func createThread() async {
+        guard creditUsagePauseReason == nil else { return }
         let folder = newThreadFolder.trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = newThreadPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let outgoingAttachments = newThreadAttachments
@@ -2473,7 +2814,7 @@ final class AppModel: ObservableObject {
     /// New models can become available while this app-server connection stays open.
     func refreshModelCatalog() async {
         do {
-            modelOptions = try await client.listModels()
+            modelOptions = try await readComposerModels()
         } catch {
             errorMessage = "无法读取 Codex 模型列表：\(error.localizedDescription)"
         }
@@ -2481,8 +2822,10 @@ final class AppModel: ObservableObject {
 
     private func loadComposerOptions(cwd: String?) async {
         do {
-            modelOptions = try await client.listModels()
-            let preferred = selectedThread?.model
+            modelOptions = try await readComposerModels()
+            let preferred = modelOptions.first(where: {
+                $0.model == selectedThread?.model && providerID(for: $0.id) == currentModelProviderID
+            })?.id
                 ?? (selectedModelID == Self.recommendedModelSelectionID ? Self.recommendedModelSelectionID : nil)
                 ?? modelOptions.first(where: { $0.id == selectedModelID })?.id
                 ?? (recommendedModel == nil ? nil : Self.recommendedModelSelectionID)
@@ -2492,6 +2835,15 @@ final class AppModel: ObservableObject {
             errorMessage = "无法读取 Codex 模型列表：\(error.localizedDescription)"
         }
         await loadPermissionProfiles(cwd: cwd)
+    }
+
+    private func readComposerModels() async throws -> [CodexModelOption] {
+        if !customModelProvider.enabled {
+            openAIModelOptions = try await client.listModels()
+        } else if openAIModelOptions.isEmpty {
+            openAIModelOptions = (try? await client.bundledOpenAIModels()) ?? []
+        }
+        return providerLibrary.composerOptions(openAI: openAIModelOptions)
     }
 
     private func loadPermissionProfiles(cwd: String?) async {
@@ -2523,7 +2875,58 @@ final class AppModel: ObservableObject {
         selectedPermission?.displayName ?? selectedPermissionID ?? "当前权限"
     }
 
+    var canChangeRemoteServer: Bool {
+        !remoteControlEnabled && !isLoadingRemoteCredential && !isRemoteUnpairing
+            && !isSendingRemoteOfflineHeartbeat && remoteExecutions.isEmpty
+            && remoteClaimTask == nil && remoteHistoryTask == nil
+            && remoteRecoveryTask == nil
+            && remoteStatusUploadTask == nil && remoteProgressUploadTask == nil
+            && remoteSchedulingTask == nil
+    }
+
+    @discardableResult
+    func saveRemoteServerConfiguration(_ configuration: RemoteServerConfiguration) -> Bool {
+        guard canChangeRemoteServer else {
+            remoteServerConfigurationError = "请先关闭远程任务，等待当前任务和连接操作结束后再保存。"
+            return false
+        }
+        do {
+            let url = try configuration.validatedURL()
+            var saved = configuration
+            saved.customAddress = saved.mode == .custom ? url.absoluteString : ""
+            let data = try JSONEncoder().encode(saved)
+            if saved != remoteServerConfiguration {
+                remoteServerConfiguration = saved
+                remoteDefaults.set(data, forKey: RemoteServerConfiguration.defaultsKey)
+                remoteControlAPI = nil
+                remoteCredentialIssue = nil
+                remoteControlPaired = false
+                remotePairingCode = ""
+                remotePairingExpiresAt = nil
+                remoteLastSyncAt = nil
+                remoteDefaults.removeObject(forKey: remotePairingCodeKey)
+                remoteUsageSnapshot = nil
+                remoteUsageLastAttempt = nil
+                remoteRecoveryLastAttempt = nil
+                remoteControlStatus = "服务配置已保存，开启远程任务后连接并配对"
+            }
+            remoteServerConfigurationError = nil
+            return true
+        } catch {
+            remoteServerConfigurationError = error.localizedDescription
+            return false
+        }
+    }
+
     func setRemoteControlEnabled(_ enabled: Bool) {
+        if enabled {
+            do { _ = try remoteServerConfiguration.validatedURL() }
+            catch {
+                remoteServerConfigurationError = error.localizedDescription
+                remoteControlStatus = "服务地址无效，请先保存有效配置"
+                return
+            }
+        }
         remoteControlEnabled = enabled
         remoteDefaults.set(enabled, forKey: remoteControlEnabledKey)
         if enabled {
@@ -2541,8 +2944,11 @@ final class AppModel: ObservableObject {
             remoteSchedulingLastAttempt = nil
             remoteControlStatus = remoteExecutions.isEmpty ? "远程控制已关闭" : "当前远程任务完成后停止"
             guard let api = remoteControlAPI else { return }
+            guard !isSendingRemoteOfflineHeartbeat else { return }
+            isSendingRemoteOfflineHeartbeat = true
             Task { [weak self] in
                 guard let self else { return }
+                defer { self.isSendingRemoteOfflineHeartbeat = false }
                 let body = self.makeRemoteHeartbeat(ready: false)
                 _ = try? await api.heartbeat(body)
             }
@@ -2555,9 +2961,12 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             do {
                 let registration = try await api.register(resetPairing: true)
-                self?.applyRemoteRegistration(registration)
+                guard let self, self.remoteControlAPI === api, self.remoteControlEnabled else { return }
+                self.applyRemoteRegistration(registration)
             } catch {
-                self?.remoteControlStatus = "生成配对二维码失败：\(error.localizedDescription)"
+                if let self, self.remoteControlAPI === api, self.remoteControlEnabled {
+                    self.remoteControlStatus = "生成配对二维码失败：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -2630,7 +3039,13 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let api = try await self.remoteAPILoader(allowInteraction)
+                let api: RemoteControlAPI
+                if let loader = self.remoteAPILoader {
+                    api = try await loader(allowInteraction)
+                } else {
+                    api = try await RemoteControlAPI.connect(allowInteraction: allowInteraction,
+                        configuration: self.remoteServerConfiguration, defaults: self.remoteDefaults)
+                }
                 self.remoteControlAPI = api
                 self.isLoadingRemoteCredential = false
                 // If the switch was turned off while macOS was authorizing,
@@ -2651,22 +3066,23 @@ final class AppModel: ObservableObject {
         guard let api = remoteControlAPI else { return }
         do {
             let registration = try await api.register()
-            guard !Task.isCancelled, remoteControlEnabled else { return }
+            guard !Task.isCancelled, remoteControlEnabled, remoteControlAPI === api else { return }
             applyRemoteRegistration(registration)
         } catch {
-            if !Task.isCancelled { remoteControlStatus = "远程服务连接失败：\(error.localizedDescription)" }
+            if !Task.isCancelled, remoteControlAPI === api { remoteControlStatus = "远程服务连接失败：\(error.localizedDescription)" }
         }
 
         var heartbeatCountdown = 0
         // Initial global read also avoids briefly clearing the relay's history
         // with whichever workspace happens to be selected at launch.
         await refreshRemoteSchedulingSnapshot()
-        while !Task.isCancelled, remoteControlEnabled {
+        while !Task.isCancelled, remoteControlEnabled, remoteControlAPI === api {
             refreshRemoteUsageIfNeeded()
             refreshRemoteSchedulingIfNeeded()
             if heartbeatCountdown <= 0 {
                 do {
                     let response = try await api.heartbeat(makeRemoteHeartbeat(ready: true))
+                    guard !Task.isCancelled, remoteControlEnabled, remoteControlAPI === api else { return }
                     remoteControlPaired = response.paired
                     remoteLastSyncAt = Date()
                     if response.paired, let running = response.runningTasks {
@@ -2689,7 +3105,7 @@ final class AppModel: ObservableObject {
                             : "等待小程序扫码配对"
                     }
                 } catch {
-                    if !Task.isCancelled { remoteControlStatus = "状态同步失败：\(error.localizedDescription)" }
+                    if !Task.isCancelled, remoteControlAPI === api { remoteControlStatus = "状态同步失败：\(error.localizedDescription)" }
                 }
                 heartbeatCountdown = 3
             }
@@ -2700,7 +3116,7 @@ final class AppModel: ObservableObject {
             if remoteControlPaired, remoteHistoryTask == nil {
                 remoteHistoryTask = Task { [weak self] in
                 guard let self else { return }
-                defer { self.remoteHistoryTask = nil }
+                defer { self.remoteHistoryTask = nil; self.objectWillChange.send() }
                 // Account resets are explicit confirmed commands, separate from development turns.
                 do {
                     if let attempt = try await api.nextReset(), self.remoteControlEnabled, !Task.isCancelled {
@@ -2732,7 +3148,7 @@ final class AppModel: ObservableObject {
                 } catch { /* Old relay versions do not support history; do not disrupt execution. */ }
                 }
             }
-            if remoteControlPaired, remoteClaimTask == nil,
+            if remoteControlPaired, remoteClaimTask == nil, creditUsagePauseReason == nil,
                !Self.computerControlCircuitIsOpen(until: computerControlCircuitOpenUntil, now: Date()),
                Self.canClaimRemoteTask(
                     remoteExecutionCount: remoteExecutions.count,
@@ -2742,7 +3158,7 @@ final class AppModel: ObservableObject {
                 // history reads or status recovery. Keep claiming single-flight.
                 remoteClaimTask = Task { [weak self] in
                     guard let self else { return }
-                    defer { self.remoteClaimTask = nil }
+                    defer { self.remoteClaimTask = nil; self.objectWillChange.send() }
                     guard self.remoteControlEnabled, !Task.isCancelled else { return }
                     do {
                         if let task = try await api.nextTask() {
@@ -2761,7 +3177,7 @@ final class AppModel: ObservableObject {
                !remoteStatusOutbox.pending(deviceID: api.deviceID).isEmpty {
                 remoteStatusUploadTask = Task { [weak self] in
                     guard let self else { return }
-                    defer { self.remoteStatusUploadTask = nil }
+                    defer { self.remoteStatusUploadTask = nil; self.objectWillChange.send() }
                     for (id, body) in self.remoteStatusOutbox.pending(deviceID: api.deviceID) {
                         guard !Task.isCancelled else { return }
                         await self.uploadRemoteStatus(id, body: body, api: api)
@@ -2769,10 +3185,27 @@ final class AppModel: ObservableObject {
                 }
             }
 
+            if remoteControlPaired, remoteNotificationUploadTask == nil,
+               !remoteNotificationOutbox.pending(deviceID: api.deviceID).isEmpty {
+                remoteNotificationUploadTask = Task { [weak self] in
+                    guard let self else { return }
+                    defer { self.remoteNotificationUploadTask = nil; self.objectWillChange.send() }
+                    for (_, body) in self.remoteNotificationOutbox.pending(deviceID: api.deviceID) {
+                        guard !Task.isCancelled else { return }
+                        do {
+                            try await api.sendNotificationEvent(body)
+                            self.remoteNotificationOutbox.acknowledge(deviceID: api.deviceID, body: body)
+                        } catch {
+                            return
+                        }
+                    }
+                }
+            }
+
             if remoteProgressUploadTask == nil {
                 remoteProgressUploadTask = Task { [weak self] in
                     guard let self else { return }
-                    defer { self.remoteProgressUploadTask = nil }
+                    defer { self.remoteProgressUploadTask = nil; self.objectWillChange.send() }
                     await self.uploadRemoteProgress(api: api)
                 }
             }
@@ -2824,9 +3257,13 @@ final class AppModel: ObservableObject {
             || remotePairingExpiresAt!.timeIntervalSince(now) <= 4
         guard needsRefresh else { return }
         do {
-            applyRemoteRegistration(try await api.register(resetPairing: true))
+            let registration = try await api.register(resetPairing: true)
+            guard !Task.isCancelled, remoteControlEnabled, remoteControlAPI === api else { return }
+            applyRemoteRegistration(registration)
         } catch {
-            remoteControlStatus = "刷新配对二维码失败：\(error.localizedDescription)"
+            if !Task.isCancelled, remoteControlEnabled, remoteControlAPI === api {
+                remoteControlStatus = "刷新配对二维码失败：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -2850,7 +3287,7 @@ final class AppModel: ObservableObject {
               remoteSchedulingLastAttempt.map({ Date().timeIntervalSince($0) >= 9 }) ?? true else { return }
         remoteSchedulingTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.remoteSchedulingTask = nil }
+            defer { self.remoteSchedulingTask = nil; self.objectWillChange.send() }
             await self.refreshRemoteSchedulingSnapshot()
         }
     }
@@ -2881,7 +3318,7 @@ final class AppModel: ObservableObject {
             allowedPaths: Set(workspaces.map(\.path)),
             locallyRunning: locallyRunningThreadIDs.compactMap { threadSummaries[$0] }
         )
-        let models = modelOptions.prefix(100).map {
+        let models = modelOptions.filter { providerID(for: $0.id) == currentModelProviderID }.prefix(100).map {
             RemoteModelSnapshot(
                 id: $0.id,
                 model: $0.model,
@@ -2925,7 +3362,9 @@ final class AppModel: ObservableObject {
             modelOption = selectedModelCapabilities
             modelOverride = selectedModel?.model
         } else {
-            guard let available = modelOptions.first(where: { $0.id == requestedModel || $0.model == requestedModel }) else {
+            guard let available = modelOptions.first(where: {
+                ($0.id == requestedModel || $0.model == requestedModel) && providerID(for: $0.id) == currentModelProviderID
+            }) else {
                 await failRemoteTask(task, message: "这台 Mac 当前不支持模型 \(requestedModel)。")
                 return
             }
@@ -3071,6 +3510,7 @@ final class AppModel: ObservableObject {
     }
 
     static func shouldDeferRemoteTask(_ error: Error) -> Bool {
+        if error is CreditUsageBlocked { return true }
         let message = error.localizedDescription.lowercased()
         return message.contains("active writer")
             || message.contains("这个会话正在 codex 中运行")
@@ -3154,7 +3594,7 @@ final class AppModel: ObservableObject {
         let candidates = tasks.filter { authorized.contains($0.workspace) && remoteStatusOutbox.pending(deviceID: api.deviceID)[$0.taskId] == nil }
         remoteRecoveryTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.remoteRecoveryTask = nil }
+            defer { self.remoteRecoveryTask = nil; self.objectWillChange.send() }
             for group in Dictionary(grouping: candidates, by: \.threadId).values {
                 guard self.remoteControlEnabled, !Task.isCancelled else { return }
                 do {
@@ -3171,7 +3611,7 @@ final class AppModel: ObservableObject {
                             }
                             self.scheduleRemoteThreadRelease(body.threadId)
                         }
-                        await self.reportRemoteTaskStatus(id, body: body)
+                        await self.reportRemoteTaskStatus(id, body: body, api: api)
                     }
                 } catch {
                     // A read failure is not evidence that a turn ended. Try again next heartbeat.
@@ -3181,8 +3621,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func reportRemoteTaskStatus(_ taskID: String, body: RemoteTaskStatusBody) async {
-        guard let api = remoteControlAPI else { return }
+    private func reportRemoteTaskStatus(_ taskID: String, body: RemoteTaskStatusBody, api sourceAPI: RemoteControlAPI? = nil) async {
+        guard let api = sourceAPI ?? remoteControlAPI else { return }
         let body = await client.withActualTurnSettings(body)
         applyVerifiedRemoteSettings(body)
         remoteStatusOutbox.enqueue(deviceID: api.deviceID, taskID: taskID, body: body)
@@ -3213,12 +3653,12 @@ final class AppModel: ObservableObject {
             try await api.updateTask(taskID, body: body)
             remoteStatusOutbox.acknowledge(deviceID: api.deviceID, taskID: taskID, body: body)
         } catch {
-            if !Task.isCancelled { remoteControlStatus = "任务状态待补传，网络恢复后自动重试" }
+            if !Task.isCancelled, remoteControlAPI === api { remoteControlStatus = "任务状态待补传，网络恢复后自动重试" }
         }
     }
 
     private func handleRemoteEvent(_ method: String, params: [String: Any], threadID: String) {
-        guard var execution = remoteExecutions[threadID] else { return }
+        guard var execution = remoteExecutions[threadID], let api = remoteControlAPI else { return }
         if method == "error", params["willRetry"] as? Bool == true { return }
         let eventTurnID = params["turnId"] as? String ?? (params["turn"] as? [String: Any])?["id"] as? String
         if let expected = execution.turnID, let eventTurnID, expected != eventTurnID { return }
@@ -3282,7 +3722,7 @@ final class AppModel: ObservableObject {
                         result: execution.responseText,
                         error: completedSuccessfully ? "" : failureText,
                         fileDiff: execution.fileDiff, progress: execution.progress
-                ))
+                ), api: api)
             }
         case "error":
             let errorObject = params["error"] as? [String: Any]
@@ -3297,7 +3737,7 @@ final class AppModel: ObservableObject {
                         status: "failed", threadId: execution.threadID,
                         turnId: execution.turnID ?? "", result: execution.responseText, error: message,
                         fileDiff: execution.fileDiff, progress: execution.progress
-                ))
+                ), api: api)
             }
         default:
             break
@@ -3428,6 +3868,7 @@ final class AppModel: ObservableObject {
     }
 
     private func expireUserInputRequest(_ requestID: String) {
+        guard creditUsagePauseReason == nil else { return }
         guard let request = userInputRequests.first(where: { $0.id == requestID }), !request.isSubmitting else { return }
         do {
             try client.respond(to: request.requestID, result: request.skippedResponsePayload)
@@ -3610,6 +4051,7 @@ final class AppModel: ObservableObject {
         threadID: String,
         timeoutDescription: String
     ) -> Bool {
+        guard creditUsagePauseReason == nil else { return false }
         if waitingMessages.contains(where: { $0.threadID == threadID && $0.isAutomaticRecovery }) {
             return true
         }
@@ -3718,6 +4160,25 @@ final class AppModel: ObservableObject {
     }
 
     func handleEvent(_ method: String, _ params: [String: Any]) {
+        if customModelProvider.enabled,
+           ["turn/started", "turn/completed", "thread/tokenUsage/updated"].contains(method) {
+            var updated = providerUsage
+            let threadID = params["threadId"] as? String ?? ""
+            let turnID = params["turnId"] as? String ?? (params["turn"] as? [String: Any])?["id"] as? String
+            let configuration = client.usageProvider(threadID: threadID, turnID: turnID) ?? customModelProvider
+            if updated.consume(method, params: params, configuration: configuration),
+               let data = try? JSONEncoder().encode(updated) {
+                providerUsage = updated
+                remoteDefaults.set(data, forKey: ProviderUsageLedger.defaultsKey)
+            }
+        }
+        if method == "account/rateLimits/updated" {
+            // Sparse notifications can still carry a balance decrease or an
+            // exhausted window. Confirm the remaining fields with a full read.
+            observeCreditUsage(AccountOverview.parse(params))
+            requestCreditUsageRefresh()
+            return
+        }
         if method == "skills/changed" {
             guard showingPersonalSkills || !personalSkills.isEmpty else { return }
             Task { await refreshPersonalSkills(forceReload: true) }
@@ -3775,6 +4236,7 @@ final class AppModel: ObservableObject {
             // badge unknown until this exact turn's persisted context is read.
             setLocalTurnRunning(eventThreadID, turnID: turn?["id"] as? String)
             setThreadRunning(eventThreadID, running: true)
+            if creditUsagePauseReason != nil { pauseConversationsForCreditProtection() }
         } else if method == "turn/completed" {
             cancelComputerControlTimeouts(threadID: eventThreadID)
             let turn = params["turn"] as? [String: Any]
@@ -4095,6 +4557,7 @@ final class AppModel: ObservableObject {
     }
 
     private func scheduleCapacityRetry(threadID: String, failedTurnID: String, message: String) {
+        guard creditUsagePauseReason == nil else { return }
         if capacityRetryStates[threadID]?.failedTurnID == failedTurnID,
            capacityRetryTasks[threadID] != nil,
            let state = capacityRetryStates[threadID] {
@@ -4153,6 +4616,7 @@ final class AppModel: ObservableObject {
     }
 
     private func performCapacityRetry(threadID: String, expectedAttempt: Int) async {
+        guard creditUsagePauseReason == nil else { return }
         guard let state = capacityRetryStates[threadID], state.attempt == expectedAttempt else { return }
         capacityRetryTasks.removeValue(forKey: threadID)
         updateCapacityRetryActivity(
