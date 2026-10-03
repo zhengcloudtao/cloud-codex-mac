@@ -1,5 +1,7 @@
 # CloudCodex 自定义远程控制接入指引
 
+字段级 API、状态机、小程序参考接口和持久化规则见 [API 文档](remote-control-api.md)；机器可读契约见 [OpenAPI 3.1](remote-control-openapi.yaml)。应用内「复制完整 AI 指引」会将接入要求与完整 API 契约合并复制，适合直接作为 AI 开发任务的输入。
+
 服务根地址：<填写你自己的 HTTPS 后端根地址>
 
 请为我开发一个微信小程序和配套后端，兼容 CloudCodex Mac 客户端的远程控制协议。

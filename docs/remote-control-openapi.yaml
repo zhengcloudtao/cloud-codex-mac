@@ -1,0 +1,371 @@
+openapi: 3.1.0
+info:
+  title: CloudCodex Remote Control Agent API
+  version: 1.1.0
+  description: Fixed protocol used by CloudCodex Mac. Mini-program user APIs are deployment-specific and are documented separately.
+servers:
+  - url: https://relay.example.invalid/prefix
+    description: Replace with the current deployment's HTTPS root, including any path prefix.
+security:
+  - DeviceID: []
+    DeviceToken: []
+paths:
+  /api/cloud-codex/agent/register:
+    post:
+      operationId: registerDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/heartbeat:
+    post:
+      operationId: heartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HeartbeatRequest' }
+      responses:
+        '200':
+          description: Snapshot accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HeartbeatEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/tasks/next:
+    get:
+      operationId: claimNextTask
+      responses:
+        '200':
+          description: Task or data null when the queue is empty
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/tasks/{taskId}/status:
+    post:
+      operationId: updateTaskStatus
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskStatusRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/StatusOK' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/unpair:
+    post:
+      operationId: unpairDevice
+      responses:
+        '200': { $ref: '#/components/responses/StatusOK' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/events:
+    post:
+      operationId: notifyAgentEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationEvent' }
+      responses:
+        '200': { $ref: '#/components/responses/StatusOK' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/history/next:
+    get:
+      operationId: claimHistoryRequest
+      responses:
+        '200':
+          description: History request or data null
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HistoryReadEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/history/{id}:
+    post:
+      operationId: finishHistoryRequest
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HistoryResponse' }
+      responses:
+        '200': { $ref: '#/components/responses/StatusOK' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/resets/next:
+    get:
+      operationId: claimResetRequest
+      responses:
+        '200':
+          description: Reset attempt or data null
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResetAttemptEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/cloud-codex/agent/resets/{id}:
+    post:
+      operationId: finishResetRequest
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/StatusOK' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+components:
+  securitySchemes:
+    DeviceID:
+      type: apiKey
+      in: header
+      name: X-CloudCodex-Device
+    DeviceToken:
+      type: apiKey
+      in: header
+      name: X-CloudCodex-Token
+  parameters:
+    TaskID:
+      name: taskId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    RequestID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+  responses:
+    StatusOK:
+      description: Idempotently accepted
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/StatusEnvelope' }
+    Unauthorized:
+      description: Invalid device identity or credential
+  schemas:
+    StatusEnvelope:
+      type: object
+      required: [status, msg]
+      properties:
+        status: { type: integer, const: 0 }
+        msg: { type: string }
+        data: { type: [object, 'null'] }
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [name, resetPairing]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        resetPairing: { type: boolean }
+    Registration:
+      type: object
+      required: [deviceId, name, paired, pairingCode, pairingExpiresAt, pollIntervalSeconds]
+      properties:
+        deviceId: { type: string }
+        name: { type: string }
+        paired: { type: boolean }
+        pairingCode: { type: string, pattern: '^[0-9]{0,8}$' }
+        pairingExpiresAt: { type: [string, 'null'], format: date-time }
+        pollIntervalSeconds: { type: integer, minimum: 1 }
+    RegisterEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StatusEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data: { $ref: '#/components/schemas/Registration' }
+    Workspace:
+      type: object
+      required: [path, name]
+      properties:
+        path: { type: string }
+        name: { type: string }
+    Thread:
+      type: object
+      required: [id, title, workspace, model, status]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        workspace: { type: string }
+        model: { type: string }
+        status: { type: string }
+        updatedAt: { type: number }
+    ModelOption:
+      type: object
+      required: [id, model, name, description, supportedEfforts, defaultEffort, supportsFast]
+      properties:
+        id: { type: string }
+        model: { type: string }
+        name: { type: string }
+        description: { type: string }
+        supportedEfforts: { type: array, items: { type: string } }
+        defaultEffort: { type: string }
+        supportsFast: { type: boolean }
+    HeartbeatRequest:
+      type: object
+      required: [name, permissionLabel, remoteControlReady, workspaces, threads]
+      properties:
+        name: { type: string }
+        permissionLabel: { type: string }
+        remoteControlReady: { type: boolean }
+        workspaces: { type: array, items: { $ref: '#/components/schemas/Workspace' } }
+        threads: { type: array, items: { $ref: '#/components/schemas/Thread' } }
+        models: { type: array, items: { $ref: '#/components/schemas/ModelOption' } }
+        defaultModel: { type: [string, 'null'] }
+        defaultEffort: { type: [string, 'null'] }
+        usage: { type: [object, 'null'], additionalProperties: true }
+        systemMetrics: { type: [object, 'null'], additionalProperties: true }
+        connectionHealth: { type: [object, 'null'], additionalProperties: true }
+    RecoveryTask:
+      type: object
+      required: [taskId, threadId, turnId, workspace]
+      properties:
+        taskId: { type: string }
+        threadId: { type: string }
+        turnId: { type: string }
+        workspace: { type: string }
+    HeartbeatResponse:
+      type: object
+      required: [paired]
+      properties:
+        paired: { type: boolean }
+        runningTasks: { type: array, items: { $ref: '#/components/schemas/RecoveryTask' } }
+        queueSummary:
+          type: object
+          properties:
+            queuedCount: { type: integer, minimum: 0 }
+            blockedCount: { type: integer, minimum: 0 }
+    HeartbeatEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StatusEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data: { $ref: '#/components/schemas/HeartbeatResponse' }
+    Task:
+      type: object
+      required: [taskId, deviceId, threadId, workspace, prompt, model, effort, status]
+      properties:
+        taskId: { type: string }
+        deviceId: { type: string }
+        threadId: { type: string }
+        workspace: { type: string }
+        prompt: { type: string, maxLength: 12000 }
+        model: { type: string }
+        effort: { type: string }
+        status: { type: string, const: running }
+        speed: { type: [string, 'null'], enum: ['', standard, fast, null] }
+        permissionMode: { type: [string, 'null'], enum: ['', ask, auto, full, null] }
+        imageUrls: { type: [array, 'null'], maxItems: 4, items: { type: string, format: uri } }
+    TaskEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StatusEnvelope'
+        - type: object
+          properties:
+            data: { oneOf: [{ $ref: '#/components/schemas/Task' }, { type: 'null' }] }
+    ProgressStep:
+      type: object
+      required: [id, kind, title, status, text]
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        title: { type: string }
+        status: { type: string }
+        text: { type: string }
+    TaskProgress:
+      type: object
+      required: [steps, truncated, revision]
+      properties:
+        steps: { type: array, items: { $ref: '#/components/schemas/ProgressStep' } }
+        truncated: { type: boolean }
+        revision: { type: integer, minimum: 0 }
+    TaskStatusRequest:
+      type: object
+      required: [status, threadId, turnId, result, error]
+      properties:
+        status: { type: string, enum: [queued, running, completed, failed] }
+        threadId: { type: string }
+        turnId: { type: string }
+        result: { type: string, maxLength: 60000 }
+        error: { type: string }
+        fileDiff: { type: [string, 'null'] }
+        progress: { oneOf: [{ $ref: '#/components/schemas/TaskProgress' }, { type: 'null' }] }
+        recovery: { type: [boolean, 'null'] }
+        waitReason: { type: [string, 'null'] }
+        actualModel: { type: [string, 'null'] }
+        actualEffort: { type: [string, 'null'] }
+    NotificationEvent:
+      type: object
+      required: [type, eventId]
+      properties:
+        type: { type: string, enum: [conversation_completed, quota_restored] }
+        eventId: { type: string, minLength: 1 }
+        threadId: { type: [string, 'null'] }
+        turnId: { type: [string, 'null'] }
+    HistoryRead:
+      type: object
+      required: [id, threadId, workspace, cursor]
+      properties:
+        id: { type: string }
+        threadId: { type: string }
+        workspace: { type: string }
+        cursor: { type: string }
+    HistoryReadEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StatusEnvelope'
+        - type: object
+          properties:
+            data: { oneOf: [{ $ref: '#/components/schemas/HistoryRead' }, { type: 'null' }] }
+    HistoryMessage:
+      type: object
+      required: [id, role, text, title, model, effort, attachments]
+      properties:
+        id: { type: string }
+        role: { type: string }
+        text: { type: string }
+        title: { type: string }
+        model: { type: string }
+        effort: { type: string }
+        attachments: { type: array, items: { type: string } }
+        timestamp: { type: [number, 'null'] }
+    HistoryPage:
+      type: object
+      required: [messages, nextCursor]
+      properties:
+        messages: { type: array, items: { $ref: '#/components/schemas/HistoryMessage' } }
+        nextCursor: { type: [string, 'null'] }
+    HistoryResponse:
+      type: object
+      required: [error]
+      properties:
+        page: { oneOf: [{ $ref: '#/components/schemas/HistoryPage' }, { type: 'null' }] }
+        error: { type: string }
+    ResetAttempt:
+      type: object
+      required: [id, creditRef]
+      properties:
+        id: { type: string }
+        creditRef: { type: string }
+    ResetAttemptEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StatusEnvelope'
+        - type: object
+          properties:
+            data: { oneOf: [{ $ref: '#/components/schemas/ResetAttempt' }, { type: 'null' }] }

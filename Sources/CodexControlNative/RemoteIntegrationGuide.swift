@@ -9,7 +9,10 @@ enum RemoteIntegrationGuide {
             // even if its URL was entered manually in custom mode.
             if !RemoteServerConfiguration.scope(for: url).isEmpty { address = url.absoluteString }
         }
-        return "# CloudCodex 自定义远程控制接入指引\n\n服务根地址：\(address)\n\n" + instructions
+        return "# CloudCodex 自定义远程控制接入指引\n\n服务根地址：\(address)\n\n"
+            + instructions
+            + "\n\n---\n\n"
+            + RemoteAPIDocumentation.specification
     }
 
     // This is also the copyable AI brief. Only a custom relay URL is inserted;

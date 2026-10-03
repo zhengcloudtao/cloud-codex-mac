@@ -6,8 +6,9 @@ struct RemoteServerSettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var draft = RemoteServerConfiguration()
     @State private var guide: String?
+    @State private var apiDocument: String?
     @State private var feedback: String?
-    @State private var showingGuide = false
+    @State private var presentedDocument: PresentedRemoteDocument?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -38,14 +39,18 @@ struct RemoteServerSettingsView: View {
                 Spacer()
                 Button("查看接入说明") {
                     prepareGuide()
-                    showingGuide = guide != nil
+                    if guide != nil { presentedDocument = .integration }
                 }
-                Button("复制给 AI 的指引") {
+                Button("查看 API 文档") {
+                    prepareAPIDocument()
+                    if apiDocument != nil { presentedDocument = .api }
+                }
+                Button("复制完整 AI 指引") {
                     prepareGuide()
                     if let guide {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(guide, forType: .string)
-                        feedback = "已复制自建接入指引；未配置自建地址时使用占位符"
+                        feedback = "已复制完整指引（含 API、状态机、数据表和验收清单）"
                     }
                 }
             }
@@ -57,8 +62,25 @@ struct RemoteServerSettingsView: View {
         .padding(16)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
         .onAppear { draft = model.remoteServerConfiguration }
-        .sheet(isPresented: $showingGuide) {
-            if let guide { RemoteIntegrationGuideSheet(document: guide) }
+        .sheet(item: $presentedDocument) { document in
+            switch document {
+            case .integration:
+                if let guide {
+                    RemoteDocumentationSheet(
+                        title: "自定义远程控制接入说明",
+                        document: guide,
+                        suggestedFilename: "CloudCodex-远程控制完整接入说明.md"
+                    )
+                }
+            case .api:
+                if let apiDocument {
+                    RemoteDocumentationSheet(
+                        title: "CloudCodex 远程控制 API 文档",
+                        document: apiDocument,
+                        suggestedFilename: "CloudCodex-远程控制-API.md"
+                    )
+                }
+            }
         }
     }
 
@@ -71,22 +93,39 @@ struct RemoteServerSettingsView: View {
             feedback = "请先保存有效服务地址，再生成接入指引。"
         }
     }
+
+    private func prepareAPIDocument() {
+        do {
+            apiDocument = try RemoteAPIDocumentation.document(configuration: model.remoteServerConfiguration)
+            feedback = nil
+        } catch {
+            apiDocument = nil
+            feedback = "请先保存有效服务地址，再生成 API 文档。"
+        }
+    }
 }
 
-private struct RemoteIntegrationGuideSheet: View {
+private enum PresentedRemoteDocument: String, Identifiable {
+    case integration, api
+    var id: String { rawValue }
+}
+
+private struct RemoteDocumentationSheet: View {
+    let title: String
     let document: String
+    let suggestedFilename: String
     @Environment(\.dismiss) private var dismiss
     @State private var feedback: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("自定义远程控制接入说明").font(.headline)
+                Text(title).font(.headline)
                 Spacer()
                 Button("复制全文") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(document, forType: .string)
-                    feedback = "已复制，可直接交给 AI 开发配套小程序和后端"
+                    feedback = "已复制全文"
                 }
                 Button("保存说明…") { saveDocument() }
                 Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
@@ -103,7 +142,7 @@ private struct RemoteIntegrationGuideSheet: View {
     private func saveDocument() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        panel.nameFieldStringValue = "CloudCodex-远程控制接入说明.md"
+        panel.nameFieldStringValue = suggestedFilename
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try document.write(to: url, atomically: true, encoding: .utf8)

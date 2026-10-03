@@ -97,7 +97,24 @@ final class RemoteServerConfigurationTests: XCTestCase {
         }
         XCTAssertTrue(guide.contains("data=null"))
         XCTAssertTrue(guide.contains("cloudcodex://pair?v=1&code=12345678"))
+        XCTAssertTrue(guide.contains("Mini API 是参考契约"))
+        XCTAssertTrue(guide.contains("推荐数据库最小结构"))
+        XCTAssertTrue(guide.contains("服务号通知验收"))
+        XCTAssertTrue(guide.contains("任务状态机与并发规则"))
         XCTAssertThrowsError(try RemoteIntegrationGuide.document(configuration: .init(mode: .custom)))
+    }
+
+    func testAPIDocumentIsSelfContainedAndUsesOnlyCurrentCustomAddress() throws {
+        let config = RemoteServerConfiguration(mode: .custom, customAddress: "https://relay.example.invalid/prefix")
+        let document = try RemoteAPIDocumentation.document(configuration: config)
+        XCTAssertTrue(document.contains("服务根地址：https://relay.example.invalid/prefix"))
+        XCTAssertFalse(document.contains(RemoteControlAPI.defaultBaseURL.absoluteString))
+        for path in ["register", "heartbeat", "tasks/next", "tasks/{taskId}/status", "unpair", "events"] {
+            XCTAssertTrue(document.contains("/api/cloud-codex/agent/" + path), path)
+        }
+        for section in ["Mini API 是参考契约", "任务状态机与并发规则", "推荐数据库最小结构", "小程序页面与必须状态", "服务号通知验收", "最低自动化与端到端验收"] {
+            XCTAssertTrue(document.contains(section), section)
+        }
     }
 
     func testSelfHostedGuideNeverIncludesBuiltInRelayDomain() throws {
@@ -113,6 +130,11 @@ final class RemoteServerConfigurationTests: XCTestCase {
             XCTAssertTrue(document.contains("服务根地址：<填写你自己的 HTTPS 后端根地址>"))
             XCTAssertFalse(document.lowercased().contains(builtInHost))
             XCTAssertFalse(document.contains("ignored.example.invalid"))
+
+            let apiDocument = try RemoteAPIDocumentation.document(configuration: configuration)
+            XCTAssertTrue(apiDocument.contains("服务根地址：<填写你自己的 HTTPS 后端根地址>"))
+            XCTAssertFalse(apiDocument.lowercased().contains(builtInHost))
+            XCTAssertFalse(apiDocument.contains("ignored.example.invalid"))
         }
     }
 
