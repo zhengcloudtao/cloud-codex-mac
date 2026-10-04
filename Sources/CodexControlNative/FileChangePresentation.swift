@@ -19,13 +19,18 @@ struct ConversationFileChange: Identifiable, Hashable {
     let kind: Kind
 
     var id: String { path }
-    var addedLines: Int { Self.lineCounts(in: diff).added }
-    var deletedLines: Int { Self.lineCounts(in: diff).deleted }
+    // Diff text is immutable. Scan it once when receiving the change, rather
+    // than once per counter per row on every conversation/status refresh.
+    let addedLines: Int
+    let deletedLines: Int
 
     init(path: String, diff: String, kind: Kind) {
         self.path = path
         self.diff = diff
         self.kind = kind
+        let counts = Self.lineCounts(in: diff)
+        self.addedLines = counts.added
+        self.deletedLines = counts.deleted
     }
 
     init?(json: [String: Any]) {
@@ -91,8 +96,8 @@ struct ConversationFileChangeGroup: Identifiable, Hashable {
     let changes: [ConversationFileChange]
 
     var id: String { "file-changes:\(turnID)" }
-    var addedLines: Int { changes.reduce(0) { $0 + $1.addedLines } }
-    var deletedLines: Int { changes.reduce(0) { $0 + $1.deletedLines } }
+    let addedLines: Int
+    let deletedLines: Int
     var combinedDiff: String {
         changes.map { change in
             "# \(change.kind.label) \(change.path)\n\(change.diff)"
@@ -116,6 +121,8 @@ struct ConversationFileChangeGroup: Identifiable, Hashable {
             }
         }
         self.changes = order.compactMap { merged[$0] }
+        self.addedLines = self.changes.reduce(0) { $0 + $1.addedLines }
+        self.deletedLines = self.changes.reduce(0) { $0 + $1.deletedLines }
     }
 }
 

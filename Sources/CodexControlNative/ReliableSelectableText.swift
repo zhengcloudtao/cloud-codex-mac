@@ -25,7 +25,9 @@ struct ReliableSelectableText: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
         textView.isHorizontallyResizable = false
-        textView.isVerticallyResizable = true
+        // SwiftUI owns the allocated frame. AppKit must not retain or grow
+        // a height from an earlier, narrower layout proposal.
+        textView.isVerticallyResizable = false
         textView.font = .preferredFont(forTextStyle: .body)
         textView.textColor = .labelColor
         textView.insertionPointColor = .controlAccentColor
@@ -37,11 +39,16 @@ struct ReliableSelectableText: NSViewRepresentable {
     func updateNSView(_ textView: NSTextView, context: Context) {
         // Reassigning the string clears an in-progress selection. Conversation
         // polling redraws this view frequently, so only update on real changes.
-        if textView.string != text {
+        let font = NSFont.preferredFont(forTextStyle: .body)
+        if let nativeText = textView as? ReliableSelectableNSTextView {
+            nativeText.setAttributedStringIfNeeded(NSAttributedString(
+                string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor]
+            ))
+        } else if textView.string != text {
             textView.string = text
         }
-        textView.font = .preferredFont(forTextStyle: .body)
-        textView.textColor = .labelColor
+        if textView.font != font { textView.font = font }
+        if textView.textColor != .labelColor { textView.textColor = .labelColor }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView textView: NSTextView, context: Context) -> CGSize? {
@@ -54,12 +61,12 @@ struct ReliableSelectableText: NSViewRepresentable {
             maximumWidth: maximumWidth
         )
 
-        textView.frame.size.width = width
-        textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
-        if let layoutManager = textView.layoutManager, let textContainer = textView.textContainer {
-            layoutManager.ensureLayout(for: textContainer)
-            let height = ceil(layoutManager.usedRect(for: textContainer).height)
-            return CGSize(width: width, height: max(height, ceil(font.ascender - font.descender + font.leading)))
+        if let nativeText = textView as? ReliableSelectableNSTextView {
+            nativeText.setAttributedStringIfNeeded(NSAttributedString(
+                string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor]
+            ))
+            let size = nativeText.measuredAttributedSize(width: width)
+            return CGSize(width: width, height: max(size.height, ceil(font.ascender - font.descender + font.leading)))
         }
         return CGSize(width: width, height: ceil(font.ascender - font.descender + font.leading))
     }
@@ -121,6 +128,9 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
 
     let text: NSAttributedString
     var maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
+    // History rows already know their final content width. Treat it as data
+    // rather than relying on intermediate SwiftUI sizing proposals.
+    var layoutWidth: CGFloat? = nil
     @Environment(\.openURL) private var openURL
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -164,7 +174,9 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
         textView.isHorizontallyResizable = false
-        textView.isVerticallyResizable = true
+        // SwiftUI owns the allocated frame. AppKit must not retain or grow
+        // a height from an earlier, narrower layout proposal.
+        textView.isVerticallyResizable = false
         textView.linkTextAttributes = [
             .foregroundColor: NSColor.linkColor,
             .underlineStyle: NSUnderlineStyle.single.rawValue
@@ -184,24 +196,20 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
         let attributedText = text
         textView.setAttributedStringIfNeeded(attributedText)
 
-        let naturalWidth = ceil(attributedText.boundingRect(
-            with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        ).width) + 1
-        let width = ReliableSelectableText.resolvedMaximumWidth(
-            proposedWidth: proposal.width,
-            naturalWidth: naturalWidth,
-            maximumWidth: maximumWidth
-        )
+        // A useful viewport proposal already determines the width. Measuring
+        // an entire reply at infinite width on every sizing pass is expensive
+        // and its result is discarded by resolvedMaximumWidth in this case.
+        let naturalWidth = layoutWidth != nil || (proposal.width ?? 0) >= 80
+            ? 0
+            : textView.naturalAttributedWidth()
+        let width = layoutWidth.map { min(maximumWidth, max(80, $0)) }
+            ?? ReliableSelectableText.resolvedMaximumWidth(
+                proposedWidth: proposal.width,
+                naturalWidth: naturalWidth,
+                maximumWidth: maximumWidth
+            )
 
-        textView.frame.size.width = width
-        textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
-        if let layoutManager = textView.layoutManager, let textContainer = textView.textContainer {
-            layoutManager.ensureLayout(for: textContainer)
-            let height = ceil(layoutManager.usedRect(for: textContainer).height)
-            return CGSize(width: width, height: max(1, height))
-        }
-        return CGSize(width: width, height: 1)
+        return textView.measuredAttributedSize(width: width)
     }
 }
 
@@ -212,7 +220,62 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
 /// at mouse-down and handling both copy entry points makes the visible
 /// selection authoritative.
 final class ReliableSelectableNSTextView: NSTextView {
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = abs(newSize.width - frame.width) > 0.5
+        super.setFrameSize(newSize)
+        // The final AppKit width may differ from SwiftUI's earlier sizing
+        // proposal. Re-publish the height for that allocated width, including
+        // when the Markdown input stayed equal during a column resize.
+        if widthChanged { invalidateIntrinsicContentSize() }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        guard bounds.width >= 80, renderedInput != nil else { return super.intrinsicContentSize }
+        return NSSize(width: NSView.noIntrinsicMetric,
+                      height: measuredAttributedSize(width: bounds.width).height)
+    }
+
     var copyPasteboard: NSPasteboard = .general
+    private var renderedInput: NSAttributedString?
+    private var cachedNaturalWidth: CGFloat?
+    private var cachedLayoutSizes: [CGFloat: CGSize] = [:]
+    private let measurementStorage = NSTextStorage()
+    private let measurementLayoutManager = NSLayoutManager()
+    private let measurementContainer = NSTextContainer(size: .zero)
+    private(set) var attributedLayoutMeasurementCount = 0
+
+    func naturalAttributedWidth() -> CGFloat {
+        if let cachedNaturalWidth { return cachedNaturalWidth }
+        let width = ceil((renderedInput ?? attributedString()).boundingRect(
+            with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).width) + 1
+        cachedNaturalWidth = width
+        return width
+    }
+
+    func measuredAttributedSize(width: CGFloat) -> CGSize {
+        if let size = cachedLayoutSizes[width] {
+            return size
+        }
+        // SwiftUI asks about several hypothetical widths during one layout.
+        // Resizing the displayed NSTextView here invalidates that same layout
+        // and changes its selection surface. Measure in a separate TextKit
+        // container; the displayed view only follows its final allocated frame.
+        if measurementLayoutManager.textContainers.isEmpty {
+            measurementContainer.lineFragmentPadding = 0
+            measurementLayoutManager.addTextContainer(measurementContainer)
+            measurementStorage.addLayoutManager(measurementLayoutManager)
+        }
+        measurementContainer.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        attributedLayoutMeasurementCount += 1
+        measurementLayoutManager.ensureLayout(for: measurementContainer)
+        let height = max(1, ceil(measurementLayoutManager.usedRect(for: measurementContainer).height))
+        let size = CGSize(width: width, height: height)
+        if cachedLayoutSizes.count >= 8 { cachedLayoutSizes.removeAll(keepingCapacity: true) }
+        cachedLayoutSizes[width] = size
+        return size
+    }
 
     override func mouseDown(with event: NSEvent) {
         _ = window?.makeFirstResponder(self)
@@ -240,7 +303,14 @@ final class ReliableSelectableNSTextView: NSTextView {
     /// mutate it when the rendered Markdown really changed; polling and other
     /// conversation updates can otherwise erase a selection mid-drag.
     func setAttributedStringIfNeeded(_ value: NSAttributedString) {
-        guard !textStorage!.isEqual(to: value) else { return }
+        // AppKit normalizes textStorage attributes while laying out text.
+        // Compare the last input, rather than that normalized mutable storage,
+        // so an unchanged reply cannot keep resetting its native text surface.
+        guard renderedInput?.isEqual(to: value) != true else { return }
+        renderedInput = value.copy() as? NSAttributedString
+        cachedNaturalWidth = nil
+        cachedLayoutSizes.removeAll(keepingCapacity: true)
+        measurementStorage.setAttributedString(value)
         textStorage?.setAttributedString(value)
     }
 

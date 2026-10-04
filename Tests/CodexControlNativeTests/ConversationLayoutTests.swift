@@ -7,6 +7,150 @@ import XCTest
 /// fitting size. The fixtures never call start/selectThread or contact Codex.
 @MainActor
 final class ConversationLayoutTests: XCTestCase {
+    func testReplyHeightRemainsTightDuringLiveColumnResize() throws {
+        let suite = "CloudCodex.TextTailTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(remoteDefaults: defaults)
+        let thread = try makeThread(id: "text-height", name: "文本布局验证", preview: "本地测试")
+        model.threads = [thread]
+        model.selectedThreadID = thread.id
+        let generated = (0..<30).map { "- 第 \($0) 项验证已通过，\(String(repeating: "宽度变化后文字高度应该准确。", count: 4))" }.joined(separator: "\n")
+        let markdown = try ProcessInfo.processInfo.environment["CLOUDCODEX_TEXT_LAYOUT_FIXTURE"]
+            .map { try String(contentsOfFile: $0, encoding: .utf8) } ?? generated
+        model.messages = [.init(id: "long-answer", role: .assistant, text: markdown)]
+        let host = NSHostingView(rootView: ContentView().environmentObject(model))
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 1220, height: 780),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        for width: CGFloat in [1220, 1550, 2100, 1220] {
+            window.setContentSize(CGSize(width: width, height: 780))
+            host.frame = try XCTUnwrap(window.contentView).bounds
+            settleLayout(host)
+            let scroll = try timelineScrollView(in: host)
+            let text = try XCTUnwrap(descendants(of: try XCTUnwrap(scroll.documentView))
+                .compactMap { $0 as? ReliableSelectableNSTextView }.first)
+            let manager = try XCTUnwrap(text.layoutManager)
+            let container = try XCTUnwrap(text.textContainer)
+            manager.ensureLayout(for: container)
+            let used = ceil(manager.usedRect(for: container).height)
+            let fresh = ReliableSelectableNSTextView()
+            fresh.setAttributedStringIfNeeded(MarkdownTextDocument.appKitAttributed(from: MarkdownBlockParser.parse(markdown)))
+            let expected = fresh.measuredAttributedSize(width: text.bounds.width).height
+            XCTAssertEqual(try XCTUnwrap(text.superview).bounds.height, expected, accuracy: 2)
+            XCTAssertEqual(text.bounds.height, expected, accuracy: 2)
+            XCTAssertEqual(used, expected, accuracy: 2)
+        }
+    }
+
+    func testNativeHistoryPrependKeepsReadingPositionAndScrollReusesTextLayout() throws {
+        let suite = "CloudCodex.ScrollPerformanceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(remoteDefaults: defaults)
+        let thread = try makeThread(id: "scroll-performance", name: "滚动性能测试", preview: "本地测试")
+        model.threads = [thread]
+        model.selectedThreadID = thread.id
+        let historyFixture = try ProcessInfo.processInfo.environment["CLOUDCODEX_TEXT_LAYOUT_FIXTURE"]
+            .map { try String(contentsOfFile: $0, encoding: .utf8) }
+        model.messages = (0..<40).map { index in
+            .init(id: "reply-\(index)", role: .assistant,
+                  text: "第 \(index) 段\n\n" + (historyFixture ?? String(repeating: "长回复上滑时保留阅读位置，并复用文本排版。\n", count: 12)))
+        }
+        let size = CGSize(width: 1220, height: 780)
+        let host = NSHostingView(rootView: ContentView().environmentObject(model))
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: size.width, height: size.height),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        host.frame = CGRect(origin: .zero, size: size)
+        defer { window.contentView = nil; window.close() }
+        settleLayout(host)
+        let scroll = try timelineScrollView(in: host)
+        let document = try XCTUnwrap(scroll.documentView)
+        let clip = scroll.contentView
+        let trigger = try XCTUnwrap(descendants(of: document).compactMap { $0 as? MessageHistoryProbeView }
+            .first { $0.role == .trigger })
+        let controller = try XCTUnwrap(trigger.controller)
+        let originalFrame = try XCTUnwrap(controller.viewportFrame(of: trigger))
+        let delta = 40 - originalFrame.minY
+        let origin = clip.bounds.origin
+        clip.scroll(to: CGPoint(x: origin.x, y: origin.y + (clip.isFlipped ? -delta : delta)))
+        scroll.reflectScrolledClipView(clip)
+        let anchorText = try XCTUnwrap(descendants(of: document).compactMap { $0 as? ReliableSelectableNSTextView }
+            .first { $0.string.hasPrefix("第 28 段") })
+        let before = try XCTUnwrap(controller.viewportFrame(of: anchorText)).minY
+        settleLayout(host)
+        XCTAssertEqual(controller.timeline.rebuildCount, 1)
+        XCTAssertNotNil(descendants(of: document).compactMap { $0 as? ReliableSelectableNSTextView }
+            .first { $0.string.hasPrefix("第 16 段") }, "Reaching the native preload band must add older history")
+        let after = try XCTUnwrap(controller.viewportFrame(of: anchorText)).minY
+        XCTAssertEqual(after, before, accuracy: 2, "Loading older messages must keep the old reply in place")
+
+        let textViews = descendants(of: document).compactMap { $0 as? ReliableSelectableNSTextView }
+        for text in textViews {
+            let manager = try XCTUnwrap(text.layoutManager)
+            let container = try XCTUnwrap(text.textContainer)
+            manager.ensureLayout(for: container)
+            XCTAssertEqual(text.bounds.height, ceil(manager.usedRect(for: container).height), accuracy: 2)
+        }
+        let initialMeasurements = textViews.map(\.attributedLayoutMeasurementCount)
+        let initialBuilds = controller.timeline.rebuildCount
+        let started = Date()
+        for step in 0..<120 {
+            let y = clip.bounds.origin.y + (step.isMultiple(of: 2) ? 2 : -2)
+            clip.scroll(to: CGPoint(x: clip.bounds.origin.x, y: y))
+            scroll.reflectScrolledClipView(clip)
+            host.layoutSubtreeIfNeeded()
+        }
+        print("Native conversation: 120 scroll steps in \(Date().timeIntervalSince(started) * 1000) ms")
+        XCTAssertEqual(textViews.map(\.attributedLayoutMeasurementCount), initialMeasurements,
+                       "Scrolling unchanged replies must not measure their text again")
+        XCTAssertEqual(controller.timeline.rebuildCount, initialBuilds)
+
+        anchorText.setSelectedRange(NSRange(location: 0, length: 3))
+        let positionBeforePolling = try XCTUnwrap(controller.viewportFrame(of: anchorText)).minY
+        for index in 0..<20 {
+            model.composerText = "无关的输入状态刷新 \(index)"
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertEqual(textViews.map(\.attributedLayoutMeasurementCount), initialMeasurements)
+        XCTAssertEqual(anchorText.selectedRange(), NSRange(location: 0, length: 3))
+        XCTAssertEqual(try XCTUnwrap(controller.viewportFrame(of: anchorText)).minY,
+                       positionBeforePolling, accuracy: 2)
+        XCTAssertEqual(controller.timeline.rebuildCount, initialBuilds)
+
+        let readingOffset = try XCTUnwrap(controller.viewportFrame(of: anchorText)).minY
+        model.messages[model.messages.count - 1].text += String(repeating: "\n后台生成的新内容", count: 12)
+        settleLayout(host)
+        XCTAssertEqual(try XCTUnwrap(controller.viewportFrame(of: anchorText)).minY,
+                       readingOffset, accuracy: 2,
+                       "An update below the viewport must not pull the reader away from older content")
+        XCTAssertEqual(controller.timeline.rebuildCount, initialBuilds + 1)
+
+        // These rows were absent initially and were created by history preload.
+        // Their width must participate in the Markdown input snapshot, even
+        // though their stored text and IDs stay unchanged across a resize.
+        for width: CGFloat in [1550, 1220] {
+            window.setContentSize(CGSize(width: width, height: 780))
+            host.frame = try XCTUnwrap(window.contentView).bounds
+            settleLayout(host)
+            let older = try XCTUnwrap(descendants(of: document).compactMap { $0 as? ReliableSelectableNSTextView }
+                .first { $0.string.hasPrefix("第 16 段") })
+            let fresh = ReliableSelectableNSTextView()
+            fresh.setAttributedStringIfNeeded(older.attributedString())
+            let expected = fresh.measuredAttributedSize(width: older.bounds.width).height
+            XCTAssertEqual(older.bounds.height, expected, accuracy: 2,
+                           "A newly loaded old reply must shrink to its final content width")
+            XCTAssertEqual(try XCTUnwrap(older.superview).bounds.height, expected, accuracy: 2)
+            XCTAssertEqual(anchorText.selectedRange(), NSRange(location: 0, length: 3))
+        }
+
+    }
+
     func testResizableColumnWidthsStayWithinUsableBounds() {
         XCTAssertEqual(
             MainColumnLayout.clamped(100, to: MainColumnLayout.workspaceRange),

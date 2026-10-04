@@ -356,7 +356,6 @@ struct ContentView: View {
     @ObservedObject private var updateController: CloudCodexUpdateController
     @Environment(\.openWindow) private var openWindow
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    @State private var threadListScrollID: String?
     @State private var filePreview: LocalFilePreviewTarget?
     @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
@@ -1069,51 +1068,23 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.top, 12)
 
-            // NSTableView (used by SwiftUI List) scrolls selected rows into
-            // view and can also reset its position while a row is refreshed.
-            // This is a plain, identity-stable ScrollView instead: opening a
-            // conversation only changes its highlight and the detail pane, so
-            // the place the user is browsing in the recent list stays put.
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(displayedThreads) { thread in
-                        HStack(spacing: 0) {
-                            Button {
-                                model.selectThread(thread.id)
-                            } label: {
-                                ThreadRow(thread: thread, isSelected: model.selectedThreadID == thread.id,
-                                          outcome: model.conversationOutcome(for: thread),
-                                          showPreview: showConversationPreview,
-                                          hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id),
-                                          needsUserInput: model.userInputRequests.contains { $0.threadID == thread.id })
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(thread.displayName)
-                            .accessibilityValue(model.selectedThreadID == thread.id ? "当前会话" : "")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .background(
-                            model.selectedThreadID == thread.id ? Color.accentColor : .clear,
-                            in: RoundedRectangle(cornerRadius: 10)
-                        )
-                        .contextMenu {
-                            Button {
-                                model.beginRenamingThread(thread)
-                            } label: {
-                                Label("编辑会话名称", systemImage: "pencil")
-                            }
-                            Divider()
-                            Button(model.isFavoriteConversation(thread.id) ? "取消收藏" : "收藏会话") {
-                                model.toggleFavoriteConversation(thread)
-                            }
-                        }
-                    }
-                }
-                .scrollTargetLayout()
-            }
-            .contentMargins(.horizontal, 8, for: .scrollContent)
-            .contentMargins(.vertical, 3, for: .scrollContent)
-            .scrollPosition(id: $threadListScrollID)
+            RecentConversationList(
+                rows: displayedThreads.map { thread in
+                    RecentConversationRow(
+                        thread: thread,
+                        isSelected: model.selectedThreadID == thread.id,
+                        outcome: model.conversationOutcome(for: thread),
+                        showPreview: showConversationPreview,
+                        hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id),
+                        needsUserInput: model.userInputRequests.contains { $0.threadID == thread.id },
+                        isFavorite: model.isFavoriteConversation(thread.id)
+                    )
+                },
+                onSelect: model.selectThread,
+                onRename: model.beginRenamingThread,
+                onToggleFavorite: model.toggleFavoriteConversation
+            )
+            .equatable()
             .searchable(text: $model.searchText, prompt: "搜索会话")
             .overlay {
                 if model.isLoading && model.selectedThreadID == nil {
@@ -1163,6 +1134,7 @@ struct ContentView: View {
                         isLoading: model.isConversationLoading,
                         isThinking: model.isSelectedThreadProcessing
                     )
+                    .equatable()
                     // Use the exact width proposed by BrowserConversationLayout.
                     // A flexible frame can leave the AppKit-backed timeline at
                     // its old 600-point ideal width and create an empty column
@@ -2146,13 +2118,14 @@ private struct NewThreadWorkspace: View {
     }
 }
 
-struct ThreadRow: View {
+struct ThreadRow: View, Equatable {
     let thread: CodexThread
     var isSelected = false
     var outcome: ConversationOutcome? = nil
     var showPreview = true
     var hasUnreadCompletion = false
     var needsUserInput = false
+    var relativeTimeBucket: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2224,7 +2197,8 @@ struct ThreadRow: View {
     /// and relayout the whole list, so render a snapshot instead. The regular
     /// status refresh and manual refresh keep this label sufficiently current.
     private var relativeTimeLabel: String {
-        let elapsed = max(0, Int(Date().timeIntervalSince(thread.updatedAt)))
+        let now = relativeTimeBucket.map { Date(timeIntervalSince1970: Double($0) * 60) } ?? Date()
+        let elapsed = max(0, Int(now.timeIntervalSince(thread.updatedAt)))
         switch elapsed {
         case ..<60:
             return "刚刚"
@@ -2305,7 +2279,7 @@ private struct ConversationHeader: View {
     }
 }
 
-private struct MessageList: View {
+private struct MessageList: View, Equatable {
     let viewportWidth: CGFloat
     let messages: [ChatMessage]
     let collaborationTasks: [CollaborationChildTask]
@@ -2319,15 +2293,23 @@ private struct MessageList: View {
     @State private var viewportResetID = UUID()
     @StateObject private var scrollViewportController = MessageScrollViewportController()
     @State private var hasPositionedInitialHistory = false
-    @State private var historyLoadTriggerWasVisible = false
 
     private let messageBatchSize = 12
     private let timelinePadding: CGFloat = 22
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.viewportWidth == rhs.viewportWidth
+            && lhs.messages == rhs.messages
+            && lhs.collaborationTasks == rhs.collaborationTasks
+            && lhs.isLoading == rhs.isLoading
+            && lhs.isThinking == rhs.isThinking
+    }
+
     var body: some View {
-        let entries = ConversationTimeline.entries(from: messages)
+        let entries = scrollViewportController.timeline.entries(from: messages)
         let latestChildTasks = collaborationTasks
         let hiddenEntryCount = max(0, entries.count - visibleMessageLimit)
+        let prependAnchor = prependAnchorID(in: entries)
         let currentProcessID: String? = {
             guard isThinking, case .process(let group) = entries.last else { return nil }
             return group.id
@@ -2351,14 +2333,7 @@ private struct MessageList: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 7)
                             .background(.quaternary.opacity(0.45), in: Capsule())
-                            .background {
-                                GeometryReader { geometry in
-                                    Color.clear.preference(
-                                        key: HistoryAutoLoadTriggerFramePreferenceKey.self,
-                                        value: geometry.frame(in: .named("message-scroll-viewport"))
-                                    )
-                                }
-                            }
+                            .background(MessageHistoryProbe(controller: scrollViewportController, role: .trigger))
                             .accessibilityLabel("自动加载更早的 \(min(messageBatchSize, hiddenEntryCount)) 段内容")
 
                             Text("已折叠更早的 \(hiddenEntryCount) 段对话，上滑到顶部会自动加载")
@@ -2378,14 +2353,15 @@ private struct MessageList: View {
                                                 - timelinePadding * 2
                                         )
                                     )
-                                        .background(messageEntryOffsetReader(id: entry.id))
+                                        .equatable()
+                                        .background(messageEntryOffsetReader(id: entry.id, isAnchor: entry.id == prependAnchor))
                                 case .process(let group):
                                     ConversationProcessView(group: group, isCurrent: group.id == currentProcessID)
                                         .equatable()
-                                        .background(messageEntryOffsetReader(id: entry.id))
+                                        .background(messageEntryOffsetReader(id: entry.id, isAnchor: entry.id == prependAnchor))
                                 case .fileChanges(let group):
                                     FileChangeSummaryCard(group: group)
-                                        .background(messageEntryOffsetReader(id: entry.id))
+                                        .background(messageEntryOffsetReader(id: entry.id, isAnchor: entry.id == prependAnchor))
                                 }
                             }
                             // A vertical ScrollView must not derive its document
@@ -2428,8 +2404,7 @@ private struct MessageList: View {
                         // shifts a wide timeline to the right in the third
                         // column and clips its trailing controls. This scroll
                         // view is vertical-only, so pin the unused axis left.
-                        .defaultScrollAnchor(.bottomLeading)
-                        .coordinateSpace(name: "message-scroll-viewport")
+                        .defaultScrollAnchor(isAtLatest ? .bottomLeading : .topLeading)
                         .id(viewportResetID)
                         .onChange(of: visibleMessageLimit) { _, _ in
                             guard let (id, alignment) = scrollViewportController.pendingAnchor else { return }
@@ -2440,19 +2415,7 @@ private struct MessageList: View {
                                 proxy.scrollTo(id, anchor: alignment)
                             }
                         }
-                    .onPreferenceChange(MessageEntryViewportOffsetPreferenceKey.self) { offsets in
-                        // Geometry is a measurement cache, not display state.
-                        // Publishing every lazy-layout offset back into SwiftUI
-                        // invalidates the list while it is still placing its rows.
-                        scrollViewportController.entryViewportOffsets = offsets
-                    }
-                    .onPreferenceChange(HistoryAutoLoadTriggerFramePreferenceKey.self) { frame in
-                        let triggerIsVisible = HistoryAutoLoad.triggerIsVisible(frame)
-                        guard triggerIsVisible != historyLoadTriggerWasVisible else { return }
-                        historyLoadTriggerWasVisible = triggerIsVisible
-                        guard triggerIsVisible else { return }
-                        loadEarlierMessages(in: entries)
-                    }
+
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
 
@@ -2532,7 +2495,8 @@ private struct MessageList: View {
     private var scrollLatestObserver: ScrollLatestObserver {
         ScrollLatestObserver(
             isAtLatest: $isAtLatest,
-            viewportController: scrollViewportController
+            viewportController: scrollViewportController,
+            onHistoryRequested: { loadEarlierMessages(in: scrollViewportController.timeline.entries(from: messages)) }
         )
     }
 
@@ -2555,12 +2519,10 @@ private struct MessageList: View {
         }
     }
 
-    private func messageEntryOffsetReader(id: String) -> some View {
-        GeometryReader { geometry in
-            Color.clear.preference(
-                key: MessageEntryViewportOffsetPreferenceKey.self,
-                value: [id: geometry.frame(in: .named("message-scroll-viewport"))]
-            )
+    @ViewBuilder
+    private func messageEntryOffsetReader(id: String, isAnchor: Bool) -> some View {
+        if isAnchor {
+            MessageHistoryProbe(controller: scrollViewportController, role: .anchor(id))
         }
     }
 
@@ -2689,13 +2651,6 @@ private struct ConversationLoadingView: View {
     }
 }
 
-private struct MessageEntryViewportOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGRect] = [:]
-
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, newest in newest })
-    }
-}
 
 enum HistoryAutoLoad {
     /// The trigger enters from above as the reader approaches the oldest
@@ -2707,13 +2662,6 @@ enum HistoryAutoLoad {
     }
 }
 
-private struct HistoryAutoLoadTriggerFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect? = nil
-
-    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-        value = nextValue() ?? value
-    }
-}
 
 private struct ThinkingIndicator: View {
     var body: some View {
@@ -2758,6 +2706,7 @@ private struct ThinkingIndicator: View {
 private struct ScrollLatestObserver: NSViewRepresentable {
     @Binding var isAtLatest: Bool
     var viewportController: MessageScrollViewportController? = nil
+    var onHistoryRequested: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> ScrollLatestProbeView {
         let view = ScrollLatestProbeView()
@@ -2775,10 +2724,17 @@ private struct ScrollLatestObserver: NSViewRepresentable {
 
     private func update(_ view: ScrollLatestProbeView) {
         view.viewportController = viewportController
+        view.onHistoryRequested = onHistoryRequested
+        viewportController?.onHistoryRequested = { [weak view] in
+            view?.onHistoryRequested?()
+        }
         view.onLatestChanged = { latest in
             if isAtLatest != latest {
                 isAtLatest = latest
             }
+        }
+        viewportController?.onLatestChanged = { [weak view] latest in
+            view?.onLatestChanged?(latest)
         }
         view.connectWhenReady()
     }
@@ -2786,6 +2742,7 @@ private struct ScrollLatestObserver: NSViewRepresentable {
 
 private final class ScrollLatestProbeView: NSView {
     var onLatestChanged: ((Bool) -> Void)?
+    var onHistoryRequested: (() -> Void)?
     weak var viewportController: MessageScrollViewportController?
 
     private weak var observedScrollView: NSScrollView?
@@ -2893,6 +2850,10 @@ private final class ScrollLatestProbeView: NSView {
             ? documentBounds.maxY - visibleRect.maxY
             : visibleRect.minY - documentBounds.minY
         let latest = remaining <= threshold
+        if let viewportController {
+            viewportController.reportHistoryPosition()
+            return
+        }
         guard latest != lastReportedValue else { return }
         lastReportedValue = latest
         DispatchQueue.main.async { [weak self] in
@@ -2901,29 +2862,6 @@ private final class ScrollLatestProbeView: NSView {
     }
 }
 
-private final class MessageScrollViewportController: ObservableObject {
-    var pendingAnchor: (String, UnitPoint)?
-    var entryViewportOffsets: [String: CGRect] = [:]
-    private weak var scrollView: NSScrollView?
-
-    func attach(_ scrollView: NSScrollView) {
-        self.scrollView = scrollView
-    }
-
-    func prependAlignment(for id: String?) -> UnitPoint {
-        guard let id,
-              let frame = entryViewportOffsets[id],
-              let scrollView,
-              scrollView.contentView.bounds.height > 0 else {
-            return UnitPoint(x: 0, y: 0)
-        }
-        // For a row of height h in viewport H, scrollTo places its top at
-        // (H - h) * anchor.y. Solve for the existing measured top offset.
-        let available = scrollView.contentView.bounds.height - frame.height
-        guard abs(available) > 0.5 else { return UnitPoint(x: 0, y: 0) }
-        return UnitPoint(x: 0, y: frame.minY / available)
-    }
-}
 enum HistoryPrependGeometry {
     static func windowAnchorLockedOrigin(
         currentOrigin: CGFloat,
@@ -2957,8 +2895,25 @@ private struct MessageBubble: View, Equatable {
     let message: ChatMessage
     let availableWidth: CGFloat
 
+    var body: some View {
+        MessageBubbleContent(message: message, availableWidth: availableWidth,
+            isEditing: message.role == .user && model.isEditingInterruptedMessage(message.id))
+            .equatable()
+    }
+
     static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
         lhs.message == rhs.message && abs(lhs.availableWidth - rhs.availableWidth) < 0.5
+    }
+}
+
+private struct MessageBubbleContent: View, Equatable {
+    let message: ChatMessage
+    let availableWidth: CGFloat
+    let isEditing: Bool
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.message == rhs.message && abs(lhs.availableWidth - rhs.availableWidth) < 0.5
+            && lhs.isEditing == rhs.isEditing
     }
 
     private var userLeadingSpacer: CGFloat {
@@ -3000,7 +2955,7 @@ private struct MessageBubble: View, Equatable {
                         // Keep the user's messages on the familiar right side
                         // and give them a calm blue surface distinct from AI replies.
                         VStack(alignment: .trailing, spacing: 6) {
-                            if model.isEditingInterruptedMessage(message.id) {
+                            if isEditing {
                                 InterruptedMessageEditor(message: message)
                             } else {
                                 bubbleSurface {
@@ -3021,9 +2976,9 @@ private struct MessageBubble: View, Equatable {
                             bubbleSurface {
                                 Group {
                                     if message.isStreaming {
-                                        StreamingMarkdownContent(text: message.text)
+                                        StreamingMarkdownContent(text: message.text, contentWidth: messageColumnMaximumWidth - 28)
                                     } else {
-                                        AssistantMessageContent(text: message.text)
+                                        AssistantMessageContent(text: message.text, contentWidth: messageColumnMaximumWidth - 28)
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3072,11 +3027,34 @@ private struct MessageBubble: View, Equatable {
 private struct FileChangeSummaryCard: View {
     @EnvironmentObject private var model: AppModel
     let group: ConversationFileChangeGroup
+
+    var body: some View {
+        FileChangeSummaryContent(
+            group: group,
+            isReverted: model.isFileChangeTurnReverted(group.turnID),
+            isReverting: model.isRevertingFileChangeTurn(group.turnID),
+            isProcessing: model.isSelectedThreadProcessing,
+            onUndo: { Task { await model.revertFileChanges(group) } }
+        ).equatable()
+    }
+}
+
+// Only the adapter above subscribes to the broad AppModel. Offscreen file
+// cards retain their body/layout when quota, polling or composer state changes.
+private struct FileChangeSummaryContent: View, Equatable {
+    let group: ConversationFileChangeGroup
+    let isReverted: Bool
+    let isReverting: Bool
+    let isProcessing: Bool
+    let onUndo: () -> Void
     @State private var reviewRequest: FileChangeReviewRequest?
     @State private var showingUndoConfirmation = false
 
-    private var isReverted: Bool { model.isFileChangeTurnReverted(group.turnID) }
-    private var isReverting: Bool { model.isRevertingFileChangeTurn(group.turnID) }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.group == rhs.group && lhs.isReverted == rhs.isReverted
+            && lhs.isReverting == rhs.isReverting && lhs.isProcessing == rhs.isProcessing
+    }
+
     private var hasRevertableDiff: Bool { group.changes.contains { !$0.diff.isEmpty } }
 
     var body: some View {
@@ -3110,7 +3088,7 @@ private struct FileChangeSummaryCard: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(isReverted || isReverting || !hasRevertableDiff || model.isSelectedThreadProcessing)
+                .disabled(isReverted || isReverting || !hasRevertableDiff || isProcessing)
                 .help(hasRevertableDiff ? "安全检查通过后反向应用本轮补丁" : "该会话没有返回可撤销的差异")
 
                 Button("审核") {
@@ -3168,7 +3146,7 @@ private struct FileChangeSummaryCard: View {
             titleVisibility: .visible
         ) {
             Button("撤销 \(group.changes.count) 个文件的修改", role: .destructive) {
-                Task { await model.revertFileChanges(group) }
+                onUndo()
             }
             Button("取消", role: .cancel) {}
         } message: {
@@ -3622,12 +3600,13 @@ private enum MessageTimeFormatter {
 
 private struct AssistantMessageContent: View {
     let text: String
+    var contentWidth: CGFloat? = nil
 
     var body: some View {
         if text.count > LongAssistantMessageView.pageSize {
-            LongAssistantMessageView(text: text)
+            LongAssistantMessageView(text: text, contentWidth: contentWidth)
         } else {
-            MarkdownMessageView(markdown: text)
+            MarkdownMessageView(markdown: text, contentWidth: contentWidth).equatable()
         }
     }
 }
@@ -3640,17 +3619,19 @@ private struct LongAssistantMessageView: View {
     static let pageSize = 8_000
 
     let text: String
+    let contentWidth: CGFloat?
     @State private var page: Int
 
-    init(text: String) {
+    init(text: String, contentWidth: CGFloat?) {
         self.text = text
+        self.contentWidth = contentWidth
         let lastPage = max(0, (text.count - 1) / Self.pageSize)
         _page = State(initialValue: lastPage)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            MarkdownMessageView(markdown: pageText)
+            MarkdownMessageView(markdown: pageText, contentWidth: contentWidth).equatable()
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider()
@@ -3949,9 +3930,28 @@ private struct ProcessingBubble: View {
     }
 }
 
+private struct StopCurrentTaskButton: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Button {
+            Task { await model.cancelTurn() }
+        } label: {
+            Image(systemName: "stop.fill")
+                .font(.caption.weight(.semibold))
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.orange)
+        .background(Color.orange.opacity(0.10), in: Circle())
+        .help("停止当前任务；已经完成的文件修改不会自动回滚")
+        .accessibilityLabel("停止当前任务")
+        .fixedSize()
+    }
+}
+
 /// One compact, bounded log instead of a full-height card for every tool event.
 struct ConversationProcessView: View, Equatable {
-    @EnvironmentObject private var model: AppModel
     let group: ConversationProcessGroup
     let isCurrent: Bool
     @State private var isExpanded = false
@@ -4076,19 +4076,7 @@ struct ConversationProcessView: View, Equatable {
                 .accessibilityLabel("执行过程，\(steps.count) 项，\(group.status(isCurrent: isCurrent))，\(isExpanded ? "收起" : "展开")")
 
                 if isCurrent {
-                    Button {
-                        Task { await model.cancelTurn() }
-                    } label: {
-                        Image(systemName: "stop.fill")
-                            .font(.caption.weight(.semibold))
-                            .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.orange)
-                    .background(Color.orange.opacity(0.10), in: Circle())
-                    .help("停止当前任务；已经完成的文件修改不会自动回滚")
-                    .accessibilityLabel("停止当前任务")
-                    .fixedSize()
+                    StopCurrentTaskButton()
                 }
             }
             .padding(.horizontal, 12)

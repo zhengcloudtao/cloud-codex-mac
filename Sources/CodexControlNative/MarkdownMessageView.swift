@@ -5,10 +5,12 @@ import SwiftUI
 struct MarkdownMessageView: View, Equatable {
     let markdown: String
     let expandsHorizontally: Bool
+    let contentWidth: CGFloat?
 
-    init(markdown: String, expandsHorizontally: Bool = true) {
+    init(markdown: String, expandsHorizontally: Bool = true, contentWidth: CGFloat? = nil) {
         self.markdown = markdown
         self.expandsHorizontally = expandsHorizontally
+        self.contentWidth = contentWidth
     }
 
     private var blocks: [MarkdownBlock] {
@@ -16,7 +18,7 @@ struct MarkdownMessageView: View, Equatable {
     }
 
     var body: some View {
-        MarkdownBlocksView(blocks: blocks, expandsHorizontally: expandsHorizontally)
+        MarkdownBlocksView(blocks: blocks, expandsHorizontally: expandsHorizontally, contentWidth: contentWidth)
     }
 }
 
@@ -24,6 +26,7 @@ struct MarkdownMessageView: View, Equatable {
 /// task identity prevent a slow older parse from replacing newer output.
 struct StreamingMarkdownContent: View {
     let text: String
+    var contentWidth: CGFloat? = nil
     @State private var blocks: [MarkdownBlock] = []
     @State private var isTruncated = false
 
@@ -33,7 +36,7 @@ struct StreamingMarkdownContent: View {
                 Text("正在生成，仅预览最新内容；完整内容在完成后可查看")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            MarkdownBlocksView(blocks: blocks, expandsHorizontally: true).equatable()
+            MarkdownBlocksView(blocks: blocks, expandsHorizontally: true, contentWidth: contentWidth).equatable()
         }
         .task(id: text) {
             let input = text
@@ -113,12 +116,19 @@ enum MarkdownPageWindow {
 private struct MarkdownBlocksView: View, Equatable {
     let blocks: [MarkdownBlock]
     let expandsHorizontally: Bool
+    let contentWidth: CGFloat?
 
     @ViewBuilder
     var body: some View {
         let content = VStack(alignment: .leading, spacing: 10) {
-            ReliableSelectableAttributedText(text: MarkdownTextDocument.appKitAttributed(from: blocks))
+            ReliableSelectableAttributedText(
+                text: MarkdownTextDocument.appKitAttributed(from: blocks), layoutWidth: contentWidth
+            )
+                .frame(width: contentWidth, alignment: .leading)
                 .frame(maxWidth: UserMessagePresentation.maximumContentWidth, alignment: .leading)
+                // A reply uses its measured text height even when the lazy
+                // timeline proposes extra space from a previous layout.
+                .fixedSize(horizontal: false, vertical: true)
 
             ForEach(Array(imageBlocks.enumerated()), id: \.offset) { _, block in
                 if case .image(let alt, let target) = block {
@@ -476,20 +486,43 @@ private struct MarkdownTableCell: View {
     }
 }
 
-private struct MarkdownImage: View {
+struct MarkdownImage: View {
     let alt: String
     let target: String
     @Environment(\.openURL) private var openURL
     private var localURL: URL? { ImagePreviewLink.localURL(target) }
+    @State private var localImage: NSImage?
+    @State private var loadedTarget: String?
 
     var body: some View {
-        if let url = localURL, let image = NSImage(contentsOf: url) {
+        imageContent.task(id: target) {
+            guard let url = localURL else { return }
+            let image = await LocalMessageImageLoader.shared.thumbnail(at: url)
+            guard !Task.isCancelled else { return }
+            localImage = image.map { NSImage(cgImage: $0, size: .zero) }
+            loadedTarget = target
+        }
+    }
+
+    @ViewBuilder
+    private var imageContent: some View {
+        if let url = localURL {
             VStack(alignment: .leading, spacing: 0) {
                 Button { openURL(url) } label: {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 520, maxHeight: 360, alignment: .leading)
+                    Group {
+                        if loadedTarget == target, let localImage {
+                            Image(nsImage: localImage).resizable().scaledToFit()
+                        } else if loadedTarget == target {
+                            imageFallback
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                    // Older history can contain images above the reader. Keep
+                    // their preview canvas stable while decoding finishes so
+                    // asynchronous image arrival cannot shift the scroll anchor.
+                    .frame(height: 360, alignment: .leading)
+                    .frame(maxWidth: 520, alignment: .leading)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(alt.isEmpty ? "在 CloudCodex 中预览图片" : "在 CloudCodex 中预览\(alt)")

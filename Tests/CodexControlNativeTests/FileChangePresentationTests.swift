@@ -3,6 +3,22 @@ import XCTest
 @testable import CloudCodex
 
 final class FileChangePresentationTests: XCTestCase {
+    func testMergedChangesCountFinalDiffAndIgnoreFileHeaders() {
+        let first = ConversationFileChange(path: "A.swift",
+            diff: "--- a/A.swift\n+++ b/A.swift\n@@ -1 +1 @@\n-old\n+new", kind: .update)
+        let second = ConversationFileChange(path: "A.swift",
+            diff: "@@ -2 +2,2 @@\n-same\n+changed\n+extra", kind: .update)
+        let empty = ConversationFileChange(path: "empty.swift", diff: "", kind: .add)
+        let group = ConversationFileChangeGroup(turnID: "turn", changes: [first, second, empty])
+        XCTAssertEqual(group.changes.count, 2)
+        XCTAssertEqual(group.changes.first?.addedLines, 3)
+        XCTAssertEqual(group.changes.first?.deletedLines, 2)
+        XCTAssertEqual(group.addedLines, 3)
+        XCTAssertEqual(group.deletedLines, 2)
+        XCTAssertEqual(empty.addedLines, 0)
+        XCTAssertEqual(empty.deletedLines, 0)
+    }
+
     func testAggregatedGitDiffBecomesPerFileChanges() {
         let diff = """
         diff --git a/A.swift b/A.swift
