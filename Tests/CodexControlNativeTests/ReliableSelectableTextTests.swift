@@ -64,6 +64,7 @@ final class ReliableSelectableTextTests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
             func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
             let text = try XCTUnwrap(descendants(host).compactMap { $0 as? ReliableSelectableNSTextView }.first)
+            XCTAssertNil(text.textLayoutManager, "Display and measurement must use the same TextKit engine before querying layoutManager")
             let manager = try XCTUnwrap(text.layoutManager)
             let container = try XCTUnwrap(text.textContainer)
             manager.ensureLayout(for: container)
@@ -76,6 +77,36 @@ final class ReliableSelectableTextTests: XCTestCase {
             XCTAssertEqual(measured, freshHeight, accuracy: 2)
             XCTAssertEqual(text.bounds.height, actual, accuracy: 2, "The text surface must not leave a large empty tail")
 
+        }
+    }
+
+    func testExistingMarkdownRowShrinksWhenWidthAndStoredContentChange() throws {
+        let longReply = String(repeating: "旧历史回复里的长段落应当按当前宽度排版。\n\n", count: 100)
+        let shortReply = "汇总\n\n| 类别 | 说明 |\n| --- | --- |\n| 显示 | 屏幕与触摸 |\n| 输入 | 两个按键 |\n\n最后一段说明，正文到这里结束。"
+        let host = NSHostingView(rootView: MarkdownMessageView(markdown: longReply, contentWidth: 380).frame(width: 380))
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 380, height: 500),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        var original: ReliableSelectableNSTextView?
+        var longHeight: CGFloat = 0
+        for (markdown, width): (String, CGFloat) in [(longReply, 380), (longReply, 692), (shortReply, 692), (shortReply, 380)] {
+            host.rootView = MarkdownMessageView(markdown: markdown, contentWidth: width).frame(width: width)
+            window.setContentSize(CGSize(width: width, height: 500))
+            host.frame.size = host.fittingSize
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let native = try XCTUnwrap(descendants(host).compactMap { $0 as? ReliableSelectableNSTextView }.first)
+            if let original { XCTAssertTrue(native === original, "Exercise an existing history row, rather than replacing its native view") }
+            else { original = native; longHeight = native.bounds.height }
+            let fresh = ReliableSelectableNSTextView(usingTextLayoutManager: false)
+            fresh.setAttributedStringIfNeeded(MarkdownTextDocument.appKitAttributed(from: MarkdownBlockParser.parse(markdown)))
+            let expected = fresh.measuredAttributedSize(width: width).height
+            XCTAssertEqual(native.bounds.height, expected, accuracy: 2)
+            XCTAssertEqual(host.bounds.height, expected, accuracy: 2, "The outer Markdown frame must shrink along with its text")
+            if markdown == shortReply { XCTAssertLessThan(native.bounds.height, longHeight / 4) }
         }
     }
 

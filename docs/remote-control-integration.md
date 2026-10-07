@@ -113,7 +113,7 @@ messages 项必需 id、role、text、title、model、effort:string 与 attachme
 可选通知接口：`POST /api/cloud-codex/agent/events`。Mac 在已配对时上报
 `conversation_completed` 和 `quota_restored`，请求包含稳定的 `eventId`；后端必须按设备与
 `eventId` 幂等处理。若后端支持服务号通知，应由当前配对设备的用户归属解析接收者，不能信任
-客户端提交的用户标识。接口暂时失败时 Mac 会保留事件并在联网后重试。
+客户端提交的用户标识。会话完成事件增加可选 `threadTitle`（会话列表显示标题），服务号预约类型显示“会话完成”、预约项目显示该标题；缺少标题时显示“未命名会话”，并沿用模板的 20 字截断规则。接口暂时失败时 Mac 会保留事件并在联网后重试。
 同一用户的设备只能看到自己的快照和任务；工作区、模型、强度、加速能力全部来自 Mac 心跳。
 微信登录用 wx.login 获取 code，由自己的后端与微信交换身份并生成业务登录态；AppSecret、session_key 只留在服务端。
 wx.scanCode 获取上述设备二维码文本；不要依赖内置小程序 AppID 或小程序码。小程序的 request 合法域名配置为自己的 HTTPS 后端域名，图片还需配置相关下载/上传域名。

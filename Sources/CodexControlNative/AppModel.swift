@@ -5,6 +5,7 @@ enum ThreadInputAvailability: Equatable {
     case checking
     case available
     case occupied
+    case unavailable
 }
 
 @MainActor
@@ -60,6 +61,7 @@ final class AppModel: ObservableObject {
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
     private let revertedFileChangesKey = "cloudcodex.revertedFileChanges.v1"
     private var quotaConsumptionTracker = QuotaConsumptionTracker()
+    private var quotaRestorationTracker = QuotaRestorationTracker()
     @Published private(set) var allowsExtraCreditUsage = false
     @Published private(set) var creditUsagePauseReason: CreditUsageProtection.Reason?
     @Published private(set) var creditUsagePauseFailures: [String: String] = [:]
@@ -121,7 +123,10 @@ final class AppModel: ObservableObject {
             type: RemoteNotificationEventBody.conversationCompleted,
             eventId: "conversation:\(threadID):\(turnID)",
             threadId: threadID,
-            turnId: turnID
+            turnId: turnID,
+            threadTitle: (threads.first { $0.id == threadID }
+                ?? threadSummaries[threadID]
+                ?? favoriteConversations.thread(threadID))?.displayName ?? "未命名会话"
         ))
     }
 
@@ -664,7 +669,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var remoteServerConfigurationError: String?
     @Published private(set) var isSendingRemoteOfflineHeartbeat = false
 
-    private let client = AppServerClient()
+    private let client: AppServerClient
     private var remoteControlAPI: RemoteControlAPI?
     private let remoteAPILoader: (@Sendable (Bool) async throws -> RemoteControlAPI)?
     private let remoteDefaults: UserDefaults
@@ -831,8 +836,10 @@ final class AppModel: ObservableObject {
         commandInactivityTimeoutSeconds: TimeInterval? = nil,
         creditUsageReader: (() async throws -> AccountOverview)? = nil,
         creditTurnInterrupter: ((String, String) async throws -> Void)? = nil,
-        remoteAPILoader: (@Sendable (Bool) async throws -> RemoteControlAPI)? = nil
+        remoteAPILoader: (@Sendable (Bool) async throws -> RemoteControlAPI)? = nil,
+        client injectedClient: AppServerClient? = nil
     ) {
+        self.client = injectedClient ?? AppServerClient()
         let library = ModelProviderLibrary.load(from: remoteDefaults)
         self.providerLibrary = library
         self.customModelProvider = library.activeConfiguration
@@ -1312,7 +1319,7 @@ final class AppModel: ObservableObject {
 
     private func applyAccountOverview(_ overview: AccountOverview) {
         guard !customModelProvider.enabled else { return }
-        let restored = Self.didRestoreFiveHourQuota(from: accountOverview, to: overview)
+        let restored = quotaRestorationTracker.record(overview)
         accountOverview = overview
         if restored {
             enqueueRemoteNotification(.init(
@@ -1325,15 +1332,6 @@ final class AppModel: ObservableObject {
         if let data = try? JSONEncoder().encode(quotaConsumptionTracker) {
             remoteDefaults.set(data, forKey: quotaConsumptionHistoryKey)
         }
-    }
-
-    static func didRestoreFiveHourQuota(from previous: AccountOverview?, to current: AccountOverview) -> Bool {
-        guard previous?.usage.available == true, current.usage.available,
-              let old = previous?.primaryBucket?.windows.first(where: { $0.windowDurationMins == 300 })?.usedPercent,
-              let new = current.primaryBucket?.windows.first(where: { $0.windowDurationMins == 300 })?.usedPercent else {
-            return false
-        }
-        return old > 0.001 && new <= 0.001
     }
 
     private func enqueueRemoteNotification(_ body: RemoteNotificationEventBody) {
@@ -1923,11 +1921,16 @@ final class AppModel: ObservableObject {
         }
         selectedThreadMonitorTask = Task { [weak self] in
             guard !Task.isCancelled, let self, self.selectedThreadID == id else { return }
-            if canReleasePrevious, let previousThreadID {
-                try? await self.client.unsubscribeThread(previousThreadID)
-            }
-            await self.claimSelectedThreadForInput(threadID: id)
+            // Browsing history does not need the writer. Load it while the
+            // server restores input ownership, rather than blocking the whole
+            // conversation behind thread/resume.
+            async let ownership: Void = self.claimSelectedThreadForInput(
+                threadID: id,
+                releasing: canReleasePrevious ? previousThreadID : nil
+            )
             await self.loadSelectedThread()
+            await ownership
+            guard !Task.isCancelled, self.selectedThreadID == id else { return }
             await self.syncLatestExternalActivity(threadID: id)
             while !Task.isCancelled, self.selectedThreadID == id {
                 let delaySeconds: UInt64 = self.isExternalThreadProcessing ? 2 : 5
@@ -1939,30 +1942,36 @@ final class AppModel: ObservableObject {
     }
 
     func retrySelectedThreadOwnership() async {
-        guard let selectedThreadID else { return }
+        guard let selectedThreadID, threadInputAvailability != .checking else { return }
         await claimSelectedThreadForInput(threadID: selectedThreadID)
     }
 
-    private func claimSelectedThreadForInput(threadID: String) async {
-        guard selectedThreadID == threadID else { return }
+    private func claimSelectedThreadForInput(threadID: String, releasing previousThreadID: String? = nil) async {
+        let generation = selectionGeneration
+        guard !Task.isCancelled, selectedThreadID == threadID else { return }
         threadInputAvailability = .checking
         threadOwnershipNotice = nil
+        if let previousThreadID { try? await client.unsubscribeThread(previousThreadID) }
+        guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == threadID else { return }
         do {
             let serviceTier = try await client.resumeThread(threadID)
-            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == threadID else { return }
             if let serviceTier {
                 applyThreadServiceTier(serviceTier, threadID: threadID)
             }
             threadInputAvailability = .available
         } catch {
-            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == threadID else { return }
             if Self.isActiveWriterError(error) {
                 errorMessage = nil
                 threadInputAvailability = .occupied
                 threadOwnershipNotice = Self.occupiedThreadMessage
             } else {
-                threadInputAvailability = .available
-                errorMessage = error.localizedDescription
+                // A failed resume has not established input ownership. Keep
+                // the history usable and offer an inline retry without enabling
+                // sends or opening a modal alert during navigation.
+                threadInputAvailability = .unavailable
+                threadOwnershipNotice = error.localizedDescription
             }
         }
     }
@@ -2637,6 +2646,7 @@ final class AppModel: ObservableObject {
             throw error
         }
         customModelProvider = configuration
+        quotaRestorationTracker = QuotaRestorationTracker()
         creditUsageProtection.reset(); creditUsagePauseReason = nil
         if configuration.enabled { isFastModeEnabled = false }
         if !configuration.enabled {

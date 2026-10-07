@@ -105,7 +105,8 @@ enum RemoteIntegrationGuide {
 
     6. POST /api/cloud-codex/agent/events
     已配对时上报可选通知事件：conversation_completed 或 quota_restored。
-    请求包含 type、eventId，以及会话完成事件的 threadId、turnId；不包含提示词、回复、工作区或凭据。
+    请求包含 type、eventId，以及会话完成事件的 threadId、turnId 和可选 threadTitle（会话列表显示标题）；不包含完整回复、工作区或凭据。
+    服务号预约类型显示“会话完成”，预约项目显示 threadTitle；旧客户端未传标题时显示“未命名会话”。
     后端按设备与 eventId 幂等处理，只能通过已配对设备的用户归属解析通知接收者，不能信任客户端提交的用户标识。
     成功返回 {"status":0,"msg":"ok","data":null}；暂时失败时 Mac 保留事件并在联网后重试。
 

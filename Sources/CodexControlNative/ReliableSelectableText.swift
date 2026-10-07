@@ -11,7 +11,10 @@ struct ReliableSelectableText: NSViewRepresentable {
     var maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
 
     func makeNSView(context: Context) -> NSTextView {
-        let textView = ReliableSelectableNSTextView(frame: .zero)
+        // The height cache uses TextKit 1. Use that same engine for display;
+        // a default NSTextView can use TextKit 2 and draw shorter paragraphs,
+        // leaving its TextKit 1 allocation as a blank tail in history replies.
+        let textView = ReliableSelectableNSTextView(usingTextLayoutManager: false)
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -162,7 +165,10 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> ReliableSelectableNSTextView {
-        let textView = ReliableSelectableNSTextView(frame: .zero)
+        // The height cache uses TextKit 1. Use that same engine for display;
+        // a default NSTextView can use TextKit 2 and draw shorter paragraphs,
+        // leaving its TextKit 1 allocation as a blank tail in history replies.
+        let textView = ReliableSelectableNSTextView(usingTextLayoutManager: false)
         textView.delegate = context.coordinator
         textView.isEditable = false
         textView.isSelectable = true

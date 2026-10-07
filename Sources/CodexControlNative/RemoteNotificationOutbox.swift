@@ -8,10 +8,12 @@ struct RemoteNotificationEventBody: Codable, Equatable {
     let eventId: String
     var threadId: String? = nil
     var turnId: String? = nil
+    var threadTitle: String? = nil
 }
 
 /// Notification events survive a network outage or app restart. They contain
-/// only opaque identifiers and never a prompt, response, path, or credential.
+/// event identifiers and the conversation display title, never a full response,
+/// workspace path, or credential.
 @MainActor
 final class RemoteNotificationOutbox {
     private let defaults: UserDefaults

@@ -40,6 +40,8 @@ final class AppServerClient {
     var customModelOptions: [CodexModelOption] = []
     var providerKeyLoader: (String) async throws -> String? = { try await ModelProviderKeychain.load(account: $0) }
     private let codexHomeOverride: URL?
+    private let executableOverride: URL?
+    private let resumeTimeoutSeconds: UInt64
     private var processGeneration = 0
     private var submittedProviders: [String: ModelProviderConfiguration] = [:]
     private var turnProviders: [String: ModelProviderConfiguration] = [:]
@@ -57,6 +59,16 @@ final class AppServerClient {
     }
     private var pending: [Int: PendingRequest] = [:]
     private var loadedThreadIDs: Set<String> = []
+    private struct ResumeOperation {
+        let token: UUID
+        let task: Task<String?, Error>
+    }
+    private var resumeOperations: [String: ResumeOperation] = [:]
+    private struct ReleaseOperation {
+        let token: UUID
+        let task: Task<Void, Error>
+    }
+    private var releaseOperations: [String: ReleaseOperation] = [:]
     private var serviceTierByThreadID: [String: String] = [:]
     private struct ActivityHistory {
         var turnID: String
@@ -77,7 +89,11 @@ final class AppServerClient {
     var onDisconnect: ((String) -> Void)?
     var beforeTurnSubmission: (() async throws -> Void)?
 
-    init(codexHomeOverride: URL? = nil) { self.codexHomeOverride = codexHomeOverride }
+    init(codexHomeOverride: URL? = nil, executableOverride: URL? = nil, resumeTimeoutSeconds: UInt64 = 60) {
+        self.codexHomeOverride = codexHomeOverride
+        self.executableOverride = executableOverride
+        self.resumeTimeoutSeconds = resumeTimeoutSeconds
+    }
 
     deinit {
         output?.readabilityHandler = nil
@@ -90,7 +106,7 @@ final class AppServerClient {
         output?.readabilityHandler = nil
         errorOutput?.readabilityHandler = nil
         decodingWorker = JSONLineDecodingWorker()
-        let executable = try CodexExecutableLocator.locate()
+        let executable = try executableOverride ?? CodexExecutableLocator.locate()
         let process = Process()
         let stdin = Pipe()
         let stdout = Pipe()
@@ -617,8 +633,27 @@ final class AppServerClient {
 
     @discardableResult
     func resumeThread(_ id: String) async throws -> String? {
+        if let operation = releaseOperations[id] { try await operation.task.value }
         if loadedThreadIDs.contains(id) { return serviceTierByThreadID[id] }
-        var params: JSON = ["threadId": id]
+        // Selection, retry and a queued send may all ask for the same writer.
+        // Keep one operation until the server acknowledges it, even if a
+        // selection's caller is cancelled while switching conversations.
+        if let operation = resumeOperations[id] { return try await operation.task.value }
+        let token = UUID()
+        let generation = processGeneration
+        let task = Task { try await self.performResumeThread(id, generation: generation) }
+        resumeOperations[id] = ResumeOperation(token: token, task: task)
+        defer {
+            if resumeOperations[id]?.token == token { resumeOperations.removeValue(forKey: id) }
+        }
+        return try await task.value
+    }
+
+    private func performResumeThread(_ id: String, generation: Int) async throws -> String? {
+        // History is already fetched through bounded read/turns/items requests.
+        // Full-history hydration here duplicates that work and can make a long
+        // historical conversation exceed the ordinary RPC deadline.
+        var params: JSON = ["threadId": id, "excludeTurns": true]
         if customModelProvider.enabled {
             params["modelProvider"] = ModelProviderConfiguration.providerID
             params["model"] = customModelProvider.modelID
@@ -633,7 +668,8 @@ final class AppServerClient {
                 params["model"] = model
             }
         }
-        let result = try await request("thread/resume", params: params)
+        let result = try await request("thread/resume", params: params, timeoutSeconds: resumeTimeoutSeconds)
+        guard processGeneration == generation, connected else { throw CodexClientError.notRunning }
         if let serviceTier = result["serviceTier"] as? String {
             serviceTierByThreadID[id] = serviceTier
         }
@@ -642,8 +678,24 @@ final class AppServerClient {
     }
 
     func unsubscribeThread(_ id: String) async throws {
-        guard loadedThreadIDs.contains(id) else { return }
+        if let operation = releaseOperations[id] { return try await operation.task.value }
+        let token = UUID()
+        let generation = processGeneration
+        let task = Task { try await self.performUnsubscribeThread(id, generation: generation) }
+        releaseOperations[id] = ReleaseOperation(token: token, task: task)
+        defer {
+            if releaseOperations[id]?.token == token { releaseOperations.removeValue(forKey: id) }
+        }
+        try await task.value
+    }
+
+    private func performUnsubscribeThread(_ id: String, generation: Int) async throws {
+        // A cancelled selection may still be acquiring its writer. Release it
+        // only after that request finishes, instead of leaking a loaded thread.
+        if let operation = resumeOperations[id] { _ = try? await operation.task.value }
+        guard processGeneration == generation, loadedThreadIDs.contains(id) else { return }
         _ = try await request("thread/unsubscribe", params: ["threadId": id])
+        guard processGeneration == generation else { return }
         loadedThreadIDs.remove(id)
     }
 
@@ -879,6 +931,8 @@ final class AppServerClient {
         errorOutput = nil
         process = nil
         loadedThreadIDs.removeAll()
+        resumeOperations.removeAll()
+        releaseOperations.removeAll()
         serviceTierByThreadID.removeAll()
         let error = CodexClientError.process("Codex 本地服务已退出（状态码 \(status)）")
         let callbacks = pending.values

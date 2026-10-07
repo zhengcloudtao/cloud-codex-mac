@@ -319,6 +319,9 @@ components:
         eventId: { type: string, minLength: 1 }
         threadId: { type: [string, 'null'] }
         turnId: { type: [string, 'null'] }
+        threadTitle:
+          type: [string, 'null']
+          description: 会话列表显示标题；省略或空白时服务号项目显示未命名会话。
     HistoryRead:
       type: object
       required: [id, threadId, workspace, cursor]

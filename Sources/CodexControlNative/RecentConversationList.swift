@@ -33,6 +33,9 @@ struct RecentConversationList: View, Equatable {
                 LazyVStack(spacing: 6) { rowContent }
             }
         }
+        // Empty rows have no content width. Keep the viewport full size so
+        // loading and empty-state overlays receive the entire list column.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentMargins(.horizontal, 8, for: .scrollContent)
         .contentMargins(.vertical, 3, for: .scrollContent)
         .accessibilityIdentifier("recent-conversation-list")

@@ -188,14 +188,18 @@ enum RemoteAPIDocumentation {
     会话完成：
 
     ```json
-    {"type":"conversation_completed","eventId":"conversation:thread-uuid:turn-uuid","threadId":"thread-uuid","turnId":"turn-uuid"}
+    {"type":"conversation_completed","eventId":"conversation:thread-uuid:turn-uuid","threadId":"thread-uuid","turnId":"turn-uuid","threadTitle":"修复会话通知"}
     ```
 
-    五小时额度从已知非满恢复为 100%：
+    五小时或周额度从已知非满恢复为 100%：
 
     ```json
     {"type":"quota_restored","eventId":"quota:1893456000"}
     ```
+
+    五小时和周额度分别检测；只有周额度的套餐直接检测周额度。额度读取缺失时保留最近一次有效基准；恢复后通知一次，连续 100% 不重复通知，启动首次读到 100% 不补发。
+
+    会话完成事件可携带 `threadTitle`，对应会话列表显示标题。服务号预约类型填“会话完成”，预约项目填该标题；省略或空白标题时填“未命名会话”。项目沿用模板的长度截断规则。
 
     以 `hash(deviceId + eventId)` 建唯一约束。只有服务号发送成功后才确认事件；临时失败删除占位记录或标记为可重试，避免 Mac 收到成功后永久丢失通知。
     接收者只能由已配对设备的 owner 解析。用户未关注/未绑定服务号时，应记录“不可投递”原因；不要伪装成已发送。

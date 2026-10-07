@@ -1088,7 +1088,16 @@ struct ContentView: View {
             .searchable(text: $model.searchText, prompt: "搜索会话")
             .overlay {
                 if model.isLoading && model.selectedThreadID == nil {
-                    ProgressView("加载最近会话…")
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("加载最近会话…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                    }
+                    .padding(20)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if displayedThreads.isEmpty {
                     ContentUnavailableView(
                         showingFavoriteThreads ? "暂无收藏会话" : "暂无会话",
@@ -1097,6 +1106,7 @@ struct ContentView: View {
                                           ? "在会话上右键即可收藏"
                                           : "在这个文件夹中新建一个 Codex 会话")
                     )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -1160,7 +1170,7 @@ struct ContentView: View {
                     }
                     Divider()
                     switch model.threadInputAvailability {
-                    case .checking, .occupied:
+                    case .checking, .occupied, .unavailable:
                         ThreadInputUnavailableView(state: model.threadInputAvailability)
                     case .available:
                         Composer(mode: .conversation)
@@ -1667,17 +1677,33 @@ private struct ThreadInputUnavailableView: View {
     let state: ThreadInputAvailability
 
     private var isChecking: Bool { state == .checking }
+    private var title: String {
+        switch state {
+        case .checking: return "正在恢复会话"
+        case .occupied: return "已在另一个应用中打开"
+        case .unavailable: return "暂时无法继续会话"
+        case .available: return "可以继续会话"
+        }
+    }
+    private var detail: String {
+        switch state {
+        case .checking: return "历史记录可以正常查看，恢复完成后即可继续发送。"
+        case .occupied: return model.threadOwnershipNotice ?? AppModel.occupiedThreadMessage
+        case .unavailable: return model.threadOwnershipNotice ?? "本地服务暂未响应，请重试。"
+        case .available: return ""
+        }
+    }
 
     var body: some View {
         HStack(spacing: 16) {
-            Image(systemName: "lock")
+            Image(systemName: isChecking ? "arrow.clockwise" : (state == .occupied ? "lock" : "exclamationmark.circle"))
                 .font(.title3)
             .frame(width: 26)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("已在另一个应用中打开")
+                Text(title)
                     .font(.headline)
-                Text(model.threadOwnershipNotice ?? AppModel.occupiedThreadMessage)
+                Text(detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -1692,9 +1718,7 @@ private struct ThreadInputUnavailableView: View {
             .buttonStyle(.plain)
             .font(.callout.weight(.medium))
             .padding(.horizontal, 12)
-            // Keep the checking and occupied cards pixel-identical. The first
-            // ownership request is already in flight, so ignore extra clicks
-            // without dimming or moving the retry control.
+            // A restore is already in flight; do not queue duplicate retries.
             .allowsHitTesting(!isChecking)
         }
         .padding(.horizontal, 22)
@@ -1707,7 +1731,7 @@ private struct ThreadInputUnavailableView: View {
                 .padding(.vertical, 10)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("已在另一个应用中打开，请先在那边关闭会话，才能在这里继续")
+        .accessibilityLabel(title + "，" + detail)
         .transaction { transaction in
             transaction.animation = nil
         }

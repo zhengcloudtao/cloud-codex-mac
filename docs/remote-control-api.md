@@ -97,12 +97,14 @@ X-CloudCodex-Token: <keychain-secret>
 通知事件：
 
 ```json
-{"type":"conversation_completed","eventId":"conversation:thread-uuid:turn-uuid","threadId":"thread-uuid","turnId":"turn-uuid"}
+{"type":"conversation_completed","eventId":"conversation:thread-uuid:turn-uuid","threadId":"thread-uuid","turnId":"turn-uuid","threadTitle":"修复会话通知"}
 ```
 
 ```json
 {"type":"quota_restored","eventId":"quota:1893456000"}
 ```
+
+五小时和周额度分别检测；只有周额度的套餐直接检测周额度。额度读取缺失时保留最近一次有效基准；恢复后通知一次，连续 100% 不重复通知，启动首次读到 100% 不补发。
 
 ## 状态和持久化规则
 
@@ -136,9 +138,11 @@ failed -- 用户重试 --> 新 taskId 的 queued 记录
 
 ## 通知要求
 
+会话完成事件可携带 `threadTitle`，对应会话列表显示标题。服务号预约类型填“会话完成”，预约项目填该标题；省略或空白标题时填“未命名会话”。项目沿用模板的长度截断规则。
+
 后端按 `hash(deviceId + eventId)` 去重，并只能从已配对设备 owner 解析接收者。建议先落持久站内通知，再发送服务号模板消息。只有外部发送成功才向 Mac 确认成功；临时失败必须允许 Mac 重试。用户未关注或未绑定时记录明确的不可投递状态，不能伪装为已发送。
 
-会话完成只对新的 threadId+turnId 发送一次。额度恢复只对“已知非 100% → 已知 100%”的边沿发送，不能在启动时看到一条 100% 快照就补发。
+会话完成只对新的 threadId+turnId 发送一次。额度恢复只对五小时或周额度“已知非 100% → 已知 100%”的边沿发送，不能在启动时看到一条 100% 快照就补发。
 
 ## 验收
 
