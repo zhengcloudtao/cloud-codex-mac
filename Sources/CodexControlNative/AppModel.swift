@@ -18,8 +18,9 @@ final class AppModel: ObservableObject {
     private var openAIModelOptions: [CodexModelOption] = []
 
     let browser = EmbeddedBrowser()
-    let connectionHealth = ConnectionHealth()
+    let connectionHealth: ConnectionHealth
     let systemMetrics = SystemMetricsMonitor()
+    @Published private(set) var accountRefreshInterval: AccountRefreshInterval
     @Published private(set) var accountOverview: AccountOverview?
     @Published private(set) var accountOverviewError: String?
     @Published private(set) var resetCreditInProgressRef: String?
@@ -848,6 +849,9 @@ final class AppModel: ObservableObject {
             $0.id == library.defaultProviderID
         }?.options ?? []
         self.remoteDefaults = remoteDefaults
+        let accountRefreshInterval = AccountRefreshInterval.load(from: remoteDefaults)
+        self.accountRefreshInterval = accountRefreshInterval
+        self.connectionHealth = ConnectionHealth(refreshInterval: accountRefreshInterval)
         self.remoteServerConfiguration = RemoteServerConfiguration.load(remoteDefaults)
         self.providerUsage = ProviderUsageLedger.load(remoteDefaults)
         self.creditUsageReader = creditUsageReader
@@ -1315,6 +1319,13 @@ final class AppModel: ObservableObject {
             connectionText = "连接失败"
             errorMessage = error.localizedDescription
         }
+    }
+
+    func setAccountRefreshInterval(_ interval: AccountRefreshInterval) {
+        guard accountRefreshInterval != interval else { return }
+        accountRefreshInterval = interval
+        remoteDefaults.set(interval.rawValue, forKey: AccountRefreshInterval.storageKey)
+        connectionHealth.setRefreshInterval(interval)
     }
 
     private func applyAccountOverview(_ overview: AccountOverview) {

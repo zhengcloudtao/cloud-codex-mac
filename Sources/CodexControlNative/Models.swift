@@ -360,28 +360,6 @@ struct CodexModelOption: Identifiable, Hashable {
     }
 }
 
-struct ModelSelectionPreset: Equatable {
-    let modelID: String
-    let effort: String
-
-    /// "和神对话" is a convenience preset, not a protocol model. Prefer the
-    /// explicitly requested flagship when it is available, then follow the
-    /// app-server catalog order so a future catalog can still provide a safe
-    /// fallback without inventing unsupported model IDs or effort values.
-    static func godConversation(in options: [CodexModelOption]) -> Self? {
-        let usable = options.filter { !$0.composerEfforts.isEmpty }
-        guard let option = usable.first(where: {
-            $0.id.caseInsensitiveCompare("gpt-6-astra") == .orderedSame
-                || $0.model.caseInsensitiveCompare("gpt-6-astra") == .orderedSame
-        }) ?? usable.first else { return nil }
-
-        let highestFirst = ["ultra", "xhigh", "high", "medium", "low"]
-        guard let effort = highestFirst.first(where: option.composerEfforts.contains)
-                ?? option.defaultComposerEffort else { return nil }
-        return Self(modelID: option.id, effort: effort)
-    }
-}
-
 struct CodexServiceTier: Identifiable, Hashable {
     let id: String
     let name: String

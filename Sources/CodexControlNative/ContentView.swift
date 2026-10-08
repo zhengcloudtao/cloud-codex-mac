@@ -1417,6 +1417,39 @@ struct ContentView: View {
                 .padding(.vertical, 6)
             }
 
+            GroupBox("套餐与额度") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("自动刷新频率")
+                            Text("控制顶部套餐、余额与额度信息的定时刷新间隔。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Picker("套餐与额度刷新频率", selection: Binding(
+                            get: { model.accountRefreshInterval },
+                            set: { model.setAccountRefreshInterval($0) }
+                        )) {
+                            ForEach(AccountRefreshInterval.allCases) { interval in
+                                Text(interval.title).tag(interval)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 140)
+                    }
+                    Text("修改后立即按新间隔计时并自动保存；仍可在套餐面板中手动刷新。额度保护启用且有任务运行或处于额度保护暂停状态时，仍每 5 秒检查一次。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if model.customModelProvider.enabled {
+                        Text("此设置用于 ChatGPT 套餐；第三方 API 的费用由服务商管理。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+
             GroupBox("电脑状态") {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -4880,15 +4913,6 @@ private struct Composer: View {
             : model.modelOptions.first { $0.id == draftModelID }
     }
 
-    private var godConversationPreset: ModelSelectionPreset? {
-        ModelSelectionPreset.godConversation(in: model.modelOptions)
-    }
-
-    private var isGodConversationSelected: Bool {
-        guard let preset = godConversationPreset else { return false }
-        return draftModelID == preset.modelID && draftEffort == preset.effort
-    }
-
     private var modelSelectionPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -4926,11 +4950,6 @@ private struct Composer: View {
                             draftFastMode = false
                         }
                         modelSelectionError = nil
-                    }
-                    if draftProviderID == ModelProviderLibrary.openAI {
-                        selectionSection("快捷选择") {
-                            godConversationSelectionRow.disabled(godConversationPreset == nil)
-                        }
                     }
 
                     Divider()
@@ -5017,65 +5036,13 @@ private struct Composer: View {
             .padding(12)
             .fixedSize(horizontal: false, vertical: true)
         }
-        // The shortcut card includes its own intensity bar. Keep enough room
-        // for the full model list, reasoning choices, and speed controls while
-        // retaining the ScrollView for unusually small displays or future
-        // catalogs with more entries.
-        .frame(width: 560, height: 640)
+        // Keep the model, reasoning, and speed controls visible; scroll when
+        // a larger catalog or a small display needs additional room.
+        .frame(width: 560, height: 540)
         .task { await model.refreshModelCatalog() }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
         .overlay(RoundedRectangle(cornerRadius: 13).stroke(.quaternary))
         .shadow(color: .black.opacity(0.3), radius: 18, y: 7)
-    }
-
-    private var godConversationPresetSubtitle: String {
-        guard let preset = godConversationPreset,
-              let option = model.modelOptions.first(where: { $0.id == preset.modelID }) else {
-            return "当前没有可用的模型与推理强度"
-        }
-        return "\(option.pickerName) · \(effortDisplayName(preset.effort))"
-    }
-
-    private func applyGodConversationPreset() {
-        guard let preset = godConversationPreset else { return }
-        draftModelID = preset.modelID
-        draftEffort = preset.effort
-        if draftModel?.fastServiceTierID == nil { draftFastMode = false }
-    }
-
-    private var godConversationSelectionRow: some View {
-        Button(action: applyGodConversationPreset) {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 8) {
-                    Image(systemName: isGodConversationSelected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(isGodConversationSelected ? Color.purple : Color.secondary)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("和神对话")
-                            .foregroundStyle(.primary)
-                        Text(godConversationPresetSubtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
-                }
-
-                GodConversationIntensityBar()
-                    .padding(.leading, 22)
-            }
-            .contentShape(Rectangle())
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(
-                Color.purple.opacity(isGodConversationSelected ? 0.14 : 0.07),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.purple.opacity(isGodConversationSelected ? 0.45 : 0.20))
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("和神对话，\(godConversationPresetSubtitle)，最高推理强度")
     }
 
     private func selectionSection<Content: View>(
@@ -5160,89 +5127,6 @@ private struct Composer: View {
 
     private func effortCompactName(_ effort: String) -> String {
         ReasoningEffortLabel.name(effort)
-    }
-}
-
-private struct GodConversationIntensityBar: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private let sparkleOffsets: [CGFloat] = [-3, 3, -1, 4, -4, 1, -2, 3, -4, 1]
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { context in
-            animatedBar(phase: reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate)
-        }
-        .frame(height: 27)
-        .accessibilityHidden(true)
-    }
-
-    private func animatedBar(phase: TimeInterval) -> some View {
-        ZStack(alignment: .trailing) {
-            GeometryReader { proxy in
-                let width = proxy.size.width
-                let height = proxy.size.height
-                let shimmerProgress = CGFloat(phase.truncatingRemainder(dividingBy: 2.8) / 2.8)
-
-                ZStack {
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.25, green: 0.28, blue: 0.82),
-                            Color(red: 0.55, green: 0.35, blue: 0.96),
-                            Color(red: 0.76, green: 0.48, blue: 1.00)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-
-                    LinearGradient(
-                        colors: [.clear, .white.opacity(0.22), .clear],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                    .frame(width: 86, height: height)
-                    .position(
-                        x: -43 + shimmerProgress * (width + 86),
-                        y: height / 2
-                    )
-
-                    ForEach(sparkleOffsets.indices, id: \.self) { index in
-                        let speed = 0.018 + Double(index % 3) * 0.004
-                        let travel = CGFloat((phase * speed).truncatingRemainder(dividingBy: 1))
-                        let base = CGFloat(index) / CGFloat(sparkleOffsets.count)
-                        let position = (base + travel).truncatingRemainder(dividingBy: 1)
-                        let twinkle = (sin(phase * 2.2 + Double(index) * 0.85) + 1) / 2
-                        let baseSize: CGFloat = index.isMultiple(of: 3) ? 2.5 : 1.5
-
-                        Circle()
-                            .fill(Color.white.opacity(0.34 + twinkle * 0.62))
-                            .frame(width: baseSize, height: baseSize)
-                            .scaleEffect(0.72 + twinkle * 0.48)
-                            .position(
-                                x: 15 + position * max(1, width - 56),
-                                y: height / 2 + sparkleOffsets[index]
-                            )
-                    }
-                }
-                .clipShape(Capsule())
-            }
-
-            let pulse = reduceMotion ? 1.0 : 1.0 + CGFloat(sin(phase * 2.4)) * 0.035
-            Circle()
-                .fill(.white)
-                .frame(width: 25, height: 25)
-                .scaleEffect(pulse)
-                .shadow(
-                    color: Color.white.opacity(reduceMotion ? 0.20 : 0.30 + 0.12 * sin(phase * 2.4)),
-                    radius: reduceMotion ? 2 : 3.5,
-                    y: 1
-                )
-                .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-                .padding(.trailing, 1)
-        }
-        .overlay {
-            Capsule()
-                .stroke(Color.white.opacity(0.18), lineWidth: 1)
-        }
-        .shadow(color: Color.purple.opacity(0.22), radius: 5, y: 2)
     }
 }
 

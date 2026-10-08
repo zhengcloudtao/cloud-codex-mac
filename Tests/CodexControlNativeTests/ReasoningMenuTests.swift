@@ -98,15 +98,6 @@ final class ReasoningMenuTests: XCTestCase {
         XCTAssertEqual(recommended.pickerName, "GPT-6 Astra")
     }
 
-    func testGodConversationSelectsAstraAndUltraRegardlessOfCatalogPosition() throws {
-        let sol = option(["low", "medium", "xhigh"], id: "gpt-6-sol", displayName: "GPT-6-Sol")
-        let astra = option(["low", "medium", "xhigh", "ultra"], id: "gpt-6-astra", displayName: "GPT-6-Astra")
-
-        let preset = try XCTUnwrap(ModelSelectionPreset.godConversation(in: [sol, astra]))
-
-        XCTAssertEqual(preset, ModelSelectionPreset(modelID: "gpt-6-astra", effort: "ultra"))
-    }
-
     func testGPT61SolCatalogEntryCanBeSelectedWithItsCapabilities() throws {
         let sol = try XCTUnwrap(CodexModelOption(json: [
             "id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1-Sol",
@@ -125,16 +116,5 @@ final class ReasoningMenuTests: XCTestCase {
         XCTAssertEqual(model.selectedEffort, "ultra")
         XCTAssertEqual(sol.fastServiceTierID, "priority")
         XCTAssertEqual(model.recommendedModel?.id, sol.id)
-    }
-
-    func testGodConversationFallsBackToFirstUsableModelAndHighestVisibleEffort() throws {
-        let unavailable = option(["max"], defaultEffort: "max", id: "hidden-only")
-        let firstUsable = option(["low", "persistent", "high", "xhigh"], id: "future-flagship")
-        let later = option(["low", "ultra"], id: "later-model")
-
-        let preset = try XCTUnwrap(ModelSelectionPreset.godConversation(in: [unavailable, firstUsable, later]))
-
-        XCTAssertEqual(preset, ModelSelectionPreset(modelID: "future-flagship", effort: "xhigh"))
-        XCTAssertNil(ModelSelectionPreset.godConversation(in: [unavailable]))
     }
 }

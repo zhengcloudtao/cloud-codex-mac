@@ -46,6 +46,18 @@ final class ConnectionHealth: ObservableObject {
     private var loop: Task<Void, Never>?
     private var probe: (() async throws -> Void)?
     private var revision = 0
+    private(set) var refreshInterval: AccountRefreshInterval
+    private let sleep: (TimeInterval) async throws -> Void
+
+    init(
+        refreshInterval: AccountRefreshInterval = .oneMinute,
+        sleep: @escaping (TimeInterval) async throws -> Void = { seconds in
+            try await Task.sleep(for: .seconds(seconds))
+        }
+    ) {
+        self.refreshInterval = refreshInterval
+        self.sleep = sleep
+    }
 
     var networkText: String {
         switch networkAvailable {
@@ -74,9 +86,23 @@ final class ConnectionHealth: ObservableObject {
             }
         }
         monitor.start(queue: DispatchQueue(label: "cloudcodex.network-health"))
+        restartRefreshLoop()
+    }
+
+    func setRefreshInterval(_ interval: AccountRefreshInterval) {
+        guard refreshInterval != interval else { return }
+        refreshInterval = interval
+        if probe != nil { restartRefreshLoop() }
+    }
+
+    private func restartRefreshLoop() {
+        loop?.cancel()
+        let seconds = TimeInterval(refreshInterval.rawValue)
+        let sleep = self.sleep
         loop = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                do { try await sleep(seconds) }
+                catch { return }
                 guard !Task.isCancelled, let self else { return }
                 await self.check()
             }
