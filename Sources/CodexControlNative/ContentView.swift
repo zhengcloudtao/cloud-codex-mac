@@ -4947,6 +4947,22 @@ private struct Composer: View {
                     .font(.callout)
                     .lineLimit(1)
                     .layoutPriority(1)
+                if model.isFastModeEnabled && model.supportsFastMode {
+                    Label("加速", systemImage: "bolt.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                        .fixedSize()
+                        .layoutPriority(2)
+                } else {
+                    Text(model.selectedSpeedLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                        .layoutPriority(2)
+                }
                 Image(systemName: showingModelPicker ? "chevron.up" : "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
@@ -5160,9 +5176,9 @@ private struct Composer: View {
     private var modelAndEffortCompactLabel: String {
         let modelName = model.selectedModelDisplayName
         guard let effort = model.selectedEffort else {
-            return "\(modelName) · \(model.selectedSpeedLabel)"
+            return modelName
         }
-        return "\(modelName) · \(effortCompactName(effort)) · \(model.selectedSpeedLabel)"
+        return "\(modelName) · \(effortCompactName(effort))"
     }
 
     private var modelAndEffortAccessibilityLabel: String {

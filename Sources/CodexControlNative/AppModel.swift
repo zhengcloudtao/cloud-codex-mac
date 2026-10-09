@@ -680,6 +680,7 @@ final class AppModel: ObservableObject {
     private var hasStarted = false
     private var threadRequestGeneration = 0
     private var serviceTierUpdateGenerationByThread: [String: Int] = [:]
+    private var fastModePreferenceGeneration = 0
     private var selectedThreadMonitorTask: Task<Void, Never>?
     private var selectedThreadMetadataTask: Task<Void, Never>?
     private var threadStatusMonitorTask: Task<Void, Never>?
@@ -882,7 +883,7 @@ final class AppModel: ObservableObject {
             recentThirtyMinuteConsumptionRate = saved.consumptionRate(at: Date().timeIntervalSince1970)
         }
         revertedFileChanges = Set(remoteDefaults.stringArray(forKey: revertedFileChangesKey) ?? [])
-        isFastModeEnabled = UserDefaults.standard.bool(forKey: fastModeKey)
+        isFastModeEnabled = remoteDefaults.bool(forKey: fastModeKey)
         remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
         allowsExtraCreditUsage = remoteDefaults.bool(forKey: Self.allowsExtraCreditUsageKey)
         if !customModelProvider.enabled, !allowsExtraCreditUsage,
@@ -1291,20 +1292,10 @@ final class AppModel: ObservableObject {
         return "default"
     }
 
-    private static func isFastServiceTier(_ serviceTier: String?) -> Bool {
-        guard let serviceTier else { return false }
-        return serviceTier.caseInsensitiveCompare("fast") == .orderedSame
-            || serviceTier.caseInsensitiveCompare("priority") == .orderedSame
-    }
-
-    private func syncFastModeFromSelectedThread() {
-        guard let selectedThreadID,
-              let thread = threads.first(where: { $0.id == selectedThreadID })
-                ?? threadSummaries[selectedThreadID] else { return }
-        isFastModeEnabled = Self.isFastServiceTier(thread.serviceTier)
-    }
-
     private func applyThreadServiceTier(_ serviceTier: String?, threadID: String) {
+        // This is the thread's persisted setting, not the global preference
+        // for subsequent requests. Reads, resumes, and settings notifications
+        // must not turn off the user's acceleration selection.
         if var thread = threadSummaries[threadID] {
             thread.serviceTier = serviceTier
             threadSummaries[threadID] = thread
@@ -1312,9 +1303,6 @@ final class AppModel: ObservableObject {
         }
         if let index = threads.firstIndex(where: { $0.id == threadID }) {
             threads[index].serviceTier = serviceTier
-        }
-        if selectedThreadID == threadID {
-            isFastModeEnabled = Self.isFastServiceTier(serviceTier)
         }
     }
 
@@ -1684,7 +1672,6 @@ final class AppModel: ObservableObject {
             return $0.offset < $1.offset
         }.map(\.element)
         if threads != ordered { threads = ordered }
-        syncFastModeFromSelectedThread()
     }
 
     private func startThreadStatusMonitor() {
@@ -1992,7 +1979,6 @@ final class AppModel: ObservableObject {
         threadOwnershipNotice = nil
         threadInputAvailability = id == nil ? .available : .checking
         selectedThreadID = id
-        syncFastModeFromSelectedThread()
         messages = id.flatMap { messagesByThread[$0] } ?? []
         // Publish loading together with the new selection so an uncached
         // conversation never renders the empty "开始对话" state for one frame.
@@ -2753,7 +2739,9 @@ final class AppModel: ObservableObject {
         guard Self.fastModeNeedsSync(current: isFastModeEnabled, requested: enabled) else { return }
         let previousEnabled = isFastModeEnabled
         isFastModeEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: fastModeKey)
+        remoteDefaults.set(enabled, forKey: fastModeKey)
+        fastModePreferenceGeneration += 1
+        let preferenceGeneration = fastModePreferenceGeneration
         guard let threadID = selectedThreadID else { return }
 
         let serviceTier = enabled ? (selectedModelCapabilities?.fastServiceTierID ?? "priority") : "default"
@@ -2786,8 +2774,9 @@ final class AppModel: ObservableObject {
             } catch {
                 guard self.serviceTierUpdateGenerationByThread[threadID] == generation else { return }
                 self.applyThreadServiceTier(previousServiceTier, threadID: threadID)
-                if self.selectedThreadID == threadID {
+                if self.fastModePreferenceGeneration == preferenceGeneration {
                     self.isFastModeEnabled = previousEnabled
+                    self.remoteDefaults.set(previousEnabled, forKey: self.fastModeKey)
                 }
                 self.errorMessage = "同步响应速度失败：\(error.localizedDescription)"
             }

@@ -410,8 +410,11 @@ final class StreamingEventTests: XCTestCase {
         XCTAssertEqual(parameters["serviceTier"] as? String, "priority")
     }
 
-    func testThreadSettingsNotificationKeepsSpeedMenuInSync() throws {
-        let model = AppModel()
+    func testThreadSettingsNotificationDoesNotOverwriteGlobalSpeedSelection() throws {
+        let suite = "CloudCodex.FastNotificationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(remoteDefaults: defaults)
         let thread = try XCTUnwrap(CodexThread(json: [
             "id": "thread-1",
             "cwd": "/tmp/project",
@@ -424,7 +427,7 @@ final class StreamingEventTests: XCTestCase {
             "threadId": thread.id,
             "threadSettings": ["serviceTier": "priority"]
         ])
-        XCTAssertTrue(model.isFastModeEnabled)
+        XCTAssertFalse(model.isFastModeEnabled)
         XCTAssertEqual(model.threads.first?.serviceTier, "priority")
 
         model.handleEvent("thread/settings/updated", [

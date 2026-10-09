@@ -3,6 +3,29 @@ import XCTest
 
 @MainActor
 final class ReasoningMenuTests: XCTestCase {
+    func testUnsupportedModelUsesStandardWithoutErasingSavedAcceleration() throws {
+        let suite = "CloudCodex.FastCapabilitiesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "CloudCodex.fastModeEnabled.v1")
+        let model = AppModel(remoteDefaults: defaults)
+        let standard = option(["medium"])
+        let fast = try XCTUnwrap(CodexModelOption(json: [
+            "id": "fast-model", "model": "fast-model", "displayName": "Fast Model",
+            "defaultReasoningEffort": "medium",
+            "supportedReasoningEfforts": [["reasoningEffort": "medium"]],
+            "serviceTiers": [["id": "fast", "name": "Fast"]]
+        ]))
+        model.modelOptions = [standard, fast]
+        model.selectModel(standard.id)
+        XCTAssertTrue(model.isFastModeEnabled)
+        XCTAssertEqual(model.selectedSpeedLabel, "标准")
+        XCTAssertEqual(model.selectedServiceTier, "default")
+        model.selectModel(fast.id)
+        XCTAssertEqual(model.selectedSpeedLabel, "加速")
+        XCTAssertEqual(model.selectedServiceTier, "fast")
+    }
+
     func testUnchangedFastModeDoesNotNeedServerSync() {
         XCTAssertFalse(AppModel.fastModeNeedsSync(current: false, requested: false))
         XCTAssertFalse(AppModel.fastModeNeedsSync(current: true, requested: true))

@@ -24,11 +24,14 @@ final class ThreadResumeTests: XCTestCase {
         }
     }
 
-    private func fixture(delay: Double = 0.2, failures: [String] = [], timeout: UInt64 = 60) async throws -> Fixture {
+    private func fixture(delay: Double = 0.2, failures: [String] = [], timeout: UInt64 = 60,
+                         serviceTierUpdateFailure: String? = nil) async throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("CloudCodexResumeTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let executable = root.appendingPathComponent("codex-fixture")
-        let settings = try JSONSerialization.data(withJSONObject: ["delay": delay, "failures": failures])
+        let settings = try JSONSerialization.data(withJSONObject: [
+            "delay": delay, "failures": failures, "serviceTierUpdateFailure": serviceTierUpdateFailure ?? ""
+        ])
         try settings.write(to: root.appendingPathComponent("settings.json"))
         let source = #"""
         #!/usr/bin/python3
@@ -74,6 +77,9 @@ final class ThreadResumeTests: XCTestCase {
             elif method == "thread/unsubscribe":
                 time.sleep(0.1)
                 reply(request, {})
+            elif method == "thread/settings/update":
+                failure = settings["serviceTierUpdateFailure"]
+                reply(request, {}, error=failure or None)
             else:
                 reply(request, {"data": []})
         """#
@@ -89,6 +95,80 @@ final class ThreadResumeTests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertTrue(condition(), "Expected state did not arrive")
+    }
+
+    private func fastModel() throws -> CodexModelOption {
+        try XCTUnwrap(CodexModelOption(json: [
+            "id": "test-fast", "model": "test-fast", "displayName": "Test Fast",
+            "defaultReasoningEffort": "medium",
+            "supportedReasoningEfforts": [["reasoningEffort": "medium"]],
+            "serviceTiers": [["id": "priority", "name": "Fast"]]
+        ]))
+    }
+
+    func testSavedAccelerationSurvivesSelectingReadingResumingAndRefreshingOldThread() async throws {
+        let fixture = try await fixture()
+        defer { fixture.stop() }
+        fixture.defaults.set(true, forKey: "CloudCodex.fastModeEnabled.v1")
+        let model = AppModel(remoteDefaults: fixture.defaults, client: fixture.client)
+        let option = try fastModel()
+        model.modelOptions = [option]
+        model.selectModel(option.id)
+        let thread = try XCTUnwrap(CodexThread(json: [
+            "id": "old-standard", "cwd": fixture.root.path, "serviceTier": "default"
+        ]))
+        model.applyThreadListSnapshot([thread])
+        model.selectThread(thread.id)
+        XCTAssertEqual(model.selectedSpeedLabel, "加速")
+        try await waitUntil { model.threadInputAvailability == .available && !model.isConversationLoading }
+        XCTAssertEqual(model.threads.first?.serviceTier, "default")
+        XCTAssertEqual(model.selectedServiceTier, "priority")
+        model.applyThreadListSnapshot([thread])
+        model.handleEvent("thread/settings/updated", [
+            "threadId": thread.id, "threadSettings": ["serviceTier": NSNull()]
+        ])
+        XCTAssertEqual(model.selectedSpeedLabel, "加速")
+        let nextRequest = AppServerClient.turnStartParameters(
+            threadID: thread.id, text: "fixture", attachments: [], model: option.model,
+            effort: model.selectedEffort, permissions: nil, serviceTier: model.selectedServiceTier)
+        XCTAssertEqual(nextRequest["serviceTier"] as? String, "priority")
+        XCTAssertTrue(AppModel(remoteDefaults: fixture.defaults).isFastModeEnabled)
+        model.selectThread(nil)
+    }
+
+    func testFailedSpeedChangeRestoresBothVisibleAndSavedSelection() async throws {
+        let fixture = try await fixture(serviceTierUpdateFailure: "fixture failure")
+        defer { fixture.stop() }
+        let model = AppModel(remoteDefaults: fixture.defaults, client: fixture.client)
+        let option = try fastModel()
+        model.modelOptions = [option]
+        model.selectModel(option.id)
+        model.selectThread("speed-update")
+        try await waitUntil { model.threadInputAvailability == .available }
+        model.setFastModeEnabled(true)
+        try await waitUntil { model.errorMessage?.contains("fixture failure") == true }
+        XCTAssertFalse(model.isFastModeEnabled)
+        XCTAssertEqual(model.selectedServiceTier, "default")
+        XCTAssertFalse(fixture.defaults.bool(forKey: "CloudCodex.fastModeEnabled.v1"))
+        XCTAssertFalse(AppModel(remoteDefaults: fixture.defaults).isFastModeEnabled)
+        model.selectThread(nil)
+    }
+
+    func testEarlierFailedThreadUpdateCannotUndoNewerGlobalSelection() async throws {
+        let fixture = try await fixture(serviceTierUpdateFailure: "earlier update failed")
+        defer { fixture.stop() }
+        let model = AppModel(remoteDefaults: fixture.defaults, client: fixture.client)
+        let option = try fastModel()
+        model.modelOptions = [option]
+        model.selectModel(option.id)
+        model.selectedThreadID = "earlier-thread"
+        model.setFastModeEnabled(true)
+        model.selectedThreadID = nil
+        model.setFastModeEnabled(false)
+        model.setFastModeEnabled(true)
+        try await waitUntil { model.errorMessage?.contains("earlier update failed") == true }
+        XCTAssertEqual(model.selectedSpeedLabel, "加速")
+        XCTAssertTrue(fixture.defaults.bool(forKey: "CloudCodex.fastModeEnabled.v1"))
     }
 
     func testSlowResumeExceedsOrdinaryDeadlineAndConcurrentCallersShareRequest() async throws {

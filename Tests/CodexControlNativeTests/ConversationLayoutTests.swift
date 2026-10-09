@@ -7,6 +7,40 @@ import XCTest
 /// fitting size. The fixtures never call start/selectThread or contact Codex.
 @MainActor
 final class ConversationLayoutTests: XCTestCase {
+    func testOptionalAccelerationComposerPreview() throws {
+        guard ProcessInfo.processInfo.environment["CLOUDCODEX_LAYOUT_PREVIEW_DIR"] != nil else { return }
+        let suite = "CloudCodex.FastComposerPreview.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "CloudCodex.fastModeEnabled.v1")
+        let model = AppModel(remoteDefaults: defaults)
+        let option = try XCTUnwrap(CodexModelOption(json: [
+            "id": "gpt-test", "model": "gpt-test", "displayName": "GPT-Test-Long-Model-Name",
+            "defaultReasoningEffort": "xhigh",
+            "supportedReasoningEfforts": [["reasoningEffort": "xhigh"]],
+            "serviceTiers": [["id": "priority", "name": "Fast"]]
+        ]))
+        model.modelOptions = [option]
+        model.selectModel(option.id)
+        let thread = try makeThread(id: "fast-preview", name: "加速显示验证", preview: "本地界面预览")
+        model.threads = [thread]
+        selectFixture(thread, messages: [.init(id: "preview", role: .assistant, text: "当前全局响应速度：加速")], model: model)
+        for scheme in [ColorScheme.light, .dark] {
+            let host = NSHostingView(rootView: ContentView().environmentObject(model).preferredColorScheme(scheme))
+            let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 1220, height: 780),
+                                  styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            defer { window.contentView = nil; window.close() }
+            for width: CGFloat in [1220, 1000] {
+                window.setContentSize(CGSize(width: width, height: 780))
+                host.frame = try XCTUnwrap(window.contentView).bounds
+                settleLayout(host)
+                try writeLayoutPreviewIfRequested(host, name: "fast-composer-\(scheme)-\(Int(width)).png")
+            }
+        }
+    }
+
     func testReplyHeightRemainsTightDuringLiveColumnResize() throws {
         let suite = "CloudCodex.TextTailTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
