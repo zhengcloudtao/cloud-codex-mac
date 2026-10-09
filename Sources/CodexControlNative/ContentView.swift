@@ -359,6 +359,7 @@ struct ContentView: View {
     @State private var filePreview: LocalFilePreviewTarget?
     @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
+    @State private var showingUnreadThreads = false
     @State private var preferencesTab = 0
     @State private var commandInactivityTimeoutDraft = ""
     @State private var commandInactivityTimeoutInputError: String?
@@ -604,9 +605,14 @@ struct ContentView: View {
             workspaceSidebarHeader
 
             List(selection: Binding(
-                get: { showingFavoriteThreads ? "__favorites__" : model.selectedFolder ?? "__all__" },
+                get: { showingUnreadThreads ? "__unread__" : showingFavoriteThreads ? "__favorites__" : model.selectedFolder ?? "__all__" },
                 set: { selection in
                     guard let selection else { return }
+                    showingUnreadThreads = selection == "__unread__"
+                    if showingUnreadThreads {
+                        showingFavoriteThreads = false
+                        return
+                    }
                     if selection == "__favorites__" {
                         showingFavoriteThreads = true
                         return
@@ -627,6 +633,29 @@ struct ContentView: View {
                     .padding(.vertical, 3)
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
                     .tag("__favorites__")
+                HStack(spacing: 8) {
+                    Label {
+                        Text("红点会话")
+                            .foregroundStyle(showingUnreadThreads ? Color.white : Color.primary)
+                    } icon: {
+                        Image(systemName: "bubble.left")
+                            .foregroundStyle(showingUnreadThreads ? Color.white : Color.accentColor)
+                    }
+                    Spacer(minLength: 8)
+                    Text("\(model.unreadCompletions.unread.count)")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(showingUnreadThreads ? Color.white : Color.secondary)
+                        .padding(.horizontal, 6)
+                        .frame(minWidth: 20, minHeight: 18)
+                        .background(
+                            showingUnreadThreads ? Color.white.opacity(0.18) : Color.primary.opacity(0.07),
+                            in: Capsule()
+                        )
+                }
+                .padding(.vertical, 3)
+                .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 10))
+                .tag("__unread__")
+                .help("查看所有工作区中已完成但未查看的会话")
 
                 ForEach(model.workspaceCategories) { category in
                     workspaceCategorySection(category)
@@ -1052,12 +1081,12 @@ struct ContentView: View {
     private var threadList: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(showingFavoriteThreads
+                Text(showingUnreadThreads ? "红点会话" : showingFavoriteThreads
                      ? "收藏会话"
                      : model.selectedFolder.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "最近会话")
                     .font(.headline)
                 Spacer()
-                if !showingFavoriteThreads, model.selectedFolder != nil {
+                if !showingUnreadThreads, !showingFavoriteThreads, model.selectedFolder != nil {
                     Button(action: model.prepareNewThread) {
                         Image(systemName: "square.and.pencil")
                     }
@@ -1075,7 +1104,7 @@ struct ContentView: View {
                         isSelected: model.selectedThreadID == thread.id,
                         outcome: model.conversationOutcome(for: thread),
                         showPreview: showConversationPreview,
-                        hasUnreadCompletion: showUnreadCompletionDot && model.unreadCompletions.unread.contains(thread.id),
+                        hasUnreadCompletion: (showUnreadCompletionDot || showingUnreadThreads) && model.unreadCompletions.unread.contains(thread.id),
                         needsUserInput: model.userInputRequests.contains { $0.threadID == thread.id },
                         isFavorite: model.isFavoriteConversation(thread.id)
                     )
@@ -1087,7 +1116,11 @@ struct ContentView: View {
             .equatable()
             .searchable(text: $model.searchText, prompt: "搜索会话")
             .overlay {
-                if model.isLoading && model.selectedThreadID == nil {
+                if showingUnreadThreads && model.isLoadingUnreadThreads {
+                    ProgressView("加载红点会话…")
+                        .padding(20)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !showingUnreadThreads && model.isLoading && model.selectedThreadID == nil {
                     HStack(spacing: 10) {
                         ProgressView()
                             .controlSize(.small)
@@ -1100,9 +1133,11 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if displayedThreads.isEmpty {
                     ContentUnavailableView(
-                        showingFavoriteThreads ? "暂无收藏会话" : "暂无会话",
-                        systemImage: showingFavoriteThreads ? "star" : "bubble.left.and.bubble.right",
-                        description: Text(showingFavoriteThreads
+                        showingUnreadThreads ? "暂无匹配的红点会话" : showingFavoriteThreads ? "暂无收藏会话" : "暂无会话",
+                        systemImage: showingUnreadThreads ? "circle" : showingFavoriteThreads ? "star" : "bubble.left.and.bubble.right",
+                        description: Text(showingUnreadThreads
+                                          ? "显示所有工作区中已完成但未查看的会话；可清空搜索后重试"
+                                          : showingFavoriteThreads
                                           ? "在会话上右键即可收藏"
                                           : "在这个文件夹中新建一个 Codex 会话")
                     )
@@ -1110,7 +1145,16 @@ struct ContentView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if !showingFavoriteThreads, model.hasMoreThreads {
+                if showingUnreadThreads, let error = model.unreadThreadsError {
+                    VStack(spacing: 6) {
+                        Text(error).font(.caption).foregroundStyle(.secondary)
+                        Button("重试") { Task { await model.refreshUnreadThreads() } }
+                            .disabled(model.isLoadingUnreadThreads)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity)
+                    .background(.bar)
+                } else if !showingUnreadThreads, !showingFavoriteThreads, model.hasMoreThreads {
                     Text("为保持流畅，仅显示最近 60 个会话")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1120,10 +1164,18 @@ struct ContentView: View {
                 }
             }
         }
+        .task(id: showingUnreadThreads) {
+            if showingUnreadThreads { await model.refreshUnreadThreads() }
+        }
+        .onChange(of: model.unreadCompletions.unread) { oldValue, newValue in
+            if showingUnreadThreads, !newValue.subtracting(oldValue).isEmpty {
+                Task { await model.refreshUnreadThreads() }
+            }
+        }
     }
 
     private var displayedThreads: [CodexThread] {
-        showingFavoriteThreads ? model.visibleFavoriteThreads : model.visibleThreads
+        showingUnreadThreads ? model.visibleUnreadThreads : showingFavoriteThreads ? model.visibleFavoriteThreads : model.visibleThreads
     }
 
     @ViewBuilder

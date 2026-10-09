@@ -363,8 +363,6 @@ struct AccountOverviewView: View {
                     TimelineView(.periodic(from: .now, by: 60)) { context in
                         VStack(alignment: .leading, spacing: 12) {
                                 Text("订阅套餐：\(account.planDisplayName)").fontWeight(.semibold)
-                                Text(subscriptionPeriodLabel(account.subscriptionPeriodEnd))
-                                    .foregroundStyle(.secondary)
                                 Divider()
                                 if let credits = account.creditBalance {
                                     VStack(alignment: .leading, spacing: 4) {
@@ -508,14 +506,6 @@ struct AccountOverviewView: View {
     private func dateLabel(_ timestamp: Double?) -> String {
         guard let timestamp, timestamp.isFinite else { return "未提供" }
         return Date(timeIntervalSince1970: timestamp).formatted(date: .numeric, time: .shortened)
-    }
-
-    private func subscriptionPeriodLabel(_ date: Date?) -> String {
-        guard let date else {
-            return "套餐到期：本机登录信息未提供，不能用额度恢复时间代替。"
-        }
-        let value = date.formatted(date: .numeric, time: .shortened)
-        return date <= Date() ? "套餐已于 \(value) 到期" : "套餐到期：\(value)"
     }
 
     private func refreshIssueBanner(_ issue: AccountOverviewRefreshIssue) -> some View {

@@ -290,6 +290,48 @@ final class AppServerClient {
         )
     }
 
+    /// Search every persisted source and both archive states before treating an
+    /// unloaded completion ID as missing. Do not apply the recent-page filters.
+    func findUnreadThreads(_ ids: Set<String>) async throws -> [CodexThread] {
+        var remaining = ids
+        var found: [CodexThread] = []
+        for archived in [false, true] {
+            var cursor: String?
+            var seenCursors: Set<String> = []
+            repeat {
+                try Task.checkCancellation()
+                var params = Self.unreadThreadListParameters(archived: archived)
+                if let cursor { params["cursor"] = cursor }
+                let result = try await request("thread/list", params: params)
+                guard let rows = result["data"] as? [JSON] else {
+                    throw CodexClientError.invalidResponse
+                }
+                for row in rows {
+                    guard let thread = CodexThread(json: row) else {
+                        throw CodexClientError.invalidResponse
+                    }
+                    if remaining.remove(thread.id) != nil {
+                        found.append(applyingCachedServiceTier(thread))
+                    }
+                }
+                if remaining.isEmpty { return found }
+                cursor = result["nextCursor"] as? String
+                if let cursor, !seenCursors.insert(cursor).inserted {
+                    throw CodexClientError.invalidResponse
+                }
+            } while cursor != nil
+        }
+        return found
+    }
+
+    static func unreadThreadListParameters(archived: Bool) -> JSON {
+        ["limit": 100, "archived": archived, "modelProviders": [String](),
+         "sourceKinds": ["cli", "vscode", "exec", "appServer", "subAgent",
+                         "subAgentReview", "subAgentCompact", "subAgentThreadSpawn",
+                         "subAgentOther", "unknown"],
+         "sortKey": "recency_at", "sortDirection": "desc"]
+    }
+
     private func applyingCachedServiceTier(_ original: CodexThread) -> CodexThread {
         var thread = original
         if let cached = serviceTierByThreadID[thread.id] {

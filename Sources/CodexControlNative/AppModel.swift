@@ -44,6 +44,8 @@ final class AppModel: ObservableObject {
     @Published var composerText = ""
     @Published private(set) var threadOutcomes: [String: ConversationOutcome] = [:]
     @Published private(set) var unreadCompletions = UnreadCompletions()
+    @Published private(set) var isLoadingUnreadThreads = false
+    @Published private(set) var unreadThreadsError: String?
     @Published private(set) var favoriteConversations = FavoriteConversations()
     @Published private(set) var userInputRequests: [UserInputRequest] = []
     private var userInputTimeoutTasks: [String: Task<Void, Never>] = [:]
@@ -1158,6 +1160,79 @@ final class AppModel: ObservableObject {
                 || thread.visiblePreview.localizedCaseInsensitiveContains(query)
             return matchesSearch
         }
+    }
+
+    /// Resolve badges by ID across workspaces, including conversations outside
+    /// the recent 60-row page. Reading metadata never acknowledges a completion.
+    func refreshUnreadThreads(
+        readThread: ((String) async throws -> CodexThread)? = nil,
+        findThreads: ((Set<String>) async throws -> [CodexThread])? = nil
+    ) async {
+        guard !isLoadingUnreadThreads else { return }
+        isLoadingUnreadThreads = true
+        unreadThreadsError = nil
+        defer { isLoadingUnreadThreads = false }
+        var attempted: Set<String> = []
+        var unloaded: Set<String> = []
+        var attemptedTurns: [String: String] = [:]
+        while let id = unreadCompletions.unread.sorted().first(where: {
+            !attempted.contains($0) && unreadThreadSummary($0) == nil
+        }) {
+            guard !Task.isCancelled else { return }
+            attempted.insert(id)
+            attemptedTurns[id] = unreadCompletions.latestTurns[id]
+            do {
+                if let readThread {
+                    threadSummaries[id] = try await readThread(id)
+                } else {
+                    threadSummaries[id] = try await client.readThreadState(id)
+                }
+            } catch {
+                if case CodexClientError.server(let message) = error,
+                   message == "thread not loaded: \(id)" {
+                    unloaded.insert(id)
+                } else if unreadCompletions.unread.contains(id) {
+                    unreadThreadsError = "部分红点会话暂时无法加载，请重试"
+                }
+            }
+        }
+        guard !unloaded.isEmpty, !Task.isCancelled else { return }
+        do {
+            let resolved: [CodexThread]
+            if let findThreads {
+                resolved = try await findThreads(unloaded)
+            } else {
+                resolved = try await client.findUnreadThreads(unloaded)
+            }
+            try Task.checkCancellation()
+            for thread in resolved { threadSummaries[thread.id] = thread }
+            for id in unloaded.subtracting(Set(resolved.map(\.id))) {
+                // Another refresh may have obtained metadata while listing.
+                if unreadThreadSummary(id) == nil,
+                   unreadCompletions.latestTurns[id] == attemptedTurns[id] {
+                    markConversationRead(id)
+                }
+            }
+        } catch {
+            unreadThreadsError = "部分红点会话暂时无法加载，请重试"
+        }
+    }
+
+    private func unreadThreadSummary(_ id: String) -> CodexThread? {
+        threads.first { $0.id == id } ?? threadSummaries[id] ?? favoriteConversations.thread(id)
+    }
+
+    var visibleUnreadThreads: [CodexThread] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return unreadCompletions.unread.compactMap { unreadThreadSummary($0) }
+            .filter {
+                query.isEmpty || $0.displayName.localizedCaseInsensitiveContains(query)
+                    || $0.visiblePreview.localizedCaseInsensitiveContains(query)
+            }
+            .sorted {
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                return $0.id < $1.id
+            }
     }
 
     var visibleFavoriteThreads: [CodexThread] {
