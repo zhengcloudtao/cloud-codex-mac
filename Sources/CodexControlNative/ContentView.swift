@@ -4600,6 +4600,11 @@ private struct Composer: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
+                if mode == .conversation, !model.assistantReplyChoices.isEmpty {
+                    AssistantReplyChoicesView(options: model.assistantReplyChoices,
+                                              draft: model.composerText,
+                                              select: model.selectAssistantReplyChoice)
+                }
                 if mode == .conversation, let notice = model.threadOwnershipNotice {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "macwindow.badge.plus")
@@ -4692,7 +4697,8 @@ private struct Composer: View {
                     text: composerText,
                     pasteImages: pasteImages,
                     submit: submit,
-                    focusRequest: mode == .newThread ? model.newThreadFocusRequest : model.editingWaitingMessageID
+                    focusRequest: mode == .newThread ? model.newThreadFocusRequest
+                        : model.editingWaitingMessageID ?? model.replyChoiceFocusRequest
                 )
                     .frame(
                         minHeight: mode == .newThread ? 110 : 54,

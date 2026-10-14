@@ -172,6 +172,24 @@ final class AppModel: ObservableObject {
         return userInputRequests.filter { $0.threadID == selectedThreadID }
     }
 
+    var assistantReplyChoices: [String] {
+        guard selectedThreadID != nil, !showingNewThread,
+              threadInputAvailability == .available, !isSelectedThreadProcessing,
+              editingWaitingMessageID == nil, selectedWaitingMessages.isEmpty,
+              selectedUserInputRequests.isEmpty,
+              selectedComputerUseApprovalRequests.isEmpty else { return [] }
+        return AssistantReplyChoices.options(in: messages)
+    }
+
+    @Published private(set) var replyChoiceFocusRequest = UUID()
+
+    func selectAssistantReplyChoice(_ option: String) {
+        let options = assistantReplyChoices
+        guard options.contains(option) else { return }
+        composerText = AssistantReplyChoices.draft(selecting: option, options: options, current: composerText)
+        replyChoiceFocusRequest = UUID()
+    }
+
     var selectedComputerUseApprovalRequests: [ComputerUseApprovalRequest] {
         guard let selectedThreadID else { return [] }
         return computerUseApprovalRequests.filter { $0.threadID == selectedThreadID }
