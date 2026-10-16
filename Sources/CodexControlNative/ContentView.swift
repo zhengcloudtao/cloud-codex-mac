@@ -60,10 +60,9 @@ private struct ColumnResizeHandle: View {
                 .fill(Color.accentColor.opacity(isHovering || isDragging ? 0.85 : 0.18))
                 .frame(width: isHovering || isDragging ? 2 : 1)
         }
-        // Keep the full hit target inside the preceding column. The native
-        // NavigationSplitView divider sits exactly on the trailing pixel and
-        // can otherwise intercept the mouse before this gesture begins.
-        .frame(width: 24)
+        // This handle occupies its own strip beside the scroll view. An
+        // overlay here would intercept the native scrollbar's mouse events.
+        .frame(width: 8)
         .contentShape(Rectangle())
         .zIndex(1_000)
         .onHover { hovering in
@@ -404,30 +403,30 @@ struct ContentView: View {
                 Divider()
             }
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            folderSidebar
-                .overlay(alignment: .trailing) {
-                    ColumnResizeHandle(
-                        width: $workspaceColumnWidth,
-                        range: MainColumnLayout.workspaceRange,
-                        defaultWidth: MainColumnLayout.workspaceDefault,
-                        accessibilityName: "调整工作区宽度"
-                    )
-                }
+            HStack(spacing: 0) {
+                folderSidebar
+                ColumnResizeHandle(
+                    width: $workspaceColumnWidth,
+                    range: MainColumnLayout.workspaceRange,
+                    defaultWidth: MainColumnLayout.workspaceDefault,
+                    accessibilityName: "调整工作区宽度"
+                )
+            }
                 .navigationSplitViewColumnWidth(
                     min: MainColumnLayout.workspaceRange.lowerBound,
                     ideal: renderedWorkspaceColumnWidth,
                     max: MainColumnLayout.workspaceRange.upperBound
                 )
         } content: {
-            threadList
-                .overlay(alignment: .trailing) {
-                    ColumnResizeHandle(
-                        width: $threadListColumnWidth,
-                        range: MainColumnLayout.threadListRange,
-                        defaultWidth: MainColumnLayout.threadListDefault,
-                        accessibilityName: "调整会话列表宽度"
-                    )
-                }
+            HStack(spacing: 0) {
+                threadList
+                ColumnResizeHandle(
+                    width: $threadListColumnWidth,
+                    range: MainColumnLayout.threadListRange,
+                    defaultWidth: MainColumnLayout.threadListDefault,
+                    accessibilityName: "调整会话列表宽度"
+                )
+            }
                 .navigationSplitViewColumnWidth(
                     min: MainColumnLayout.threadListRange.lowerBound,
                     ideal: renderedThreadListColumnWidth,

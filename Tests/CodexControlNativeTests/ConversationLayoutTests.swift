@@ -7,6 +7,64 @@ import XCTest
 /// fitting size. The fixtures never call start/selectThread or contact Codex.
 @MainActor
 final class ConversationLayoutTests: XCTestCase {
+    func testConversationScrollbarReceivesMouseEventsBesideResizeHandle() throws {
+        let suite = "CloudCodex.ScrollbarHitTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(remoteDefaults: defaults)
+        model.threads = try (0..<40).map {
+            try makeThread(id: "scrollbar-\($0)", name: "会话 \($0)", preview: "滚动条拖动验证")
+        }
+        let host = NSHostingView(rootView: ContentView().environmentObject(model))
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 1220, height: 780),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+
+        for width: CGFloat in [1220, 1550] {
+            window.setContentSize(CGSize(width: width, height: 780))
+            host.frame = try XCTUnwrap(window.contentView).bounds
+            settleLayout(host)
+            let column = try threeColumnSplitView(in: host).arrangedSubviews[1]
+            let scroll = try XCTUnwrap(descendants(of: column).compactMap { $0 as? NSScrollView }
+                .first { !$0.isHiddenOrHasHiddenAncestor && $0.bounds.height > 200 })
+            XCTAssertEqual(scroll.scrollerStyle, .overlay)
+            XCTAssertTrue(scroll.autohidesScrollers)
+            XCTAssertEqual(scroll.scrollerInsets.top, 6)
+            XCTAssertEqual(scroll.scrollerInsets.bottom, 6)
+            let styledScroller = try XCTUnwrap(scroll.verticalScroller)
+            let scrollerLayer = try XCTUnwrap(styledScroller.layer)
+            XCTAssertTrue(scrollerLayer.masksToBounds)
+            XCTAssertGreaterThan(scrollerLayer.cornerRadius, 0)
+            XCTAssertEqual(scrollerLayer.cornerRadius, styledScroller.bounds.width / 2, accuracy: 0.5)
+            defer {
+                scroll.scrollerStyle = .overlay
+                scroll.autohidesScrollers = true
+            }
+            // Legacy style keeps the scroller visible independent of system
+            // preferences, allowing deterministic native mouse hit testing.
+            scroll.scrollerStyle = .legacy
+            scroll.autohidesScrollers = false
+            scroll.hasVerticalScroller = true
+            scroll.tile()
+            scroll.layoutSubtreeIfNeeded()
+            let scroller = try XCTUnwrap(scroll.verticalScroller)
+            XCTAssertGreaterThan(scroller.bounds.height, 100)
+            XCTAssertGreaterThan(try XCTUnwrap(scroll.documentView).bounds.height, scroll.contentView.bounds.height)
+            for fraction: CGFloat in [0.1, 0.5, 0.9] {
+                let point = scroller.convert(NSPoint(x: scroller.bounds.midX,
+                                                    y: scroller.bounds.height * fraction), to: host)
+                let hit = try XCTUnwrap(host.hitTest(point))
+                XCTAssertTrue(hit === scroller || hit.isDescendant(of: scroller),
+                              "The column resize handle must not intercept scrollbar mouse events")
+            }
+            let scrollFrame = scroll.convert(scroll.bounds, to: column)
+            XCTAssertGreaterThanOrEqual(column.bounds.maxX - scrollFrame.maxX, 7,
+                                        "Reserve a separate strip for column resizing")
+        }
+    }
+
     func testOptionalAccelerationComposerPreview() throws {
         guard ProcessInfo.processInfo.environment["CLOUDCODEX_LAYOUT_PREVIEW_DIR"] != nil else { return }
         let suite = "CloudCodex.FastComposerPreview.\(UUID().uuidString)"

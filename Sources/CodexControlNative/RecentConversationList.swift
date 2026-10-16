@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct RecentConversationRow: Identifiable, Equatable {
@@ -26,12 +27,15 @@ struct RecentConversationList: View, Equatable {
 
     var body: some View {
         ScrollView {
-            if rows.count <= 60 {
-                VStack(spacing: 6) { rowContent }
-            } else {
-                // Favorites are not capped; keep their memory use bounded.
-                LazyVStack(spacing: 6) { rowContent }
+            Group {
+                if rows.count <= 60 {
+                    VStack(spacing: 6) { rowContent }
+                } else {
+                    // Favorites are not capped; keep their memory use bounded.
+                    LazyVStack(spacing: 6) { rowContent }
+                }
             }
+            .background(ConversationListScrollerStyle())
         }
         // Empty rows have no content width. Keep the viewport full size so
         // loading and empty-state overlays receive the entire list column.
@@ -68,4 +72,57 @@ struct RecentConversationList: View, Equatable {
             }
         }
     }
+}
+
+/// Apply only to the enclosing conversation list, leaving other scroll views
+/// and the user's system-wide scrollbar preference unchanged.
+private struct ConversationListScrollerStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> ConversationListScrollerProbe {
+        ConversationListScrollerProbe()
+    }
+
+    func updateNSView(_ view: ConversationListScrollerProbe, context: Context) {
+        view.configureWhenReady()
+    }
+}
+
+final class ConversationListScrollerProbe: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configureWhenReady()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        configureWhenReady()
+    }
+
+    override func layout() {
+        super.layout()
+        configureWhenReady()
+    }
+
+    func configureWhenReady() {
+        DispatchQueue.main.async { [weak self] in
+            var ancestor = self?.superview
+            while let view = ancestor, !(view is NSScrollView) {
+                ancestor = view.superview
+            }
+            guard let scroll = ancestor as? NSScrollView else { return }
+            // Keep native dragging and hover behavior, and clip the entire
+            // scroller so the track has rounded ends as well as the thumb.
+            if scroll.scrollerStyle != .overlay { scroll.scrollerStyle = .overlay }
+            if !scroll.autohidesScrollers { scroll.autohidesScrollers = true }
+            if scroll.scrollerInsets.top != 6 || scroll.scrollerInsets.bottom != 6 {
+                scroll.scrollerInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+            }
+            if let scroller = scroll.verticalScroller {
+                scroller.wantsLayer = true
+                scroller.layer?.cornerRadius = scroller.bounds.width / 2
+                scroller.layer?.masksToBounds = true
+            }
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
