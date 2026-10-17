@@ -106,6 +106,71 @@ final class CreditUsageProtectionTests: XCTestCase {
     }
 
     @MainActor
+    func testRecheckExplainsExhaustedUnknownAndFailedResultsThenRecovers() async throws {
+        let suite = "CreditUsageProtectionTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // The five-hour quota can be full while the weekly quota is exhausted.
+        var response: AccountOverview? = AccountOverview.parse(["rateLimits": [
+            "limitId": "codex",
+            "primary": ["usedPercent": 0, "windowDurationMins": 300],
+            "secondary": ["usedPercent": 100, "windowDurationMins": 10080]
+        ]])
+        let model = AppModel(remoteDefaults: defaults, creditUsageReader: {
+            guard let response else { throw CodexClientError.notRunning }
+            return response
+        })
+        await model.recheckIncludedQuota()
+        XCTAssertEqual(model.creditUsagePauseReason, .includedQuotaExhausted)
+        XCTAssertTrue(model.includedQuotaCheckMessage?.contains("仍有套餐周期额度已用完") == true)
+        XCTAssertFalse(model.isRecheckingIncludedQuota)
+
+        response = AccountOverview.parse([:])
+        await model.recheckIncludedQuota()
+        XCTAssertNotNil(model.creditUsagePauseReason)
+        XCTAssertTrue(model.includedQuotaCheckMessage?.contains("暂时无法确认") == true)
+
+        response = nil
+        await model.recheckIncludedQuota()
+        XCTAssertNotNil(model.creditUsagePauseReason)
+        XCTAssertTrue(model.includedQuotaCheckMessage?.contains("额度检查失败") == true)
+        XCTAssertNotNil(model.accountOverviewError)
+        XCTAssertFalse(model.isRecheckingIncludedQuota)
+
+        response = account()
+        await model.recheckIncludedQuota()
+        XCTAssertNil(model.creditUsagePauseReason)
+        XCTAssertNil(model.includedQuotaCheckMessage)
+        XCTAssertNil(model.accountOverviewError)
+    }
+
+    @MainActor
+    func testRecheckShowsLoadingAndDoesNotIssueDuplicateReads() async throws {
+        let suite = "CreditUsageProtectionTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let started = expectation(description: "Quota read started")
+        var continuation: CheckedContinuation<AccountOverview, Never>?
+        var reads = 0
+        let model = AppModel(remoteDefaults: defaults, creditUsageReader: {
+            reads += 1
+            return await withCheckedContinuation {
+                continuation = $0
+                started.fulfill()
+            }
+        })
+        let check = Task { await model.recheckIncludedQuota() }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(model.isRecheckingIncludedQuota)
+        await model.recheckIncludedQuota()
+        XCTAssertEqual(reads, 1)
+        continuation?.resume(returning: account(used: 100))
+        await check.value
+        XCTAssertFalse(model.isRecheckingIncludedQuota)
+        XCTAssertNotNil(model.includedQuotaCheckMessage)
+    }
+
+    @MainActor
     func testUnavailableBackgroundRefreshDoesNotInterruptRunningTurn() async throws {
         for response in [nil, AccountOverview.parse([:])] as [AccountOverview?] {
             let suite = "CreditUsageProtectionTests.\(UUID())"

@@ -68,6 +68,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var allowsExtraCreditUsage = false
     @Published private(set) var creditUsagePauseReason: CreditUsageProtection.Reason?
     @Published private(set) var creditUsagePauseFailures: [String: String] = [:]
+    @Published private(set) var isRecheckingIncludedQuota = false
+    @Published private(set) var includedQuotaCheckMessage: String?
     private var creditUsageProtection = CreditUsageProtection()
     private var creditUsageMonitorTask: Task<Void, Never>?
     private var creditUsageRefreshTask: Task<Void, Never>?
@@ -1482,19 +1484,34 @@ final class AppModel: ObservableObject {
     }
 
     func recheckIncludedQuota() async {
+        guard !isRecheckingIncludedQuota else { return }
+        includedQuotaCheckMessage = nil
         guard creditInterruptingThreadIDs.isEmpty, creditUsagePauseFailures.isEmpty else {
-            errorMessage = "还有会话正在暂停或暂停失败，请等待暂停成功后再解除额度保护。"
+            includedQuotaCheckMessage = "还有会话正在暂停或暂停失败，请等待暂停成功后再解除额度保护。"
             return
         }
+        isRecheckingIncludedQuota = true
+        defer { isRecheckingIncludedQuota = false }
         do {
             let overview = try await readCreditUsage()
             guard !allowsExtraCreditUsage else { return }
+            accountOverviewError = nil
             if CreditUsageProtection.hasKnownIncludedQuota(overview) {
                 creditUsageProtection.reset()
             }
             applyAccountOverview(overview)
+            if creditUsagePauseReason != nil {
+                if overview.usage.buckets.contains(where: { bucket in
+                    bucket.windows.contains { ($0.usedPercent ?? 0) >= 100 }
+                }) {
+                    includedQuotaCheckMessage = "检查完成：仍有套餐周期额度已用完，保护尚未解除。请等待额度恢复，或在个性设置中开启额外额度使用。"
+                } else {
+                    includedQuotaCheckMessage = "检查完成：暂时无法确认套餐额度已恢复，保护尚未解除，请稍后重试。"
+                }
+            }
         } catch {
             accountOverviewError = error.localizedDescription
+            includedQuotaCheckMessage = "额度检查失败：\(error.localizedDescription)。请检查连接后重试。"
         }
     }
 

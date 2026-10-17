@@ -533,8 +533,16 @@ struct ContentView: View {
                     .foregroundStyle(.red)
             }
             HStack {
-                Button("检查套餐额度并解除保护") { Task { await model.recheckIncludedQuota() } }
+                Button(model.isRecheckingIncludedQuota ? "正在检查套餐额度…" : "检查套餐额度并解除保护") {
+                    Task { await model.recheckIncludedQuota() }
+                }
+                .disabled(model.isRecheckingIncludedQuota)
                 Button("打开个性设置") { model.showingAppearanceSettings = true }
+            }
+            if let message = model.includedQuotaCheckMessage {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
             }
             Text("排队消息已保留。解除保护后排队消息可继续发送，已中断的任务需手动继续。")
                 .font(.caption).foregroundStyle(.secondary)
