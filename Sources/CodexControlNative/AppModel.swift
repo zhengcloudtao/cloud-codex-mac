@@ -31,6 +31,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var usageInsightsError: String?
     @Published private(set) var isLoadingUsageInsights = false
     @Published var showingUsageInsights = false
+    @Published var showingWeeklyQuotaComparison = false
+    @Published private(set) var weeklyQuotaComparison = WeeklyQuotaComparison()
+    @Published private(set) var weeklyQuotaBaseline: WeeklyQuotaComparison.Snapshot?
+    @Published private(set) var automaticWeeklyQuotaSampler = AutomaticWeeklyQuotaSampler()
+    @Published private(set) var automaticWeeklyQuotaEnabled = true
+    @Published private(set) var isSamplingWeeklyQuota = false
+    private var weeklyQuotaSamplingTask: Task<Void, Never>?
+    private var weeklyQuotaSamplingGeneration = 0
+    private let weeklyQuotaProbe = WeeklyQuotaProbe()
+    private let localQuotaTokenReader = CodexLocalTokenUsageReader()
     @Published private(set) var providerUsage = ProviderUsageLedger()
     @Published private(set) var personalSkills: [CodexPersonalSkill] = []
     @Published private(set) var personalSkillsError: String?
@@ -877,6 +887,10 @@ final class AppModel: ObservableObject {
         self.connectionHealth = ConnectionHealth(refreshInterval: accountRefreshInterval)
         self.remoteServerConfiguration = RemoteServerConfiguration.load(remoteDefaults)
         self.providerUsage = ProviderUsageLedger.load(remoteDefaults)
+        self.weeklyQuotaComparison = WeeklyQuotaComparison.load(remoteDefaults)
+        self.automaticWeeklyQuotaSampler = AutomaticWeeklyQuotaSampler.load(remoteDefaults)
+        self.automaticWeeklyQuotaEnabled = remoteDefaults.object(forKey: AutomaticWeeklyQuotaSampler.enabledKey) == nil
+            || remoteDefaults.bool(forKey: AutomaticWeeklyQuotaSampler.enabledKey)
         self.creditUsageReader = creditUsageReader
         self.creditTurnInterrupter = creditTurnInterrupter
         self.userInputTimeoutSeconds = userInputTimeoutSeconds
@@ -1390,6 +1404,7 @@ final class AppModel: ObservableObject {
         do {
             try await client.start()
             connectionText = customModelProvider.enabled ? "已连接：\(customModelProvider.name)" : "已连接本机 Codex"
+            startWeeklyQuotaSampling()
             Task { await connectionHealth.check() }
             await loadComposerOptions(cwd: nil)
             await loadFolderCatalog()
@@ -1636,6 +1651,121 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func loadWeeklyQuotaComparison() {
+        weeklyQuotaComparison = .load(remoteDefaults)
+    }
+
+    func setAutomaticWeeklyQuotaEnabled(_ enabled: Bool) {
+        guard automaticWeeklyQuotaEnabled != enabled else { return }
+        automaticWeeklyQuotaEnabled = enabled
+        remoteDefaults.set(enabled, forKey: AutomaticWeeklyQuotaSampler.enabledKey)
+        stopWeeklyQuotaSampling()
+        if enabled { startWeeklyQuotaSampling() }
+    }
+
+    private func startWeeklyQuotaSampling() {
+        guard hasStarted, automaticWeeklyQuotaEnabled, !customModelProvider.enabled,
+              weeklyQuotaSamplingTask == nil else { return }
+        weeklyQuotaSamplingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.sampleWeeklyQuotaAutomatically()
+                do { try await Task.sleep(for: .seconds(AutomaticWeeklyQuotaSampler.interval)) }
+                catch { return }
+            }
+        }
+    }
+
+    private func stopWeeklyQuotaSampling() {
+        weeklyQuotaSamplingTask?.cancel()
+        weeklyQuotaSamplingTask = nil
+        weeklyQuotaSamplingGeneration += 1
+        weeklyQuotaProbe.cancel()
+        isSamplingWeeklyQuota = false
+        automaticWeeklyQuotaSampler.reset()
+        persistAutomaticWeeklyQuotaSampler()
+    }
+
+    private func persistAutomaticWeeklyQuotaSampler() {
+        if let data = try? JSONEncoder().encode(automaticWeeklyQuotaSampler) {
+            remoteDefaults.set(data, forKey: AutomaticWeeklyQuotaSampler.defaultsKey)
+        }
+    }
+
+    func sampleWeeklyQuotaAutomatically() async {
+        guard hasStarted, automaticWeeklyQuotaEnabled, !customModelProvider.enabled,
+              !isSwitchingModelProvider, !isSamplingWeeklyQuota else { return }
+        let generation = weeklyQuotaSamplingGeneration
+        isSamplingWeeklyQuota = true
+        defer { if generation == weeklyQuotaSamplingGeneration { isSamplingWeeklyQuota = false } }
+        do {
+            let snapshot = try await weeklyQuotaProbe.read(localTokenMode: true,
+                knownLifetimeTokens: automaticWeeklyQuotaSampler.latest?.lifetimeTokens ?? 0)
+            guard generation == weeklyQuotaSamplingGeneration, !Task.isCancelled,
+                  !customModelProvider.enabled else { return }
+            let localUsage = if let baseline = automaticWeeklyQuotaSampler.baseline {
+                try? await localQuotaTokenReader.read(since: baseline.date, through: snapshot.date)
+            } else { nil as CodexLocalTokenUsageReader.Summary? }
+            guard generation == weeklyQuotaSamplingGeneration, !Task.isCancelled else { return }
+            if let sample = automaticWeeklyQuotaSampler.record(snapshot, localTokens: localUsage?.tokens, costReport: localUsage?.cost) {
+                var updated = weeklyQuotaComparison
+                if let index = updated.samples.firstIndex(where: { $0.id == sample.id }) {
+                    updated.samples[index] = sample
+                } else { updated.samples.append(sample) }
+                // Bound unattended history while preserving manual measurements.
+                let automaticIDs = Set(updated.samples.filter { $0.automatic == true }.suffix(200).map(\.id))
+                updated.samples.removeAll { $0.automatic == true && !automaticIDs.contains($0.id) }
+                remoteDefaults.set(try JSONEncoder().encode(updated), forKey: WeeklyQuotaComparison.defaultsKey)
+                weeklyQuotaComparison = updated
+            }
+            persistAutomaticWeeklyQuotaSampler()
+        } catch {
+            guard generation == weeklyQuotaSamplingGeneration, !Task.isCancelled else { return }
+            automaticWeeklyQuotaSampler.readingFailed(WeeklyQuotaComparison.ReadIssue.classify(error))
+            persistAutomaticWeeklyQuotaSampler()
+        }
+    }
+
+    func readWeeklyQuotaMeasurement(start: Bool) async throws -> WeeklyQuotaComparison.Sample? {
+        guard !customModelProvider.enabled else {
+            weeklyQuotaBaseline = nil
+            throw WeeklyQuotaComparison.MeasurementError("自动采样仅适用于 ChatGPT 套餐；其他套餐请手动录入。")
+        }
+        let snapshot = try await client.readWeeklyQuotaSnapshot()
+        if start {
+            weeklyQuotaBaseline = snapshot
+            return nil
+        }
+        guard let baseline = weeklyQuotaBaseline else {
+            throw WeeklyQuotaComparison.MeasurementError("请先读取起点。")
+        }
+        let sample = try baseline.sample(to: snapshot)
+        weeklyQuotaBaseline = nil
+        return sample
+    }
+
+    func cancelWeeklyQuotaMeasurement() { weeklyQuotaBaseline = nil }
+
+    func saveWeeklyQuotaSample(_ sample: WeeklyQuotaComparison.Sample) throws {
+        var updated = weeklyQuotaComparison
+        updated.samples.append(sample)
+        let data = try JSONEncoder().encode(updated)
+        remoteDefaults.set(data, forKey: WeeklyQuotaComparison.defaultsKey)
+        weeklyQuotaComparison = updated
+    }
+
+    func removeWeeklyQuotaSample(_ id: UUID) throws {
+        var updated = weeklyQuotaComparison
+        updated.samples.removeAll { $0.id == id }
+        let data = try JSONEncoder().encode(updated)
+        remoteDefaults.set(data, forKey: WeeklyQuotaComparison.defaultsKey)
+        weeklyQuotaComparison = updated
+        if automaticWeeklyQuotaSampler.sampleID == id {
+            automaticWeeklyQuotaSampler.invalidate()
+            persistAutomaticWeeklyQuotaSampler()
+        }
+    }
+
     func refreshPersonalSkills(forceReload: Bool = true) async {
         guard !isLoadingPersonalSkills else { return }
         isLoadingPersonalSkills = true
@@ -1872,6 +2002,7 @@ final class AppModel: ObservableObject {
                     try Task.checkCancellation()
                     try await self.client.start()
                     self.connectionText = "已重新连接本机 Codex"
+                    self.startWeeklyQuotaSampling()
                     self.errorMessage = nil
                     await self.loadComposerOptions(cwd: self.selectedFolder)
                     await self.loadFolderCatalog()
@@ -2737,13 +2868,14 @@ final class AppModel: ObservableObject {
         let previous = customModelProvider
         let previousOptions = client.customModelOptions
         isSwitchingModelProvider = true
+        stopWeeklyQuotaSampling()
         threadStatusMonitorTask?.cancel(); threadStatusMonitorTask = nil
         creditUsageMonitorTask?.cancel(); creditUsageMonitorTask = nil
         creditUsageRefreshTask?.cancel(); creditUsageRefreshTask = nil
         clientReconnectTask?.cancel(); clientReconnectTask = nil
         defer {
             isSwitchingModelProvider = false
-            if hasStarted { startThreadStatusMonitor(); startCreditUsageMonitor() }
+            if hasStarted { startThreadStatusMonitor(); startCreditUsageMonitor(); startWeeklyQuotaSampling() }
         }
         do {
             try await client.changeProvider(configuration, options: options)

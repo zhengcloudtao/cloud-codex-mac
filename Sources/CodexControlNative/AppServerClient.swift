@@ -101,7 +101,7 @@ final class AppServerClient {
         if process?.isRunning == true { process?.terminate() }
     }
 
-    func start() async throws {
+    func start(initializationTimeoutSeconds: UInt64 = 12) async throws {
         if connected { return }
         output?.readabilityHandler = nil
         errorOutput?.readabilityHandler = nil
@@ -176,13 +176,25 @@ final class AppServerClient {
                     "mcpServerOpenaiFormElicitation": true,
                     "extensions": ["openai/form": [:]]
                 ]
-            ]
+            ],
+            timeoutSeconds: initializationTimeoutSeconds
         )
         guard response["platformOs"] as? String == "macos" else {
             throw CodexClientError.invalidResponse
         }
         try send(["method": "initialized"])
         connected = true
+    }
+
+    /// Stop only this client's subprocess and complete its pending reads.
+    func shutdown() {
+        processGeneration += 1
+        process?.terminationHandler = nil
+        if process?.isRunning == true { process?.terminate() }
+        let disconnect = onDisconnect
+        onDisconnect = nil
+        handleTermination(0)
+        onDisconnect = disconnect
     }
 
     /// Only called while all local turns/queued tasks are idle. Preload the new
@@ -241,12 +253,31 @@ final class AppServerClient {
             subscriptionPeriodEnd: subscriptionPeriodEnd
         )
     }
-    func readAccountOverview() async throws -> AccountOverview {
+    func readAccountOverview(timeoutSeconds: UInt64 = 12) async throws -> AccountOverview {
         let subscriptionPeriodEnd = CodexSubscriptionPeriodReader().read()
         return AccountOverview.parse(
-            try await request("account/rateLimits/read", params: [:]),
+            try await request("account/rateLimits/read", params: [:], timeoutSeconds: timeoutSeconds),
             subscriptionPeriodEnd: subscriptionPeriodEnd
         )
+    }
+
+    func readWeeklyQuotaSnapshot(usageTimeoutSeconds: UInt64 = 45, quotaTimeoutSeconds: UInt64 = 20) async throws -> WeeklyQuotaComparison.Snapshot {
+        // Bracket the token read with quota reads; refuse a moving quota boundary.
+        let startAccount = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: quotaTimeoutSeconds)
+        let before = try await readAccountOverview(timeoutSeconds: quotaTimeoutSeconds)
+        let usage = try await request("account/usage/read", params: [:], timeoutSeconds: usageTimeoutSeconds)
+        let after = try await readAccountOverview(timeoutSeconds: quotaTimeoutSeconds)
+        let endAccount = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: quotaTimeoutSeconds)
+        return try WeeklyQuotaComparison.parseSnapshot(startAccount: startAccount, before: before,
+                                                       usage: usage, after: after, endAccount: endAccount)
+    }
+
+    func readWeeklyQuotaForLocalUsage(knownLifetimeTokens: Int64 = 0) async throws -> WeeklyQuotaComparison.Snapshot {
+        let start = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: 20)
+        let quota = try await readAccountOverview(timeoutSeconds: 20)
+        let end = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: 20)
+        return try WeeklyQuotaComparison.parseSnapshot(startAccount: start, before: quota,
+            usage: [:], after: quota, endAccount: end, fallbackLifetimeTokens: knownLifetimeTokens)
     }
 
     func readUsageInsights() async throws -> CodexUsageInsights {
@@ -777,6 +808,10 @@ final class AppServerClient {
             "turn/start",
             params: params
         )
+        if !customModelProvider.enabled {
+            CodexUsageTierStore.acceptedTurn(threadID: threadID, result: result,
+                requested: params["serviceTier"] as? String, home: CodexUsageTierStore.home(codexHomeOverride))
+        }
         return (result["turn"] as? JSON)?["id"] as? String
     }
 

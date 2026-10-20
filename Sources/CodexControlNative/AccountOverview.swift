@@ -356,6 +356,10 @@ struct AccountOverviewView: View {
                 HStack {
                     Text("套餐与额度").font(.headline)
                     Spacer()
+                    Button("周额度对比") {
+                        expanded = false
+                        model.showingWeeklyQuotaComparison = true
+                    }
                     Button("刷新") { Task { await model.connectionHealth.check() } }
                         .disabled(model.connectionHealth.isChecking)
                 }

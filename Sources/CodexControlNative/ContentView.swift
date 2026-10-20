@@ -497,6 +497,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingThreadNameEditor) { threadNameEditorSheet }
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
         .sheet(isPresented: $model.showingUsageInsights) { CodexUsageInsightsSheet() }
+        .sheet(isPresented: $model.showingWeeklyQuotaComparison) { WeeklyQuotaComparisonSheet() }
         .sheet(isPresented: $model.showingPersonalSkills) { CodexPersonalSkillsSheet() }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
