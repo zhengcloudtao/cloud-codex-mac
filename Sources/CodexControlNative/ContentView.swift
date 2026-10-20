@@ -2857,7 +2857,7 @@ private struct ScrollLatestObserver: NSViewRepresentable {
     }
 }
 
-private final class ScrollLatestProbeView: NSView {
+final class ScrollLatestProbeView: NSView {
     var onLatestChanged: ((Bool) -> Void)?
     var onHistoryRequested: (() -> Void)?
     weak var viewportController: MessageScrollViewportController?
@@ -2865,6 +2865,9 @@ private final class ScrollLatestProbeView: NSView {
     private weak var observedScrollView: NSScrollView?
     private var observationTokens: [NSObjectProtocol] = []
     private var lastReportedValue: Bool?
+    private var connectionGeneration = 0
+    private var connectionScheduled = false
+    private var positionReportScheduled = false
 
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
@@ -2873,16 +2876,26 @@ private final class ScrollLatestProbeView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        connectWhenReady()
+        if window == nil { disconnect() } else { connectWhenReady() }
     }
 
     func connectWhenReady() {
+        guard !connectionScheduled else { return }
+        connectionScheduled = true
+        let generation = connectionGeneration
         DispatchQueue.main.async { [weak self] in
-            self?.connectToEnclosingScrollView()
+            guard let self, self.connectionGeneration == generation else { return }
+            self.connectionScheduled = false
+            guard self.window != nil else { return }
+            self.connectToEnclosingScrollView()
         }
     }
 
     func disconnect() {
+        connectionGeneration += 1
+        connectionScheduled = false
+        positionReportScheduled = false
+        lastReportedValue = nil
         observationTokens.forEach { NotificationCenter.default.removeObserver($0) }
         observationTokens.removeAll()
         observedScrollView = nil
@@ -2900,7 +2913,7 @@ private final class ScrollLatestProbeView: NSView {
         guard let scrollView = ancestor as? NSScrollView else { return }
         guard observedScrollView !== scrollView else {
             viewportController?.attach(scrollView)
-            reportCurrentPosition()
+            schedulePositionReport()
             return
         }
 
@@ -2915,7 +2928,7 @@ private final class ScrollLatestProbeView: NSView {
             object: scrollView,
             queue: .main
         ) { [weak self] _ in
-            self?.reportCurrentPosition()
+            self?.schedulePositionReport()
         })
         scrollView.contentView.postsFrameChangedNotifications = true
         observationTokens.append(center.addObserver(
@@ -2923,7 +2936,7 @@ private final class ScrollLatestProbeView: NSView {
             object: scrollView.contentView,
             queue: .main
         ) { [weak self] _ in
-            self?.reportCurrentPosition()
+            self?.schedulePositionReport()
         })
         scrollView.contentView.postsBoundsChangedNotifications = true
         observationTokens.append(center.addObserver(
@@ -2931,7 +2944,7 @@ private final class ScrollLatestProbeView: NSView {
             object: scrollView.contentView,
             queue: .main
         ) { [weak self] _ in
-            self?.reportCurrentPosition()
+            self?.schedulePositionReport()
         })
 
         if let documentView = scrollView.documentView {
@@ -2941,14 +2954,28 @@ private final class ScrollLatestProbeView: NSView {
                 object: documentView,
                 queue: .main
             ) { [weak self] _ in
-                self?.reportCurrentPosition()
+                self?.schedulePositionReport()
             })
         }
-        reportCurrentPosition()
+        schedulePositionReport()
+    }
+
+    private func schedulePositionReport() {
+        guard !positionReportScheduled else { return }
+        positionReportScheduled = true
+        let generation = connectionGeneration
+        // Bounds/frame notifications also fire inside SwiftUI's layout and
+        // CA commit. Scrolling the clip view from that callback re-enters the
+        // same layout while a conversation is being replaced.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.connectionGeneration == generation else { return }
+            self.positionReportScheduled = false
+            self.reportCurrentPosition()
+        }
     }
 
     private func reportCurrentPosition() {
-        guard let scrollView = observedScrollView,
+        guard window != nil, let scrollView = observedScrollView,
               let documentView = scrollView.documentView else { return }
         // This timeline is vertically scrollable only. A previously oversized
         // document can leave AppKit's clip view with a stale horizontal origin
@@ -2973,8 +3000,10 @@ private final class ScrollLatestProbeView: NSView {
         }
         guard latest != lastReportedValue else { return }
         lastReportedValue = latest
+        let generation = connectionGeneration
         DispatchQueue.main.async { [weak self] in
-            self?.onLatestChanged?(latest)
+            guard let self, self.connectionGeneration == generation else { return }
+            self.onLatestChanged?(latest)
         }
     }
 }

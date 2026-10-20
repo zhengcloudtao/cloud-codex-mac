@@ -1375,6 +1375,7 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        MainThreadWatchdog.shared.start()
         systemMetrics.start()
         connectionHealth.start { [weak self] in
             guard let self else { throw CodexClientError.notRunning }

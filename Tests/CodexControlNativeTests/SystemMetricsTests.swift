@@ -83,12 +83,35 @@ final class SystemMetricsTests: XCTestCase {
     }
 
     @MainActor
-    func testLiveSamplerReadsCurrentVolumeWithoutRequiringTemperatureHardware() {
+    func testLiveSamplerReadsCurrentVolumeWithoutRequiringTemperatureHardware() async {
         let monitor = SystemMetricsMonitor()
-        monitor.sample()
+        await monitor.sample()
         XCTAssertNotNil(monitor.snapshot.storageTotalBytes)
         XCTAssertNotNil(monitor.snapshot.storageUsedBytes)
         XCTAssertGreaterThan(monitor.snapshot.storageTotalBytes ?? 0, 0)
+    }
+
+    @MainActor
+    func testSlowHardwareReadLeavesMainActorResponsiveAndCoalescesRefreshes() async {
+        let entered = expectation(description: "background hardware read")
+        let gate = DispatchSemaphore(value: 0)
+        let sampler = SystemMetricsSampler(read: {
+            XCTAssertFalse(Thread.isMainThread)
+            entered.fulfill()
+            _ = gate.wait(timeout: .now() + 5)
+            return .init(cpuUsagePercent: 42, storageUsedBytes: 25, storageTotalBytes: 100,
+                         temperatureCelsius: nil, temperatureSource: nil, capturedAt: 123)
+        })
+        let monitor = SystemMetricsMonitor(sampler: sampler)
+        let first = Task { await monitor.sample() }
+        await fulfillment(of: [entered], timeout: 2)
+        // This code runs on the main actor while the hardware reader is blocked.
+        XCTAssertNil(monitor.snapshot.storageTotalBytes)
+        await monitor.sample() // Must return without starting a duplicate read.
+        gate.signal()
+        await first.value
+        XCTAssertEqual(monitor.snapshot.capturedAt, 123)
+        XCTAssertEqual(monitor.snapshot.cpuUsagePercent, 42)
     }
 
     func testOptionalLiveAppleSiliconChipTemperature() throws {

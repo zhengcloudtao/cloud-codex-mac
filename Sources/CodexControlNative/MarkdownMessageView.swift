@@ -124,7 +124,7 @@ private struct MarkdownBlocksView: View, Equatable {
             ReliableSelectableAttributedText(
                 text: MarkdownTextDocument.appKitAttributed(from: blocks), layoutWidth: contentWidth
             )
-                .frame(width: contentWidth, alignment: .leading)
+                .frame(maxWidth: contentWidth, alignment: .leading)
                 .frame(maxWidth: UserMessagePresentation.maximumContentWidth, alignment: .leading)
                 // A reply uses its measured text height even when the lazy
                 // timeline proposes extra space from a previous layout.

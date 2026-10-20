@@ -131,8 +131,8 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
 
     let text: NSAttributedString
     var maximumWidth: CGFloat = UserMessagePresentation.maximumContentWidth
-    // History rows already know their final content width. Treat it as data
-    // rather than relying on intermediate SwiftUI sizing proposals.
+    // History rows provide an upper bound and a fallback for provisional
+    // sizing. A useful final proposal may be narrower due to a native scroller.
     var layoutWidth: CGFloat? = nil
     @Environment(\.openURL) private var openURL
 
@@ -208,8 +208,13 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
         let naturalWidth = layoutWidth != nil || (proposal.width ?? 0) >= 80
             ? 0
             : textView.naturalAttributedWidth()
-        let width = layoutWidth.map { min(maximumWidth, max(80, $0)) }
-            ?? ReliableSelectableText.resolvedMaximumWidth(
+        // The row width is an upper bound. A native legacy scrollbar can
+        // reduce the final proposal after the conversation column was measured.
+        // Honoring that proposal keeps a long reply from widening the document.
+        let width = layoutWidth.map { requested in
+            let available = proposal.width.flatMap { $0 >= 80 ? $0 : nil } ?? requested
+            return min(maximumWidth, max(80, min(requested, available)))
+        } ?? ReliableSelectableText.resolvedMaximumWidth(
                 proposedWidth: proposal.width,
                 naturalWidth: naturalWidth,
                 maximumWidth: maximumWidth

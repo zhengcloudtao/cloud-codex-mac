@@ -49,14 +49,18 @@ final class SystemMetricsMonitor: ObservableObject {
     @Published private(set) var snapshot = SystemMetricsSnapshot.unavailable
     @Published private(set) var refreshIntervalSeconds: Int = SystemMetricsRefreshInterval.fiveSeconds.rawValue
 
-    private var previousCPUTicks: CPUTicks?
+    private let sampler: SystemMetricsSampler
+    private var isSampling = false
     private var loop: Task<Void, Never>?
     private var hasStarted = false
+
+    init(sampler: SystemMetricsSampler = SystemMetricsSampler()) {
+        self.sampler = sampler
+    }
 
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
-        sample()
         startLoop()
     }
 
@@ -64,7 +68,6 @@ final class SystemMetricsMonitor: ObservableObject {
         guard refreshIntervalSeconds != interval.rawValue else { return }
         refreshIntervalSeconds = interval.rawValue
         guard hasStarted else { return }
-        sample()
         startLoop()
     }
 
@@ -73,21 +76,53 @@ final class SystemMetricsMonitor: ObservableObject {
         let nanoseconds = UInt64(refreshIntervalSeconds) * 1_000_000_000
         loop = Task { [weak self] in
             while !Task.isCancelled {
+                guard let self else { return }
+                await self.sample()
                 try? await Task.sleep(nanoseconds: nanoseconds)
-                guard !Task.isCancelled, let self else { return }
-                self.sample()
             }
         }
     }
 
-    func sample() {
+    func sample() async {
+        // A refresh-interval change must not queue another hardware read while
+        // the previous one is still waiting on a system service.
+        guard !isSampling else { return }
+        isSampling = true
+        defer { isSampling = false }
+        let value = await sampler.sample()
+        guard !Task.isCancelled else { return }
+        snapshot = value
+    }
+
+    deinit { loop?.cancel() }
+}
+
+/// All monitors share one serial queue: the cached SMC/HID clients must never
+/// be used concurrently. Disk-space XPC and IOKit calls can wait indefinitely;
+/// none of them may run on the UI thread.
+final class SystemMetricsSampler: @unchecked Sendable {
+    private static let queue = DispatchQueue(label: "cloudcodex.system-metrics", qos: .utility)
+    private var previousCPUTicks: CPUTicks?
+    private let readOverride: (@Sendable () -> SystemMetricsSnapshot)?
+
+    init(read: (@Sendable () -> SystemMetricsSnapshot)? = nil) { readOverride = read }
+
+    func sample() async -> SystemMetricsSnapshot {
+        await withCheckedContinuation { continuation in
+            Self.queue.async {
+                continuation.resume(returning: self.readOverride?() ?? self.readSnapshot())
+            }
+        }
+    }
+
+    private func readSnapshot() -> SystemMetricsSnapshot {
         let ticks = Self.readCPUTicks()
         let cpu = previousCPUTicks.flatMap { ticks?.usage(since: $0) }
         if let ticks { previousCPUTicks = ticks }
         let storage = Self.readStorage()
         let smcTemperature = AppleSMCTemperatureReader.readCPUAverage()
         let hidTemperature = smcTemperature == nil ? AppleSiliconTemperatureReader.readChipTemperature() : nil
-        snapshot = .init(
+        return .init(
             cpuUsagePercent: cpu,
             storageUsedBytes: storage?.used,
             storageTotalBytes: storage?.total,
@@ -96,8 +131,6 @@ final class SystemMetricsMonitor: ObservableObject {
             capturedAt: Date().timeIntervalSince1970
         )
     }
-
-    deinit { loop?.cancel() }
 
     private struct CPUTicks {
         let user: UInt64
