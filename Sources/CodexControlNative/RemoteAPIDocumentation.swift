@@ -209,6 +209,7 @@ enum RemoteAPIDocumentation {
 
     - `history/next` 返回 `{id,threadId,workspace,cursor}`；回传 `{page:{messages,nextCursor},error}`。
       message 字段为 `id,role,text,title,model,effort,attachments,timestamp?`。历史读取不得 resume 或启动轮次。
+      可选 `images:[{name,mimeType,data}]` 传输当前授权轮次的图片预览，data 为纯 Base64；每页最多 8 张，每张解码后不超过 512 KiB、最长边 1600，格式 PNG/JPEG。图片沿用登录鉴权和两分钟中转有效期，不上传公共存储；旧端可忽略此字段。
     - `resets/next` 返回 `{id,creditRef}`；creditRef 只是 Mac 生成的不可逆引用。只有小程序用户明确二次确认后才创建请求。
     - `unpair` 与 Mini 删除设备都必须先检查 queued/claimed/running 任务。成功后撤销 owner、作废配对码并拒绝旧用户继续创建任务，但保留历史记录。
 

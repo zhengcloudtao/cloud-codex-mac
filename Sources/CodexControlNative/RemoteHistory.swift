@@ -19,6 +19,12 @@ struct RemoteHistoryMessage: Codable {
     var model: String
     var effort: String
     var attachments: [String]
+    var images: [RemoteHistoryImage]? = nil
+}
+struct RemoteHistoryImage: Codable {
+    var name: String
+    var mimeType: String
+    var data: String
 }
 struct RemoteHistoryResponse: Encodable {
     var page: RemoteHistoryPage?

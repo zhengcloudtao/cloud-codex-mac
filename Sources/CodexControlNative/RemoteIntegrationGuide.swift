@@ -119,6 +119,7 @@ enum RemoteIntegrationGuide {
     如支持只读历史：history/next data 为 {"id":"read-uuid","threadId":"会话ID","workspace":"授权路径","cursor":""}。
     Mac 通过 POST /api/cloud-codex/agent/history/{id} 回报：{"page":{"messages":[],"nextCursor":null},"error":""}。
     messages 项必需 id、role、text、title、model、effort:string 与 attachments:string[]；timestamp 可选 Unix 秒。
+    可选 images:[{name,mimeType,data}]，data 是 PNG/JPEG 纯 Base64，每页最多 8 张、单张解码后 512 KiB、最长边 1600。后端须校验并保留该字段；图片与会话使用相同鉴权及两分钟有效期，不转为公开地址。旧消息省略 images 仍有效。
     失败时 page 可缺省或 null，error 为可读文本。成功确认格式同上。历史读取不得创建、resume 或启动开发轮次。
 
     额度重置是可选高级功能。resets/next data 为 {"id":"attempt-uuid","creditRef":"心跳usage提供的引用"}；Mac POST /api/cloud-codex/agent/resets/{id}，请求 {"status":"执行结果字符串"}。

@@ -510,7 +510,9 @@ final class AppServerClient {
         let response = try await request("thread/turns/list", params: params)
         let ids = Set((response["data"] as? [JSON] ?? []).compactMap { $0["id"] as? String })
         let metadata = await readTurnModelMetadata(for: state, turnIDs: ids)
-        return Self.remoteHistoryPage(response, metadata: metadata)
+        return await Task.detached(priority: .utility) {
+            Self.remoteHistoryPage(response, metadata: metadata)
+        }.value
     }
 
     /// The relay's actual model is sourced only from the exact persisted turn,
@@ -523,16 +525,41 @@ final class AppServerClient {
     }
 
     nonisolated static func remoteHistoryPage(_ response: JSON, metadata: [String: TurnModelMetadata] = [:]) -> RemoteHistoryPage {
+        var imagesByID: [String: [RemoteHistoryImage]] = [:]
+        var imageCount = 0
         let turns = (response["data"] as? [JSON] ?? []).reversed().map { original -> JSON in
             var turn = original
             turn["items"] = (original["items"] as? [JSON] ?? []).compactMap { originalItem -> JSON? in
                 var item = originalItem
                 let type = item["type"] as? String ?? ""
-                guard ["userMessage", "agentMessage", "reasoning", "plan", "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch", "imageView"].contains(type) else { return nil }
+                guard ["userMessage", "agentMessage", "reasoning", "plan", "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch", "imageView", "imageGeneration"].contains(type) else { return nil }
                 item.removeValue(forKey: "arguments")
+                let key = "\(original["id"] as? String ?? ""):\(item["id"] as? String ?? "")"
+                func addImage(_ source: String, name: String, key: String) -> Bool {
+                    guard imageCount < RemoteHistoryImageEncoder.maxImages,
+                          let image = RemoteHistoryImageEncoder.encode(source, name: name) else { return false }
+                    imagesByID[key, default: []].append(image)
+                    imageCount += 1
+                    return true
+                }
+                if type == "imageGeneration", item["status"] as? String == "completed" {
+                    let path = item["savedPath"] as? String ?? ""
+                    var loaded = addImage(path, name: "生成的图片", key: key)
+                    if !loaded, let result = item["result"] as? String, !result.isEmpty, result.utf8.count <= 44 * 1024 * 1024 {
+                        let source = result.hasPrefix("data:image/") ? result : "data:image/png;base64," + result
+                        loaded = addImage(source, name: "生成的图片", key: key)
+                    }
+                    // Export as an assistant message without leaking the Mac path.
+                    return ["id": item["id"] as? String ?? "", "type": "agentMessage",
+                            "text": loaded ? "生成的图片" : "生成的图片暂时无法同步，请在 Mac 查看"]
+                }
                 if type == "userMessage" {
                     item["content"] = (item["content"] as? [JSON] ?? []).map { part -> JSON in
                         if ["image", "localImage"].contains(part["type"] as? String ?? "") {
+                            let source = (part["path"] as? String) ?? (part["url"] as? String) ?? ""
+                            if addImage(source, name: "提问图片", key: key) {
+                                return ["type": "text", "text": "［图片附件］"]
+                            }
                             return ["type": "text", "text": "［图片附件，请在 Mac 查看原图］"]
                         }
                         return part
@@ -548,7 +575,8 @@ final class AppServerClient {
                 text: message.text, title: message.activityTitle ?? "",
                 timestamp: message.timestamp?.timeIntervalSince1970,
                 model: message.model ?? "", effort: message.reasoningEffort ?? "",
-                attachments: message.attachments.map { $0.name })
+                attachments: message.attachments.map { $0.name },
+                images: imagesByID["\(message.turnID ?? ""):\(message.id)"])
         }
         return RemoteHistoryPage(messages: messages, nextCursor: response["nextCursor"] as? String)
     }
