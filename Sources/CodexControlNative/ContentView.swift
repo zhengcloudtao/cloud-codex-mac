@@ -4665,25 +4665,6 @@ private struct Composer: View {
                     .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
                 }
 
-                if !currentAttachments.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(currentAttachments) { attachment in
-                                AttachmentPreview(attachment: attachment) {
-                                    removeAttachment(attachment.id)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .id(currentAttachments.map(\.id))
-                    .defaultScrollAnchor(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .frame(height: 82)
-                    .clipped()
-                }
-
                 if mode == .conversation, !model.selectedWaitingMessages.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 8) {
@@ -4728,6 +4709,25 @@ private struct Composer: View {
                             .stroke(Color.blue.opacity(0.34), lineWidth: 1)
                     )
                     .help("当前任务结束后按顺序发送。等待消息仅保留在本次应用运行期间，退出应用前请先处理。")
+                }
+
+                if !currentAttachments.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(currentAttachments) { attachment in
+                                AttachmentPreview(attachment: attachment) {
+                                    removeAttachment(attachment.id)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .id(currentAttachments.map(\.id))
+                    .defaultScrollAnchor(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 82)
+                    .clipped()
                 }
 
                 ComposerTextEditor(
