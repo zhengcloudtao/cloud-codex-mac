@@ -1,5 +1,11 @@
 # CloudCodex
 
+## 下载站点
+
+下载站点的静态文件独立放在 `website/`：`website/index.html` 为首页，`website/Resources/` 为网页使用的资源。页面可直接打开，无需构建；部署时将 `website/` 内的内容放到站点根目录，保留目录结构。
+
+根目录的 `Resources/` 继续存放 Mac 应用的图标和资源；网页使用的图标副本随下载站点独立维护。
+
 ## 关于 CloudCodex
 
 点击工具栏的信息按钮，或菜单栏「CloudCodex → 关于 CloudCodex」，打开独立的只读介绍窗口。介绍涵盖工作区与会话管理、消息与附件、执行设置、个性外观、远程控制，以及本机 app-server 的请求与事件流原理。
