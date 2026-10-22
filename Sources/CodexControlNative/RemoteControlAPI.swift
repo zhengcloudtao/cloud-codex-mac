@@ -13,6 +13,7 @@ struct RemoteThreadSnapshot: Codable, Equatable {
     let status: String
     /// Unix time used by the mini-program to keep Mac-created conversations in recency order.
     var updatedAt: Double? = nil
+    var isFavorite: Bool? = nil
 }
 
 /// Model capabilities come from the connected Codex app-server. The mini
@@ -39,6 +40,7 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     var defaultEffort: String? = nil
     var systemMetrics: SystemMetricsSnapshot? = nil
     var connectionHealth: RemoteConnectionHealthSnapshot? = nil
+    var supportsFavorites: Bool = true
 }
 
 struct RemoteTask: Codable, Equatable {
@@ -222,6 +224,15 @@ final class RemoteControlAPI: @unchecked Sendable {
         let data = try await perform(path: "/api/cloud-codex/agent/history/next", method: "GET", bodyData: nil)
         return try Self.decodeOptionalEnvelope(RemoteHistoryRead.self, data: data)
     }
+    func nextFavorite() async throws -> RemoteFavoriteChange? {
+        let data = try await perform(path: "/api/cloud-codex/agent/favorites/next", method: "GET", bodyData: nil)
+        return try Self.decodeOptionalEnvelope(RemoteFavoriteChange.self, data: data)
+    }
+    func finishFavorite(_ id: String, status: String) async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/favorites/\(id)", method: "POST", bodyData: JSONEncoder().encode(["status": status]))
+        let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
+    }
     func nextReset() async throws -> RemoteResetAttempt? {
         let data = try await perform(path: "/api/cloud-codex/agent/resets/next", method: "GET", bodyData: nil)
         return try Self.decodeOptionalEnvelope(RemoteResetAttempt.self, data: data)
@@ -334,5 +345,23 @@ final class RemoteRelayRedirectPolicy: NSObject, URLSessionTaskDelegate {
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
+    }
+}
+
+struct RemoteFavoriteChange: Codable, Equatable {
+    let id: String
+    let deviceId: String
+    let threadId: String
+    let workspace: String
+    let favorited: Bool
+    var expiresAt: String? = nil
+
+    func isExpired(at now: Date = Date()) -> Bool {
+        guard let expiresAt else { return true }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: expiresAt) { return date <= now }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: expiresAt).map { $0 <= now } ?? true
     }
 }

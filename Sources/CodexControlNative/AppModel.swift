@@ -3379,6 +3379,36 @@ final class AppModel: ObservableObject {
                         self.remoteUsageLastAttempt = Date()
                     }
                 } catch { /* Keep the durable attempt for retry with the same idempotency key. */ }
+                // Favorite commands change local sidebar metadata only, never start a turn.
+                do {
+                    if let change = try await api.nextFavorite() {
+                        guard self.remoteControlEnabled, !Task.isCancelled, self.remoteControlAPI === api else { return }
+                        var status = "applied"
+                        do {
+                            guard change.deviceId == api.deviceID, !change.isExpired(),
+                                  self.folderCatalog.contains(where: { $0.path == change.workspace }) else {
+                                throw RemoteControlError.server("工作区未授权")
+                            }
+                            if !self.favoriteConversations.hasApplied(change.id) {
+                                let thread: CodexThread
+                                if let known = self.favoriteConversations.thread(change.threadId) {
+                                    thread = known
+                                } else {
+                                    (thread, _) = try await self.client.readThread(change.threadId)
+                                }
+                                guard self.remoteControlEnabled, !Task.isCancelled, self.remoteControlAPI === api else { return }
+                                guard !change.isExpired(), thread.id == change.threadId, thread.cwd == change.workspace,
+                                      self.folderCatalog.contains(where: { $0.path == thread.cwd }) else {
+                                    throw RemoteControlError.server("会话工作区不匹配")
+                                }
+                                self.favoriteConversations.apply(thread, favorited: change.favorited, commandID: change.id)
+                                self.saveFavoriteConversations()
+                            }
+                        } catch { status = "failed" }
+                        guard self.remoteControlEnabled, !Task.isCancelled, self.remoteControlAPI === api else { return }
+                        try await api.finishFavorite(change.id, status: status)
+                    }
+                } catch { /* Older relays lack this optional endpoint; acknowledgements retry safely. */ }
                 // History remains read-only, never a turn/start or thread/resume task.
                 do {
                     if let read = try await api.nextHistory() {
@@ -3587,7 +3617,7 @@ final class AppModel: ObservableObject {
             permissionLabel: remotePermissionLabel,
             remoteControlReady: ready,
             workspaces: Array(workspaces),
-            threads: Array(snapshots),
+            threads: favoriteConversations.remoteSnapshots(recent: snapshots, allowedPaths: Set(workspaces.map(\.path))),
             models: Array(models),
             usage: remoteControlPaired ? remoteUsageSnapshot : nil,
             defaultModel: selectedModelCapabilities?.model,
