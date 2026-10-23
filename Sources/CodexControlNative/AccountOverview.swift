@@ -1,6 +1,23 @@
 import Foundation
 import SwiftUI
 
+/// Display labels only. Keep server plan IDs unchanged in storage and relay payloads.
+/// Numbered tiers match the official ChatGPT client's consumer billing labels.
+enum CodexPlanName {
+    static func displayName(_ plan: String) -> String {
+        switch plan.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "prolite", "pro 100", "pro 5×": return "Pro 100"
+        case "pro", "pro 200", "pro 20×": return "Pro 200"
+        case "promax", "pro 500": return "Pro 500"
+        case "plus": return "Plus"
+        case "free": return "Free"
+        case "go": return "Go"
+        case "", "未提供", "unknown": return "套餐未提供"
+        default: return plan
+        }
+    }
+}
+
 struct AccountOverview {
     struct WeeklyPaceStatus: Equatable {
         enum State: Equatable { case ahead, onTrack, behind }
@@ -46,17 +63,7 @@ struct AccountOverview {
         }
     }
 
-    // Matches the installed official client's personal.pro/proLite tier labels.
-    var planDisplayName: String {
-        switch plan.lowercased() {
-        case "pro": return "Pro 20×"
-        case "prolite": return "Pro 5×"
-        case "plus": return "Plus"
-        case "free": return "Free"
-        case "未提供", "unknown": return "套餐未提供"
-        default: return plan
-        }
-    }
+    var planDisplayName: String { CodexPlanName.displayName(plan) }
 
     static func parse(_ json: [String: Any], subscriptionPeriodEnd: Date? = nil) -> Self {
         let legacy = json["rateLimits"] as? [String: Any]
@@ -356,6 +363,10 @@ struct AccountOverviewView: View {
                 HStack {
                     Text("套餐与额度").font(.headline)
                     Spacer()
+                    Button("账号管理") {
+                        expanded = false
+                        model.showingAccounts = true
+                    }
                     Button("周额度对比") {
                         expanded = false
                         model.showingWeeklyQuotaComparison = true

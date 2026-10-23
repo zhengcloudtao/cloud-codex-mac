@@ -21,13 +21,8 @@ struct CodexUsageInsights: Equatable {
 
         var planDisplayName: String? {
             guard let plan else { return nil }
-            switch plan.lowercased() {
-            case "pro", "prolite": return "Pro"
-            case "plus": return "Plus"
-            case "free": return "Free"
-            case "unknown": return nil
-            default: return plan
-            }
+            guard plan.lowercased() != "unknown" else { return nil }
+            return CodexPlanName.displayName(plan)
         }
     }
 

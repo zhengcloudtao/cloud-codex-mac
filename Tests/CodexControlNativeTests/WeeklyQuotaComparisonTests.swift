@@ -17,7 +17,7 @@ final class WeeklyQuotaComparisonTests: XCTestCase {
         let snapshot = try WeeklyQuotaComparison.parseSnapshot(startAccount: account, before: overview(),
             usage: ["summary": ["lifetimeTokens": 1000]], after: overview(), endAccount: account,
             now: Date(timeIntervalSince1970: 100))
-        XCTAssertEqual(snapshot.plan, "Pro 5×")
+        XCTAssertEqual(snapshot.plan, "Pro 100")
     }
 
     func testMovingQuotaIsIdentifiedAsTransientInsteadOfGenericFailure() {
@@ -88,6 +88,13 @@ final class WeeklyQuotaComparisonTests: XCTestCase {
                           balance: Decimal = 10) -> WeeklyQuotaComparison.Snapshot {
         .init(identity: identity, plan: plan, usedPercent: used, resetsAt: reset,
               lifetimeTokens: tokens, date: Date(timeIntervalSince1970: time), creditBalance: balance)
+    }
+
+    func testRenamedTierContinuesExistingBaseline() throws {
+        let sample = try snapshot(plan: "Pro 5×").sample(to: snapshot(plan: "Pro 100", used: 30, tokens: 1500, time: 200))
+        XCTAssertEqual(sample.plan, "Pro 100")
+        XCTAssertEqual(sample.tokens, 500)
+        XCTAssertThrowsError(try snapshot(plan: "Pro 5×").sample(to: snapshot(plan: "Pro 200", used: 30, tokens: 1500, time: 200)))
     }
 
     func testUsesTokenDifferenceRatherThanLifetimeTotal() throws {

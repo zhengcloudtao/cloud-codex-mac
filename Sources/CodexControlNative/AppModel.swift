@@ -17,6 +17,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSwitchingModelProvider = false
     private var openAIModelOptions: [CodexModelOption] = []
 
+    let accounts: CodexAccountStore
+    @Published var showingAccounts = false
+    @Published private(set) var accountSwitchError: String?
+    private var accountGeneration = 0
+    private let localCodexHome: URL?
+
     let browser = EmbeddedBrowser()
     let connectionHealth: ConnectionHealth
     let systemMetrics = SystemMetricsMonitor()
@@ -39,8 +45,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSamplingWeeklyQuota = false
     private var weeklyQuotaSamplingTask: Task<Void, Never>?
     private var weeklyQuotaSamplingGeneration = 0
-    private let weeklyQuotaProbe = WeeklyQuotaProbe()
-    private let localQuotaTokenReader = CodexLocalTokenUsageReader()
+    private let weeklyQuotaProbe: WeeklyQuotaProbe
+    private var localQuotaTokenReader: CodexLocalTokenUsageReader
     @Published private(set) var providerUsage = ProviderUsageLedger()
     @Published private(set) var personalSkills: [CodexPersonalSkill] = []
     @Published private(set) var personalSkillsError: String?
@@ -871,9 +877,20 @@ final class AppModel: ObservableObject {
         creditUsageReader: (() async throws -> AccountOverview)? = nil,
         creditTurnInterrupter: ((String, String) async throws -> Void)? = nil,
         remoteAPILoader: (@Sendable (Bool) async throws -> RemoteControlAPI)? = nil,
-        client injectedClient: AppServerClient? = nil
+        client injectedClient: AppServerClient? = nil,
+        accounts injectedAccounts: CodexAccountStore? = nil
     ) {
-        self.client = injectedClient ?? AppServerClient()
+        let accounts = injectedAccounts ?? CodexAccountStore(defaults: remoteDefaults)
+        self.accounts = accounts
+        self.localCodexHome = injectedClient?.codexHomeOverride
+        let home = accounts.home(for: accounts.active)
+        self.client = injectedClient ?? AppServerClient(codexHomeOverride: home, usesManagedAccount: !accounts.active.isLocal)
+        self.client.sharedConversationHome = CodexUsageTierStore.home(self.localCodexHome)
+        let quotaClient = self.client
+        self.weeklyQuotaProbe = WeeklyQuotaProbe {
+            AppServerClient(codexHomeOverride: quotaClient.codexHomeOverride, usesManagedAccount: quotaClient.usesManagedAccount)
+        }
+        self.localQuotaTokenReader = CodexLocalTokenUsageReader(home: self.client.sharedConversationHome)
         let library = ModelProviderLibrary.load(from: remoteDefaults)
         self.providerLibrary = library
         self.customModelProvider = library.activeConfiguration
@@ -1379,11 +1396,17 @@ final class AppModel: ObservableObject {
         systemMetrics.start()
         connectionHealth.start { [weak self] in
             guard let self else { throw CodexClientError.notRunning }
+            guard !self.isSwitchingModelProvider else { throw CodexClientError.notRunning }
+            let generation = self.accountGeneration
             do {
-                self.applyAccountOverview(try await self.client.readAccountOverview())
+                let overview = try await self.client.readAccountOverview()
+                guard generation == self.accountGeneration, !self.isSwitchingModelProvider else { throw CodexClientError.notRunning }
+                self.applyAccountOverview(overview)
                 self.accountOverviewError = nil
             } catch {
-                self.accountOverviewError = error.localizedDescription
+                if generation == self.accountGeneration, !self.isSwitchingModelProvider {
+                    self.accountOverviewError = error.localizedDescription
+                }
                 throw error
             }
         }
@@ -1403,6 +1426,9 @@ final class AppModel: ObservableObject {
             self.scheduleClientReconnect()
         }
         do {
+            try accounts.prepareHome(for: accounts.active)
+            try prepareSharedConversations()
+            mergeLegacyConversationPreferences()
             try await client.start()
             connectionText = customModelProvider.enabled ? "已连接：\(customModelProvider.name)" : "已连接本机 Codex"
             startWeeklyQuotaSampling()
@@ -1431,6 +1457,7 @@ final class AppModel: ObservableObject {
         guard !customModelProvider.enabled else { return }
         let restored = quotaRestorationTracker.record(overview)
         accountOverview = overview
+        accounts.setOverview(overview, for: accounts.library.activeID)
         if restored {
             enqueueRemoteNotification(.init(
                 type: RemoteNotificationEventBody.quotaRestored,
@@ -1532,7 +1559,7 @@ final class AppModel: ObservableObject {
     }
 
     private func requestCreditUsageRefresh() {
-        guard !customModelProvider.enabled, !allowsExtraCreditUsage, creditUsageRefreshTask == nil else { return }
+        guard !isSwitchingModelProvider, !customModelProvider.enabled, !allowsExtraCreditUsage, creditUsageRefreshTask == nil else { return }
         creditUsageRefreshTask = Task { [weak self] in
             guard let self else { return }
             defer { self.creditUsageRefreshTask = nil }
@@ -1605,7 +1632,7 @@ final class AppModel: ObservableObject {
     }
 
     func consumeResetCredit(_ credit: RemoteUsageSnapshot.ResetCredit) async {
-        guard resetCreditInProgressRef == nil else { return }
+        guard resetCreditInProgressRef == nil, !isSwitchingModelProvider else { return }
         if let reason = ResetCreditUsePresentation.unavailableReason(for: credit) {
             resetCreditStatusMessage = reason
             resetCreditStatusIsError = true
@@ -1640,6 +1667,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshUsageInsights() async {
+        guard !isSwitchingModelProvider else { return }
         guard !customModelProvider.enabled else { return }
         guard !isLoadingUsageInsights else { return }
         isLoadingUsageInsights = true
@@ -1732,7 +1760,9 @@ final class AppModel: ObservableObject {
             weeklyQuotaBaseline = nil
             throw WeeklyQuotaComparison.MeasurementError("自动采样仅适用于 ChatGPT 套餐；其他套餐请手动录入。")
         }
+        let generation = accountGeneration
         let snapshot = try await client.readWeeklyQuotaSnapshot()
+        guard generation == accountGeneration, !isSwitchingModelProvider else { throw CancellationError() }
         if start {
             weeklyQuotaBaseline = snapshot
             return nil
@@ -1768,7 +1798,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshPersonalSkills(forceReload: Bool = true) async {
-        guard !isLoadingPersonalSkills else { return }
+        guard !isSwitchingModelProvider, !isLoadingPersonalSkills else { return }
         isLoadingPersonalSkills = true
         defer { isLoadingPersonalSkills = false }
         do {
@@ -1853,10 +1883,12 @@ final class AppModel: ObservableObject {
 
     /// Discover new rows as well as status changes, without loading history.
     private func syncVisibleThreadStatuses() async {
+        let generation = accountGeneration
         let requestedFolder = selectedFolder
         do {
             let page = try await client.listThreads(limit: 60, cwd: requestedFolder)
-            guard requestedFolder == selectedFolder else { return }
+            guard generation == accountGeneration, !isSwitchingModelProvider, !Task.isCancelled,
+                  requestedFolder == selectedFolder else { return }
             let ended = page.threads.filter { incoming in
                 incoming.status != "active" && threads.contains { $0.id == incoming.id && $0.status == "active" }
             }
@@ -2089,6 +2121,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectFolder(_ path: String?) {
+        guard !isSwitchingModelProvider else { return }
         if path != selectedFolder { speech.stop() }
         if path != selectedFolder { cancelWaitingMessageEdit() }
         if path != selectedFolder { cancelInterruptedMessageEdit() }
@@ -2128,6 +2161,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectThread(_ id: String?) {
+        guard !isSwitchingModelProvider else { return }
         if let id { markConversationRead(id) }
         if id != selectedThreadID { speech.stop() }
         if id != selectedThreadID { cancelWaitingMessageEdit() }
@@ -2818,6 +2852,212 @@ final class AppModel: ObservableObject {
         return ModelProviderLibrary.openAI
     }
 
+    var isWaitingForRemoteAccountSwitch: Bool {
+        isLoadingRemoteCredential || isRemoteUnpairing || isSendingRemoteOfflineHeartbeat
+            || remoteClaimTask != nil || remoteHistoryTask != nil
+    }
+
+    var accountSwitchUnavailableReason: String? {
+        if isSwitchingModelProvider { return "正在切换连接，请稍候。" }
+        if accounts.busyID != nil { return "请先完成或取消账号登录、刷新操作。" }
+        if isWaitingForRemoteAccountSwitch {
+            return "正在处理远程请求，请稍候再切换账号。"
+        }
+        if !canChangeProviderConfiguration || !capacityRetryStates.isEmpty
+            || !userInputRequests.isEmpty || !computerUseApprovalRequests.isEmpty
+            || isRecording || revertingFileChanges != nil || resetCreditInProgressRef != nil
+            || isRecheckingIncludedQuota || !creditInterruptingThreadIDs.isEmpty {
+            return "请等待运行中、重试中及排队的任务结束后再切换账号。"
+        }
+        if isLoading || isConversationLoading || isLoadingUsageInsights || isLoadingPersonalSkills
+            || isLoadingUnreadThreads { return "正在读取会话或账号资料，请稍候。" }
+        return nil
+    }
+
+    /// Usage follows the login; conversation preferences stay shared.
+    private var accountPreferenceKeys: [String] {
+        [quotaConsumptionHistoryKey, Self.creditUsagePauseKey, WeeklyQuotaComparison.defaultsKey,
+         AutomaticWeeklyQuotaSampler.defaultsKey]
+    }
+
+    private func prepareSharedConversations() throws {
+        try CodexSharedConversations.prepare(home: CodexUsageTierStore.home(localCodexHome),
+            accountHomes: accounts.library.accounts.compactMap { accounts.home(for: $0) })
+    }
+
+    private func mergeLegacyConversationPreferences() {
+        let marker = "CloudCodex.sharedConversationPreferences.v1"
+        guard !remoteDefaults.bool(forKey: marker) else { return }
+        for account in accounts.library.accounts {
+            let saved = remoteDefaults.dictionary(forKey: "CloudCodex.accountPreferences.v1." + account.id) ?? [:]
+            if let data = saved[unreadCompletionsKey] as? Data,
+               let old = try? JSONDecoder().decode(UnreadCompletions.self, from: data) {
+                for (id, turn) in old.latestTurns where unreadCompletions.latestTurns[id] == nil {
+                    unreadCompletions.latestTurns[id] = turn
+                    if old.unread.contains(id) { unreadCompletions.unread.insert(id) }
+                }
+            }
+            if let data = saved[favoriteConversationsKey] as? Data,
+               let old = try? JSONDecoder().decode(FavoriteConversations.self, from: data) {
+                for thread in old.sortedThreads() where !favoriteConversations.contains(thread.id) {
+                    favoriteConversations.toggle(thread)
+                }
+            }
+            revertedFileChanges.formUnion(saved[revertedFileChangesKey] as? [String] ?? [])
+        }
+        saveUnreadCompletions(); saveFavoriteConversations()
+        remoteDefaults.set(Array(revertedFileChanges), forKey: revertedFileChangesKey)
+        remoteDefaults.set(true, forKey: marker)
+    }
+
+    private func exchangeAccountPreferences(from oldID: String, to newID: String) {
+        let prefix = "CloudCodex.accountPreferences.v1."
+        var saved: [String: Any] = [:]
+        for key in accountPreferenceKeys { saved[key] = remoteDefaults.object(forKey: key) }
+        remoteDefaults.set(saved, forKey: prefix + oldID)
+        let restored = remoteDefaults.dictionary(forKey: prefix + newID) ?? [:]
+        for key in accountPreferenceKeys {
+            if let value = restored[key] { remoteDefaults.set(value, forKey: key) }
+            else { remoteDefaults.removeObject(forKey: key) }
+        }
+        quotaConsumptionTracker = remoteDefaults.data(forKey: quotaConsumptionHistoryKey)
+            .flatMap { try? JSONDecoder().decode(QuotaConsumptionTracker.self, from: $0) } ?? QuotaConsumptionTracker()
+        weeklyQuotaComparison = .load(remoteDefaults)
+        automaticWeeklyQuotaSampler = .load(remoteDefaults)
+    }
+
+    func switchAccount(to id: String) async {
+        guard id != accounts.library.activeID,
+              let target = accounts.library.accounts.first(where: { $0.id == id }) else { return }
+        if let reason = accountSwitchUnavailableReason { accountSwitchError = reason; return }
+        let previousHome = client.codexHomeOverride
+        let previousManaged = client.usesManagedAccount
+        let targetHome = target.isLocal ? localCodexHome : accounts.home(for: target)
+        let oldID = accounts.library.activeID
+        isSwitchingModelProvider = true
+        accountSwitchError = nil
+        accounts.lockForSwitch(id)
+        accountGeneration += 1
+        // Keep the user's enabled/paired state. Stop dispatching remote work and
+        // drain reads/uploads against the old account before replacing its client.
+        let remoteLoop = remoteControlLoopTask
+        remoteLoop?.cancel()
+        let accountWorkers = [threadStatusMonitorTask, selectedThreadMonitorTask, selectedThreadMetadataTask,
+                              creditUsageMonitorTask, creditUsageRefreshTask, clientReconnectTask].compactMap { $0 }
+        stopWeeklyQuotaSampling()
+        threadStatusMonitorTask?.cancel(); threadStatusMonitorTask = nil
+        selectedThreadMonitorTask?.cancel(); selectedThreadMonitorTask = nil
+        selectedThreadMetadataTask?.cancel(); selectedThreadMetadataTask = nil
+        creditUsageMonitorTask?.cancel(); creditUsageMonitorTask = nil
+        creditUsageRefreshTask?.cancel(); creditUsageRefreshTask = nil
+        clientReconnectTask?.cancel(); clientReconnectTask = nil
+        defer {
+            accounts.unlockAfterSwitch()
+            isSwitchingModelProvider = false
+            startRemoteControlIfNeeded()
+            if hasStarted {
+                startThreadStatusMonitor(); startCreditUsageMonitor(); startWeeklyQuotaSampling()
+                Task { await self.connectionHealth.check() }
+            }
+        }
+        await remoteLoop?.value
+        remoteControlLoopTask = nil
+        let remoteWorkers = [remoteUsageTask, remoteSchedulingTask, remoteRecoveryTask,
+                             remoteStatusUploadTask, remoteProgressUploadTask,
+                             remoteNotificationUploadTask].compactMap { $0 }
+        for worker in remoteWorkers { await worker.value }
+        for worker in accountWorkers { await worker.value }
+        guard locallyRunningThreadIDs.isEmpty, remoteExecutions.isEmpty,
+              waitingMessages.isEmpty, capacityRetryStates.isEmpty,
+              !isCreatingThread, !isSelectedThreadProcessing else {
+            accountSwitchError = "请等待运行中、重试中及排队的任务结束后再切换账号。"
+            return
+        }
+        do {
+            try accounts.prepareHome(for: target)
+            try prepareSharedConversations()
+            mergeLegacyConversationPreferences()
+            try await client.changeAccount(home: targetHome, managed: !target.isLocal)
+            // Verify the actual identity before changing the selected card or local state.
+            if target.isLocal {
+                if let identity = try? await client.readAccountIdentity() { accounts.update(target.id, identity: identity) }
+            } else {
+                let identity = try await client.readAccountIdentity()
+                guard target.identity == nil || target.identity?.email == identity.email else {
+                    throw ModelProviderError.message("目标目录中的账号已变化，请重新授权。")
+                }
+                accounts.update(target.id, identity: identity)
+            }
+        } catch {
+            do {
+                try await client.changeAccount(home: previousHome, managed: previousManaged)
+                connectionText = "已连接：\(accounts.active.title)（已恢复）"
+            } catch {
+                connectionText = "未连接"
+            }
+            accountSwitchError = "切换失败，仍保留原账号。请检查目标账号登录状态和本机 Codex 连接。"
+            if let selectedThreadID {
+                await claimSelectedThreadForInput(threadID: selectedThreadID)
+                selectedThreadMonitorTask = Task { [weak self] in
+                    while !Task.isCancelled {
+                        guard let self, self.selectedThreadID == selectedThreadID else { return }
+                        await self.syncLatestExternalActivity(threadID: selectedThreadID)
+                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                    }
+                }
+            }
+            return
+        }
+        threadRequestGeneration += 1
+        selectionGeneration += 1
+        exchangeAccountPreferences(from: oldID, to: id)
+        accounts.activate(id)
+        localQuotaTokenReader = CodexLocalTokenUsageReader(home: client.sharedConversationHome)
+        automaticWeeklyQuotaSampler.reset()
+        persistAutomaticWeeklyQuotaSampler()
+        // Keep the selected conversation, rendered history, drafts and sidebar caches.
+        pendingDeltaFlushTask?.cancel(); pendingDeltaFlushTask = nil
+        turnProgressHintTask?.cancel(); turnProgressHintTask = nil
+        pendingActivityDeltas.removeAll(); pendingAssistantDeltas.removeAll(); pendingDeltaOrder.removeAll()
+        eventThreadID = nil; eventBuffer = nil
+        isExternalThreadProcessing = false; threadOwnershipNotice = nil
+        threadInputAvailability = selectedThreadID == nil ? .available : .checking
+        isConversationLoading = false
+        accountOverview = nil; accountOverviewError = nil
+        usageInsights = nil; usageInsightsError = nil
+        weeklyQuotaBaseline = nil; recentThirtyMinuteConsumptionRate = nil
+        personalSkills = []; personalSkillsError = nil
+        openAIModelOptions = []
+        modelOptions = providerLibrary.composerOptions(openAI: [])
+        permissionProfiles = []
+        resetCreditStatusMessage = nil; resetCreditStatusIsError = false
+        quotaRestorationTracker = QuotaRestorationTracker()
+        creditUsageProtection.reset(); creditUsagePauseReason = nil
+        creditUsagePauseFailures.removeAll(); includedQuotaCheckMessage = nil
+        remoteUsageSnapshot = nil; remoteUsageLastAttempt = nil
+        remoteSchedulingState = RemoteSchedulingState(); remoteSchedulingLastAttempt = nil
+        remoteRecoveryLastAttempt = nil
+        connectionText = "已连接：\(accounts.active.title)"
+        errorMessage = nil
+        await loadComposerOptions(cwd: selectedThread?.cwd)
+        await loadFolderCatalog()
+        await refreshThreads()
+        if let selectedThreadID {
+            await claimSelectedThreadForInput(threadID: selectedThreadID)
+            if hasStarted {
+                selectedThreadMonitorTask = Task { [weak self] in
+                    while !Task.isCancelled {
+                        guard let self, self.selectedThreadID == selectedThreadID else { return }
+                        await self.syncLatestExternalActivity(threadID: selectedThreadID)
+                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                    }
+                }
+            }
+        }
+        do { applyAccountOverview(try await client.readAccountOverview()) }
+        catch { accountOverviewError = "账号已切换，额度暂时无法读取，请稍后刷新。" }
+    }
+
     var canChangeProviderConfiguration: Bool {
         !isSwitchingModelProvider && locallyRunningThreadIDs.isEmpty && remoteExecutions.isEmpty
             && waitingMessages.isEmpty && !isCreatingThread && !isSelectedThreadProcessing
@@ -2962,6 +3202,7 @@ final class AppModel: ObservableObject {
     }
 
     func prepareNewThread() {
+        guard !isSwitchingModelProvider else { return }
         speech.stop()
         cancelWaitingMessageEdit()
         cancelInterruptedMessageEdit()
@@ -3172,6 +3413,7 @@ final class AppModel: ObservableObject {
     }
 
     func setRemoteControlEnabled(_ enabled: Bool) {
+        guard !isSwitchingModelProvider else { return }
         if enabled {
             do { _ = try remoteServerConfiguration.validatedURL() }
             catch {
@@ -3258,7 +3500,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startRemoteControlIfNeeded() {
-        guard remoteControlEnabled, remoteControlLoopTask == nil else { return }
+        guard !isSwitchingModelProvider, remoteControlEnabled, remoteControlLoopTask == nil else { return }
         guard remoteControlAPI != nil else {
             if let remoteCredentialIssue {
                 remoteControlStatus = remoteCredentialIssue
@@ -3328,6 +3570,7 @@ final class AppModel: ObservableObject {
         var heartbeatCountdown = 0
         // Initial global read also avoids briefly clearing the relay's history
         // with whichever workspace happens to be selected at launch.
+        guard !Task.isCancelled else { return }
         await refreshRemoteSchedulingSnapshot()
         while !Task.isCancelled, remoteControlEnabled, remoteControlAPI === api {
             refreshRemoteUsageIfNeeded()
@@ -4456,6 +4699,7 @@ final class AppModel: ObservableObject {
             }
         }
         if method == "account/rateLimits/updated" {
+            guard !isSwitchingModelProvider else { return }
             // Sparse notifications can still carry a balance decrease or an
             // exhausted window. Confirm the remaining fields with a full read.
             observeCreditUsage(AccountOverview.parse(params))

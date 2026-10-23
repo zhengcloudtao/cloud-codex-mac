@@ -2,6 +2,18 @@ import XCTest
 @testable import CloudCodex
 
 final class AccountOverviewTests: XCTestCase {
+    func testNumberedProNamesAreSharedAcrossAccountSurfaces() {
+        for (raw, expected) in [("prolite", "Pro 100"), ("pro", "Pro 200"), ("promax", "Pro 500")] {
+            XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": raw]]).planDisplayName, expected)
+            XCTAssertEqual(CodexAccountIdentity(email: "test@example.invalid", plan: raw).planDisplayName, expected)
+            XCTAssertEqual(CodexUsageInsights.parse(account: ["account": ["planType": raw]], usage: [:]).identity.planDisplayName, expected)
+        }
+        XCTAssertEqual(CodexPlanName.displayName("Pro 5×"), "Pro 100")
+        XCTAssertEqual(CodexPlanName.displayName("Pro 20×"), "Pro 200")
+        XCTAssertEqual(CodexPlanName.displayName(" ProMax "), "Pro 500")
+        XCTAssertEqual(CodexPlanName.displayName("future-plan"), "future-plan")
+    }
+
     func testCreditBalanceUsesCodexBucketAndFormatsCurrentBalance() {
         let account = AccountOverview.parse([
             "rateLimits": ["credits": ["balance": "1", "unlimited": false]],
@@ -101,8 +113,8 @@ final class AccountOverviewTests: XCTestCase {
     }
 
     func testProTiersMatchOfficialClientNames() {
-        XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "pro"]]).planDisplayName, "Pro 20×")
-        XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "prolite"]]).planDisplayName, "Pro 5×")
+        XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "pro"]]).planDisplayName, "Pro 200")
+        XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "prolite"]]).planDisplayName, "Pro 100")
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "unknown"]]).planDisplayName, "套餐未提供")
         XCTAssertEqual(AccountOverview.parse(["rateLimits": ["planType": "future-plan"]]).planDisplayName, "future-plan")
     }

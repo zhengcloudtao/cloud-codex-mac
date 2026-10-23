@@ -9,6 +9,17 @@ final class AutomaticWeeklyQuotaSamplerTests: XCTestCase {
               lifetimeTokens: tokens, date: Date(timeIntervalSince1970: time), creditBalance: balance)
     }
 
+    func testPersistedLegacyTierKeepsAutomaticSamplingBaseline() throws {
+        var old = AutomaticWeeklyQuotaSampler()
+        _ = old.record(snapshot(plan: "Pro 20×"))
+        var restored = try JSONDecoder().decode(AutomaticWeeklyQuotaSampler.self, from: JSONEncoder().encode(old))
+        _ = restored.record(snapshot(plan: "Pro 200", used: 15, tokens: 1500, time: 160))
+        let sample = try XCTUnwrap(restored.record(snapshot(plan: "Pro 200", used: 15, tokens: 1500, time: 220)))
+        XCTAssertEqual(sample.plan, "Pro 200")
+        XCTAssertEqual(sample.tokens, 500)
+        XCTAssertEqual(sample.percent, 5)
+    }
+
     func testStartsWithoutManualActionAndWaitsForStableSignificantConsumption() throws {
         var sampler = AutomaticWeeklyQuotaSampler()
         XCTAssertNil(sampler.record(snapshot()))

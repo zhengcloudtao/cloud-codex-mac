@@ -105,7 +105,7 @@ struct WeeklyQuotaComparison: Codable, Equatable {
         var accountTokensAvailable = true
 
         func sample(to end: Self) throws -> Sample {
-            guard identity == end.identity, plan == end.plan,
+            guard identity == end.identity, CodexPlanName.displayName(plan) == CodexPlanName.displayName(end.plan),
                   abs(resetsAt - end.resetsAt) <= 1,
                   end.date > date, end.date.timeIntervalSince1970 < resetsAt,
                   usedPercent >= 0, end.usedPercent < 100,
@@ -116,7 +116,7 @@ struct WeeklyQuotaComparison: Codable, Equatable {
             if let startBalance = creditBalance, let endBalance = end.creditBalance, endBalance < startBalance {
                 throw MeasurementError("采样期间额外额度余额下降，请重新采样，避免将额外付费用量计入套餐。")
             }
-            return try Sample.make(plan: plan, percent: end.usedPercent - usedPercent,
+            return try Sample.make(plan: CodexPlanName.displayName(plan), percent: end.usedPercent - usedPercent,
                                    tokens: Double(end.lifetimeTokens) - Double(lifetimeTokens),
                                    dollars: nil, monthlyPrice: nil)
         }

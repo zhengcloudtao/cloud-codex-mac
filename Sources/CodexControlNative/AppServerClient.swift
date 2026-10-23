@@ -39,7 +39,9 @@ final class AppServerClient {
     var customModelProvider = ModelProviderConfiguration()
     var customModelOptions: [CodexModelOption] = []
     var providerKeyLoader: (String) async throws -> String? = { try await ModelProviderKeychain.load(account: $0) }
-    private let codexHomeOverride: URL?
+    private(set) var codexHomeOverride: URL?
+    var sharedConversationHome: URL?
+    private(set) var usesManagedAccount: Bool
     private let executableOverride: URL?
     private let resumeTimeoutSeconds: UInt64
     private var processGeneration = 0
@@ -89,8 +91,9 @@ final class AppServerClient {
     var onDisconnect: ((String) -> Void)?
     var beforeTurnSubmission: (() async throws -> Void)?
 
-    init(codexHomeOverride: URL? = nil, executableOverride: URL? = nil, resumeTimeoutSeconds: UInt64 = 60) {
+    init(codexHomeOverride: URL? = nil, executableOverride: URL? = nil, resumeTimeoutSeconds: UInt64 = 60, usesManagedAccount: Bool = false) {
         self.codexHomeOverride = codexHomeOverride
+        self.usesManagedAccount = usesManagedAccount
         self.executableOverride = executableOverride
         self.resumeTimeoutSeconds = resumeTimeoutSeconds
     }
@@ -126,9 +129,23 @@ final class AppServerClient {
             }
             environment[ModelProviderConfiguration.environmentKey] = key
         }
+        if usesManagedAccount {
+            environment.removeValue(forKey: "OPENAI_API_KEY")
+            environment.removeValue(forKey: "CODEX_API_KEY")
+        }
         process.environment = environment
         process.arguments = ["app-server", "--stdio"] + (try provider.launchArguments(models: customModelOptions.map(\.model), options: customModelOptions))
         if !provider.enabled { process.arguments! += ["-c", "model_provider=\"openai\""] }
+        if usesManagedAccount {
+            // Codex owns refresh and credential storage; never copy tokens into app preferences.
+            process.arguments! += ["-c", "cli_auth_credentials_store=\"keyring\""]
+        }
+        if let sharedConversationHome {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.withoutEscapingSlashes]
+            let path = String(data: try encoder.encode(sharedConversationHome.path), encoding: .utf8)!
+            process.arguments! += ["-c", "sqlite_home=\(path)"]
+        }
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
@@ -217,6 +234,44 @@ final class AppServerClient {
         try await start()
     }
 
+    var accountEnvironment: [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        if let codexHomeOverride { environment["CODEX_HOME"] = codexHomeOverride.path }
+        return environment
+    }
+
+    func readAccountIdentity() async throws -> CodexAccountIdentity {
+        try CodexAccountIdentity.parse(await request("account/read", params: ["refreshToken": false]))
+    }
+
+    func beginAccountLogin() async throws -> (id: String, url: URL) {
+        let result = try await request("account/login/start", params: ["type": "chatgpt"])
+        guard let id = result["loginId"] as? String, let raw = result["authUrl"] as? String,
+              let url = URL(string: raw), url.scheme == "https" else {
+            throw CodexClientError.invalidResponse
+        }
+        return (id, url)
+    }
+
+    func cancelAccountLogin(_ id: String) async {
+        _ = try? await request("account/login/cancel", params: ["loginId": id])
+    }
+
+    func logoutAccount() async throws { _ = try await request("account/logout", params: [:]) }
+
+    func changeAccount(home: URL?, managed: Bool) async throws {
+        let oldProcess = process
+        shutdown()
+        // Wait for the old writer to release its session before resuming on the new account.
+        while oldProcess?.isRunning == true { try await Task.sleep(for: .milliseconds(20)) }
+        activityHistoryByThread.removeAll()
+        submittedProviders.removeAll(); turnProviders.removeAll()
+        threadItemsListAvailability = nil
+        codexHomeOverride = home
+        usesManagedAccount = managed
+        try await start()
+    }
+
     func usageProvider(threadID: String, turnID: String?) -> ModelProviderConfiguration? {
         if let turnID, let value = turnProviders[threadID + ":" + turnID] { return value }
         return submittedProviders[threadID]
@@ -247,14 +302,14 @@ final class AppServerClient {
     }
 
     func readRemoteUsage() async throws -> RemoteUsageSnapshot {
-        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader().read()
+        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader(environment: accountEnvironment).read()
         return RemoteUsageSnapshot.parse(
             try await request("account/rateLimits/read", params: [:]),
             subscriptionPeriodEnd: subscriptionPeriodEnd
         )
     }
     func readAccountOverview(timeoutSeconds: UInt64 = 12) async throws -> AccountOverview {
-        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader().read()
+        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader(environment: accountEnvironment).read()
         return AccountOverview.parse(
             try await request("account/rateLimits/read", params: [:], timeoutSeconds: timeoutSeconds),
             subscriptionPeriodEnd: subscriptionPeriodEnd
@@ -283,8 +338,9 @@ final class AppServerClient {
     func readUsageInsights() async throws -> CodexUsageInsights {
         let account = try await request("account/read", params: ["refreshToken": false])
         let usage = try await request("account/usage/read", params: [:])
-        let localProfile = CodexProfileReader().read()
-        let officialProfile = await CodexOfficialProfileReader().read()
+        let reader = CodexProfileReader(environment: accountEnvironment)
+        let localProfile = usesManagedAccount ? nil : reader.read()
+        let officialProfile = usesManagedAccount ? nil : await CodexOfficialProfileReader(tokenReader: reader).read()
         let profile = officialProfile?.mergingFallback(localProfile) ?? localProfile
         let displayNameOverride = CodexProfileDisplayNameStore().displayName(for: profile?.id)
         return CodexUsageInsights.parse(
@@ -313,7 +369,10 @@ final class AppServerClient {
     }
 
     func listThreads(limit: Int = 60, cwd: String? = nil) async throws -> ThreadPage {
-        let result = try await request("thread/list", params: Self.threadListParameters(limit: limit, cwd: cwd))
+        var params = Self.threadListParameters(limit: limit, cwd: cwd)
+        // Include migrated rollouts that were not indexed in the original account's DB.
+        if sharedConversationHome != nil { params["useStateDbOnly"] = false }
+        let result = try await request("thread/list", params: params)
         let rows = result["data"] as? [JSON] ?? []
         return ThreadPage(
             threads: rows.compactMap(CodexThread.init(json:)).map(applyingCachedServiceTier),
@@ -429,7 +488,10 @@ final class AppServerClient {
                 "forceReload": forceReload
             ]
         )
-        return CodexPersonalSkill.parseListResponse(result)
+        return CodexPersonalSkill.parseListResponse(result, personalSkillRoots: [
+            CodexUsageTierStore.home(codexHomeOverride).appendingPathComponent("skills").path,
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".agents/skills").path
+        ])
     }
 
     func listPermissionProfiles(cwd: String?) async throws -> [PermissionProfileOption] {
@@ -838,7 +900,7 @@ final class AppServerClient {
         )
         if !customModelProvider.enabled {
             CodexUsageTierStore.acceptedTurn(threadID: threadID, result: result,
-                requested: params["serviceTier"] as? String, home: CodexUsageTierStore.home(codexHomeOverride))
+                requested: params["serviceTier"] as? String, home: sharedConversationHome ?? CodexUsageTierStore.home(codexHomeOverride))
         }
         return (result["turn"] as? JSON)?["id"] as? String
     }

@@ -36,6 +36,9 @@ struct CloudCodexApp: App {
                 Button("新建会话", action: model.prepareNewThread)
                     .keyboardShortcut("n")
             }
+            CommandMenu("账号") {
+                Button("账号管理…") { model.showingAccounts = true }
+            }
             CommandMenu("会话") {
                 Button("刷新") { Task { await model.refreshThreads() } }
                     .keyboardShortcut("r")

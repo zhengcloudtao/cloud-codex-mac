@@ -94,6 +94,24 @@
 
 设计参考 [CodexBar 的账号额度和本地费用数据分离](https://github.com/steipete/CodexBar/blob/main/docs/codex.md)，沿用当前产品已有的 app-server 数据来源，不引入第三方端点、凭据读取或浏览器 Cookie。验证：`swift test --filter 'CodexLocalTokenUsageReaderTests|WeeklyQuotaProbeTests|AutomaticWeeklyQuotaSamplerTests|WeeklyQuotaComparisonTests'`；可选只读实号检查为 `CLOUDCODEX_AUTO_QUOTA_SMOKE=1 swift test --filter AutomaticWeeklyQuotaSamplerTests.testOptionalLiveReadOnlySnapshot`，不发起模型回合或输出账号数值。
 
+### 套餐名称
+
+套餐名称统一显示为 `Pro 100`（接口 `prolite`）、`Pro 200`（`pro`）、`Pro 500`（`promax`）；账号管理、套餐与额度、使用统计和周额度对比共用同一映射。历史采样中的 `Pro 5×` / `Pro 20×` 在显示和连续采样比较时兼容为新名称，保留原始存储及接口字段，不改变额度或费用计算。对应档位参考 [OpenAI 官方定价](https://learn.chatgpt.com/docs/pricing)及官方客户端的套餐标识。
+
+### 多账号管理与切换
+
+入口：工具栏「账号管理」、菜单「账号 → 账号管理…」或「套餐与额度 → 账号管理」。点击「添加账号」，在官方浏览器授权页完成 ChatGPT 登录；成功后显示账号、套餐、最近一次读取的额度及更新时间。添加不会切换正在使用的账号，需点击卡片上的「切换」。账号列表和当前选择会在重启后保留。
+
+原有环境保留为「本机默认账号」，继续使用进程继承的 `CODEX_HOME` 或 Codex 默认目录。新增账号使用 `~/Library/Application Support/CloudCodex/Accounts/<UUID>` 作为独立 `CODEX_HOME`，启动参数设置 `cli_auth_credentials_store="keyring"`，凭据由 Codex 存入 macOS 钥匙串，应用偏好设置仅保存 UUID、邮箱和套餐。应用不复制、导出登录令牌，也不覆盖本机默认账号的凭据。登录通过 `account/login/start`，完成通知后再用 `account/read` 核验；取消使用 `account/login/cancel`。
+
+切换会重新启动 CloudCodex 自己的 app-server 子进程，并核验目标账号；失败时尝试恢复原连接。所有账号共用会话、收藏和未读标记；切换保留当前会话 ID、历史消息、草稿和附件，新连接重新取得该会话的写入权后可继续下一轮。额度和统计记录仍按账号区分，切换时重建采样起点。工作区目录组织、外观、第三方厂商配置和远程设备配对保持为应用公共设置。新增目录不会复制本机默认目录的 config、MCP 或技能文件；账号目录下的技能与通用 `~/.agents/skills` 按 Codex 自身规则发现。当前若使用第三方模型，账号切换不改变模型厂商，使用 ChatGPT 套餐需在模型设置选择 OpenAI。
+
+切换前需等待运行中、重试中及排队的任务结束（不在运行途中强制更换身份），远程控制可保持开启：切换时暂停轮询并等待本轮同步结束，完成后自动恢复，后续工作使用共享会话及当前账号的登录身份。后台轮询不显示阻塞横幅，也不反复禁用切换按钮；点击切换后若正在领取任务或处理远程命令，按钮保持显示等待状态，最多等待 15 秒，超时才提示重试。重新授权当前账号前先切回「本机默认账号」；若授权得到不同邮箱，会退出该次错误登录并保留原卡片，另一个账号应通过「添加账号」保存。移除仅适用于非当前的新增账号，确认后先 `account/logout` 再移除卡片，本地会话文件保留。
+
+会话共享使用本机默认 `CODEX_HOME` 的 `sessions`、`archived_sessions` 和 SQLite 状态库：新增账号的两个会话目录链接到共享目录，app-server 通过 `sqlite_home` 指向同一状态库。旧账号目录先合并会话文件，再整体改名为 `*.before-sharing-<UUID>` 备份；同名分叉内容会停止迁移并保留原文件。列表启用 Codex 的 rollout 扫描以发现迁入记录。认证目录、钥匙串条目和账号配置不共享、不复制。旧账号的收藏/未读记录只合并一次，原偏好备份保留。
+
+新增账号使用钥匙串后，旧的仅从 `auth.json` 读取的头像或订阅到期字段可能不可用；界面不回退读取其他账号的资料。额度卡片明确标注采样时间，网络或登录失败时保留旧快照并显示错误。验证使用 `swift test --filter CodexAccountsTests` 的模拟子进程，覆盖授权提前完成、取消后迟到通知、共享会话续接、失败回退、保留草稿/运行中任务阻止切换、远程控制开启时切换及失败回退保持开关及退出移除；真实浏览器登录、钥匙串授权和多账号模型调用需交互验收。
+
 ### 自动刷新
 
 在「偏好设置（个性设置）→ 会话与显示 → 套餐与额度」中配置自动刷新频率，可选 10 秒、30 秒、1 分钟（默认）、2 分钟或 5 分钟。修改后立即按新间隔重新计时，设置自动保存，重启后继续使用。套餐面板中的「刷新」按钮仍可立即读取最新信息；启动、重连和网络恢复也会触发检查。常规刷新同时更新账号接口连接状态。

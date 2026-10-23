@@ -22,7 +22,7 @@ final class CodexUsageInsightsTests: XCTestCase {
 
         XCTAssertEqual(value.identity.email, "tester@example.com")
         XCTAssertEqual(value.identity.displayName, "tester")
-        XCTAssertEqual(value.identity.planDisplayName, "Pro")
+        XCTAssertEqual(value.identity.planDisplayName, "Pro 200")
         XCTAssertEqual(value.summary.lifetimeTokens, 6_890_000_000)
         XCTAssertEqual(value.summary.longestRunningTurnSeconds, 11_520)
         XCTAssertEqual(value.dailyBuckets.map(\.tokens), [800, 1200])

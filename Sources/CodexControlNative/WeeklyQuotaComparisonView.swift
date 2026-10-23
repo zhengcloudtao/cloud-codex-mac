@@ -44,7 +44,7 @@ struct WeeklyQuotaComparisonSheet: View {
                                 if busy { ProgressView().controlSize(.small) }
                             }
                             if let baseline = model.weeklyQuotaBaseline {
-                                Text("起点：\(baseline.plan) · 周已用 \(number(baseline.usedPercent))% · \(baseline.date.formatted(date: .abbreviated, time: .shortened))")
+                                Text("起点：\(CodexPlanName.displayName(baseline.plan)) · 周已用 \(number(baseline.usedPercent))% · \(baseline.date.formatted(date: .abbreviated, time: .shortened))")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Text("手动采样读取账号累计 Token 的差值。请保持相近的模型和速度模式；接口统计可能延迟。手动起点仅在本次运行中保留。")
@@ -124,7 +124,7 @@ struct WeeklyQuotaComparisonSheet: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if let latest = model.automaticWeeklyQuotaSampler.latest {
-                        Text("\(latest.plan) · 本段已消耗 \(number(model.automaticWeeklyQuotaSampler.consumedPercent ?? 0)) 个百分点 · 最近采样 \(latest.date.formatted(date: .abbreviated, time: .standard))")
+                        Text("\(CodexPlanName.displayName(latest.plan)) · 本段已消耗 \(number(model.automaticWeeklyQuotaSampler.consumedPercent ?? 0)) 个百分点 · 最近采样 \(latest.date.formatted(date: .abbreviated, time: .standard))")
                             .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     }
                     if let tokens = model.automaticWeeklyQuotaSampler.observedLocalTokens {
@@ -148,7 +148,7 @@ struct WeeklyQuotaComparisonSheet: View {
                 Picker("对比基准", selection: $baselineID) {
                     Text("请选择").tag(nil as UUID?)
                     ForEach(model.weeklyQuotaComparison.samples) { sample in
-                        Text("\(sample.plan) · \(sample.date.formatted(date: .numeric, time: .shortened))")
+                        Text("\(CodexPlanName.displayName(sample.plan)) · \(sample.date.formatted(date: .numeric, time: .shortened))")
                             .tag(Optional(sample.id))
                     }
                 }.frame(width: 370)
@@ -169,7 +169,7 @@ struct WeeklyQuotaComparisonSheet: View {
                     ForEach(model.weeklyQuotaComparison.samples) { sample in
                         GridRow {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(sample.plan).lineLimit(2)
+                                Text(CodexPlanName.displayName(sample.plan)).lineLimit(2)
                                 if sample.automatic == true {
                                     Text(sample.id == model.automaticWeeklyQuotaSampler.sampleID ? "自动采样 · 当前段" : "自动采样 · 历史段").font(.caption).foregroundStyle(.secondary)
                                 }
@@ -198,7 +198,7 @@ struct WeeklyQuotaComparisonSheet: View {
                             HStack(spacing: 6) {
                                 if sample.automatic == true {
                                     Button {
-                                        plan = sample.plan
+                                        plan = CodexPlanName.displayName(sample.plan)
                                         percent = String(sample.percent)
                                         tokens = sample.tokens.map { String(format: "%.0f", $0) } ?? ""
                                         dollars = sample.dollars.map { String($0) } ?? ""
@@ -236,7 +236,7 @@ struct WeeklyQuotaComparisonSheet: View {
     }
 
     private func costBreakdown(_ sample: WeeklyQuotaComparison.Sample) -> some View {
-        DisclosureGroup("\(sample.plan) · 本段计价明细 · \(sample.date.formatted(date: .numeric, time: .shortened))") {
+        DisclosureGroup("\(CodexPlanName.displayName(sample.plan)) · 本段计价明细 · \(sample.date.formatted(date: .numeric, time: .shortened))") {
             if let report = sample.costReport {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("本段已知费用 $\(number(report.knownDollars)) · 消耗 \(number(sample.percent)) 个百分点 · 整周 ≈ \(weeklyCost(sample))")
@@ -279,7 +279,7 @@ struct WeeklyQuotaComparisonSheet: View {
             defer { busy = false }
             do {
                 if let sample = try await model.readWeeklyQuotaMeasurement(start: start) {
-                    plan = sample.plan
+                    plan = CodexPlanName.displayName(sample.plan)
                     percent = String(sample.percent)
                     tokens = String(format: "%.0f", sample.tokens ?? 0)
                     dollars = ""

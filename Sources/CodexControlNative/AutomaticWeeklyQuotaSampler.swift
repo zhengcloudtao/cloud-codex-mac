@@ -111,7 +111,7 @@ struct AutomaticWeeklyQuotaSampler: Codable, Equatable {
         lastAttempt = snapshot.date
         lastIssue = nil
         guard let start = baseline, let previous = latest,
-              current.fingerprint == previous.fingerprint, current.plan == previous.plan,
+              current.fingerprint == previous.fingerprint, CodexPlanName.displayName(current.plan) == CodexPlanName.displayName(previous.plan),
               abs(current.resetsAt - previous.resetsAt) <= 1,
               current.date.timeIntervalSince(previous.date) <= Self.maximumGap,
               current.usedPercent >= previous.usedPercent,

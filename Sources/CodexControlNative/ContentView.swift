@@ -496,6 +496,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
         .sheet(isPresented: $model.showingThreadNameEditor) { threadNameEditorSheet }
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
+        .sheet(isPresented: $model.showingAccounts) { CodexAccountsSheet(store: model.accounts) }
         .sheet(isPresented: $model.showingUsageInsights) { CodexUsageInsightsSheet() }
         .sheet(isPresented: $model.showingWeeklyQuotaComparison) { WeeklyQuotaComparisonSheet() }
         .sheet(isPresented: $model.showingPersonalSkills) { CodexPersonalSkillsSheet() }
@@ -1330,6 +1331,12 @@ struct ContentView: View {
                 Label("我的技能", systemImage: "books.vertical")
             }
             .help("查看当前 Codex 识别到的自建技能")
+            Button {
+                model.showingAccounts = true
+            } label: {
+                Label("账号管理", systemImage: "person.crop.circle")
+            }
+            .help("添加和切换 Codex 账号")
             Button {
                 model.showingUsageInsights = true
             } label: {
