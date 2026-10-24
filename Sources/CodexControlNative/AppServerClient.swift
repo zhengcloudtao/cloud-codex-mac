@@ -97,6 +97,8 @@ final class AppServerClient {
     private(set) var connected = false
     var onEvent: EventHandler?
     var onServerRequest: ServerRequestHandler?
+    var sharedAccountAccessProvider: (() async throws -> SharedAccountAccess)?
+    var sharedAccountRefreshProvider: (() async throws -> SharedAccountAccess)?
     var onDisconnect: ((String) -> Void)?
     var beforeTurnSubmission: (() async throws -> Void)?
 
@@ -160,6 +162,12 @@ final class AppServerClient {
             let path = String(data: try encoder.encode(sharedConversationHome.path), encoding: .utf8)!
             process.arguments! += ["-c", "sqlite_home=\(path)"]
         }
+        if sharedAccountAccessProvider != nil {
+            guard !provider.enabled else { throw AccountShareCrypto.failure }
+            environment.removeValue(forKey: "OPENAI_API_KEY"); environment.removeValue(forKey: "CODEX_API_KEY"); environment.removeValue(forKey: "CODEX_ACCESS_TOKEN")
+            process.environment = environment
+            process.arguments! += ["-c", "cli_auth_credentials_store=\"ephemeral\""]
+        }
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
@@ -215,6 +223,13 @@ final class AppServerClient {
         }
         try send(["method": "initialized"])
         connected = true
+        if let sharedAccountAccessProvider {
+            do {
+                let access = try await sharedAccountAccessProvider()
+                _ = try await request("account/login/start", params: ["type": "chatgptAuthTokens", "accessToken": access.accessToken,
+                    "chatgptAccountId": access.chatgptAccountId, "chatgptPlanType": access.chatgptPlanType])
+            } catch { shutdown(); throw error }
+        }
     }
 
     /// Stop only this client's subprocess and complete its pending reads.
@@ -1180,7 +1195,21 @@ final class AppServerClient {
                 return
             }
             if let rawID = object["id"], let requestID = AppServerRequestID(rawID) {
-                onServerRequest?(requestID, method, params)
+                if method == "account/chatgptAuthTokens/refresh", let refresh = sharedAccountRefreshProvider {
+                    let generation = processGeneration
+                    Task { [weak self] in
+                        guard let self else { return }
+                        do {
+                            let access = try await refresh()
+                            guard generation == self.processGeneration else { return }
+                            if let account = params["accountId"] as? String, account != access.chatgptAccountId { throw AccountShareCrypto.failure }
+                            try self.respond(to: requestID, result: ["accessToken": access.accessToken, "chatgptAccountId": access.chatgptAccountId, "chatgptPlanType": access.chatgptPlanType])
+                        } catch {
+                            guard generation == self.processGeneration else { return }
+                            try? self.send(["id": requestID.jsonValue, "error": ["code": -32000, "message": "来源设备暂不可用，请确认来源账号已更新登录。"]])
+                        }
+                    }
+                } else { onServerRequest?(requestID, method, params) }
                 return
             }
             if method == "thread/settings/updated",

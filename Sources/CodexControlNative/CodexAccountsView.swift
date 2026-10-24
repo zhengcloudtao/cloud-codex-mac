@@ -4,6 +4,7 @@ struct CodexAccountsSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: CodexAccountStore
+    @State private var showReceive = false
     @State private var removing: CodexSavedAccount?
     @State private var pendingSwitchID: String?
     @State private var switchRequestTask: Task<Void, Never>?
@@ -14,6 +15,7 @@ struct CodexAccountsSheet: View {
             HStack {
                 Label("账号管理", systemImage: "person.crop.circle.badge.checkmark").font(.title2.bold())
                 Spacer()
+                Button("通过分享码添加") { showReceive = true }
                 Button("添加账号", systemImage: "plus") { Task { await store.addAccount() } }
                     .disabled(store.busyID != nil || model.isSwitchingModelProvider || pendingSwitchID != nil)
                 Button("完成") { dismiss() }
@@ -66,6 +68,7 @@ struct CodexAccountsSheet: View {
         .interactiveDismissDisabled(store.busyID != nil || model.isSwitchingModelProvider)
         // Opening this sheet only displays the existing account snapshot.
         // Refresh explicitly from a card so opening it never locks switching.
+        .sheet(isPresented: $showReceive) { AccountShareReceiveSheet().environmentObject(model) }
         .onDisappear { switchRequestTask?.cancel(); model.accountDeviceSharing.generatedCode = nil }
         .alert("移除账号？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { account in
             Button("取消", role: .cancel) { removing = nil }
@@ -107,7 +110,7 @@ struct CodexAccountsSheet: View {
                     .font(.title2).foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(account.title).font(.headline).textSelection(.enabled)
-                    Text(account.isLocal ? "本机默认账号" : "独立账号")
+                    Text(account.isShared ? "来自其他设备的共享账号" : (account.isLocal ? "本机默认账号" : "独立账号"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -128,15 +131,17 @@ struct CodexAccountsSheet: View {
             HStack {
                 Button("刷新") { Task { await store.refresh(account) } }.disabled(busy)
                 if !account.isLocal && !current {
-                    Button(account.identity == nil ? "登录" : "重新登录") { Task { await store.login(account) } }.disabled(busy)
+                    if !account.isShared { Button(account.identity == nil ? "登录" : "重新登录") { Task { await store.login(account) } }.disabled(busy) }
                     Button("移除", role: .destructive) { removing = account }.disabled(busy)
                 }
-                if current && !account.isLocal {
+                if current && !account.isLocal && !account.isShared {
                     Text("重新授权前，请先切换到本机默认账号。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Button("共享到我的设备") { Task { await model.accountDeviceSharing.create(accountID: account.id) } }
-                    .disabled(busy || account.identity == nil || model.accountDeviceSharing.busy)
+                if !account.isShared {
+                    Button("共享到我的设备") { Task { await model.accountDeviceSharing.create(accountID: account.id) } }
+                        .disabled(busy || account.identity == nil || model.accountDeviceSharing.busy)
+                }
                 Spacer()
                 if !current {
                     Button {
@@ -178,5 +183,32 @@ private struct AccountSharingStatusView: View {
                 }
             }
         }
+    }
+}
+
+private struct AccountShareReceiveSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var code = ""
+    @State private var busy = false
+    @State private var status = "在来源 Mac 或 Windows 的账号管理中生成分享码。两台电脑需使用同一个 HTTPS 后端。"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack { Text("通过分享码添加账号").font(.title2.bold()); Spacer(); Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction) }
+            SecureField("粘贴完整分享码；留空可重试上次配对", text: $code)
+            Text(status).font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Button(busy ? "正在配对…" : "连接 / 重试") {
+                    busy = true
+                    Task {
+                        defer { busy = false }
+                        do { try await model.connectSharedAccount(code: code); code = ""; status = "账号已添加，请返回账号管理点击切换。来源电脑需保持运行以更新凭据。" }
+                        catch { status = "连接未完成：请检查分享码、相同后端及来源设备。可留空重试；更换分享码前请先清除待配对记录。" }
+                    }
+                }.disabled(busy)
+                Button("清除待配对记录") { model.accountShareReceiver.discardPending(preserving: Set(model.accounts.library.accounts.map(\.id))); code = ""; status = "已清除待配对记录，可输入新的分享码。" }.disabled(busy)
+            }
+            Text("共享账号只接收短期访问凭据，不覆盖本机登录；无法再次转分享。来源电脑离线时暂时无法续期。").font(.caption).foregroundStyle(.secondary)
+        }.padding(24).frame(width: 540)
     }
 }

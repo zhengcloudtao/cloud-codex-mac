@@ -34,6 +34,10 @@ final class CodexAccountsTests: XCTestCase {
         for line in sys.stdin:
             req = json.loads(line)
             if "id" not in req: continue
+            if "method" not in req:
+                if req.get("id") == "share-refresh":
+                    (root / "renewed").write_text("ok" if req.get("result", {}).get("chatgptAccountId") == "fixture-account" else "failed")
+                continue
             method = req["method"]
             # Metadata only, no request params or credentials are logged.
             with (root / "calls.jsonl").open("a") as f:
@@ -43,6 +47,10 @@ final class CodexAccountsTests: XCTestCase {
                 if (home / "invalid").exists(): reply(req, {"account": None})
                 else: reply(req, {"account": {"type": "chatgpt", "email": "test@example.invalid", "planType": "plus"}})
             elif method == "account/login/start":
+                if mode == "shared":
+                    reply(req, {})
+                    print(json.dumps({"id": "share-refresh", "method": "account/chatgptAuthTokens/refresh", "params": {"accountId": "fixture-account"}}), flush=True)
+                    continue
                 if mode == "success":
                     # Deliberately complete BEFORE the login response.
                     print(json.dumps({"method": "account/login/completed", "params": {"loginId": "test-login", "success": True}}), flush=True)
@@ -256,6 +264,35 @@ final class CodexAccountsTests: XCTestCase {
         XCTAssertTrue(f.store.issues[id]?.contains("不一致") == true)
         let calls = try String(contentsOf: f.root.appendingPathComponent("calls.jsonl"))
         XCTAssertTrue(calls.contains("account/logout"))
+    }
+
+    func testSharedAccountUsesEphemeralAuthRefreshAndReturnsToNativeLogin() async throws {
+        let f = try fixture(mode: "shared"); defer { f.stop() }
+        let client = f.client(); defer { client.shutdown() }
+        let access = SharedAccountAccess(accessToken: "synthetic-only", chatgptAccountId: "fixture-account", chatgptPlanType: "plus", email: "fixture@example.invalid", expiresAt: Date().timeIntervalSince1970 + 1800)
+        var loaded = 0, refreshed = 0
+        client.sharedAccountAccessProvider = { loaded += 1; return access }
+        client.sharedAccountRefreshProvider = { refreshed += 1; return access }
+        try await client.start()
+        for _ in 0..<100 {
+            if FileManager.default.fileExists(atPath: f.root.appendingPathComponent("renewed").path) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(client.connected); XCTAssertEqual(loaded, 1); XCTAssertEqual(refreshed, 1)
+        XCTAssertEqual(try String(contentsOf: f.root.appendingPathComponent("renewed")), "ok")
+        let calls = try String(contentsOf: f.root.appendingPathComponent("calls.jsonl"))
+        XCTAssertTrue(calls.contains("ephemeral")); XCTAssertFalse(calls.contains("synthetic-only"))
+        client.sharedAccountAccessProvider = nil; client.sharedAccountRefreshProvider = nil
+        try await client.changeAccount(home: f.localHome, managed: false)
+        XCTAssertTrue(client.connected); XCTAssertEqual(loaded, 1)
+    }
+
+    func testSharedAccountStartupFailureDoesNotFallBackToNativeIdentity() async throws {
+        let f = try fixture(); defer { f.stop() }
+        let client = f.client(); defer { client.shutdown() }
+        client.sharedAccountAccessProvider = { throw AccountShareCrypto.failure }
+        do { try await client.start(); XCTFail("Missing share must fail") } catch { }
+        XCTAssertFalse(client.connected)
     }
 
     func testOptionalAccountManagementPreview() async throws {

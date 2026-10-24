@@ -19,6 +19,8 @@ struct CodexSavedAccount: Identifiable, Codable, Equatable {
     static let localID = "local"
     let id: String
     var identity: CodexAccountIdentity?
+    var shared: Bool?
+    var isShared: Bool { shared == true }
     var isLocal: Bool { id == Self.localID }
     var title: String { identity?.email ?? (isLocal ? "本机默认账号" : "待登录账号") }
 }
@@ -42,6 +44,8 @@ final class CodexAccountStore: ObservableObject {
     let root: URL
     private let makeClient: (URL?, Bool) -> AppServerClient
     private let openURL: (URL) -> Bool
+    var configureSharedClient: ((AppServerClient, String) -> Void)?
+    var removeSharedBinding: ((String) -> Void)?
     private var worker: AppServerClient?
     private var loginID: String?
     private var generation = 0
@@ -91,6 +95,13 @@ final class CodexAccountStore: ObservableObject {
     }
     func setOverview(_ overview: AccountOverview, for id: String) { overviews[id] = overview }
 
+    func addSharedAccount(id: String, access: SharedAccountAccess) throws {
+        guard UUID(uuidString: id) != nil, !library.accounts.contains(where: { $0.id == id }) else { throw AccountShareCrypto.failure }
+        let account = CodexSavedAccount(id: id, identity: .init(email: access.email, plan: access.chatgptPlanType), shared: true)
+        try prepareHome(for: account)
+        library.accounts.append(account); save()
+    }
+
     func addAccount() async {
         guard busyID == nil else { return }
         let account = CodexSavedAccount(id: UUID().uuidString)
@@ -101,7 +112,7 @@ final class CodexAccountStore: ObservableObject {
 
     func login(_ account: CodexSavedAccount) async {
         // Reauthorizing an active home could replace the running inference identity.
-        guard busyID == nil, !account.isLocal, account.id != library.activeID else { return }
+        guard busyID == nil, !account.isLocal, !account.isShared, account.id != library.activeID else { return }
         generation += 1
         let ticket = generation
         busyID = account.id
@@ -194,6 +205,7 @@ final class CodexAccountStore: ObservableObject {
         busyID = account.id
         let ticket = generation
         let client = makeClient(home(for: account), !account.isLocal)
+        if account.isShared { configureSharedClient?(client, account.id) }
         worker = client
         defer { if generation == ticket { finishWorker() } }
         do {
@@ -214,6 +226,12 @@ final class CodexAccountStore: ObservableObject {
 
     func remove(_ account: CodexSavedAccount) async {
         guard busyID == nil, !account.isLocal, account.id != library.activeID else { return }
+        if account.isShared {
+            removeSharedBinding?(account.id)
+            library.accounts.removeAll { $0.id == account.id }; overviews[account.id] = nil; issues[account.id] = nil; save()
+            status = "已断开共享账号；本地会话文件保留。"
+            return
+        }
         busyID = account.id
         let client = makeClient(home(for: account), true)
         defer { client.shutdown(); busyID = nil }

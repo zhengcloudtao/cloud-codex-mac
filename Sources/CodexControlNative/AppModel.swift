@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSwitchingModelProvider = false
     private var openAIModelOptions: [CodexModelOption] = []
 
+    let accountShareReceiver: AccountShareReceiver
     let accountDeviceSharing: AccountDeviceSharing
     let accounts: CodexAccountStore
     @Published var showingAccounts = false
@@ -986,13 +987,17 @@ final class AppModel: ObservableObject {
         let accounts = injectedAccounts ?? CodexAccountStore(defaults: remoteDefaults)
         self.accounts = accounts
         self.accountDeviceSharing = AccountDeviceSharing(defaults: remoteDefaults)
+        self.accountShareReceiver = AccountShareReceiver(defaults: remoteDefaults)
         self.localCodexHome = injectedClient?.codexHomeOverride
         let home = accounts.home(for: accounts.active)
         self.client = injectedClient ?? AppServerClient(codexHomeOverride: home, usesManagedAccount: !accounts.active.isLocal)
         self.client.sharedConversationHome = CodexUsageTierStore.home(self.localCodexHome)
         let quotaClient = self.client
         self.weeklyQuotaProbe = WeeklyQuotaProbe {
-            AppServerClient(codexHomeOverride: quotaClient.codexHomeOverride, usesManagedAccount: quotaClient.usesManagedAccount)
+            let probe = AppServerClient(codexHomeOverride: quotaClient.codexHomeOverride, usesManagedAccount: quotaClient.usesManagedAccount)
+            probe.sharedAccountAccessProvider = quotaClient.sharedAccountAccessProvider
+            probe.sharedAccountRefreshProvider = quotaClient.sharedAccountRefreshProvider
+            return probe
         }
         self.localQuotaTokenReader = CodexLocalTokenUsageReader(home: self.client.sharedConversationHome)
         let library = ModelProviderLibrary.load(from: remoteDefaults)
@@ -1496,10 +1501,13 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        accounts.configureSharedClient = { [weak self] client, id in self?.configureSharedAccount(client, id: id) }
+        accounts.removeSharedBinding = { [weak self] id in self?.accountShareReceiver.remove(id) }
+        configureSharedAccount(client, id: accounts.library.activeID)
         accountDeviceSharing.loadAccess = { [weak self] id, interaction, forceRefresh in
             guard let self, !self.isSwitchingModelProvider, self.accounts.busyID == nil,
                   let account = self.accounts.library.accounts.first(where: { $0.id == id }),
-                  let identity = account.identity else { throw AccountShareCrypto.failure }
+                  !account.isShared, let identity = account.identity else { throw AccountShareCrypto.failure }
             let home = account.isLocal ? CodexUsageTierStore.home(self.localCodexHome) : self.accounts.home(for: account)!
             var access = try await Task.detached { try AccountShareKeychain.access(home: home, identity: identity, allowInteraction: interaction) }.value
             if forceRefresh || access.expiresAt < Date().timeIntervalSince1970 + 300 {
@@ -3051,12 +3059,32 @@ final class AppModel: ObservableObject {
         automaticWeeklyQuotaSampler = .load(remoteDefaults)
     }
 
+    private func configureSharedAccount(_ client: AppServerClient, id: String) {
+        guard accounts.library.accounts.first(where: { $0.id == id })?.isShared == true else {
+            client.sharedAccountAccessProvider = nil; client.sharedAccountRefreshProvider = nil
+            return
+        }
+        let receiver = accountShareReceiver
+        client.sharedAccountAccessProvider = { try await receiver.access(accountID: id) }
+        client.sharedAccountRefreshProvider = { try await receiver.access(accountID: id, refresh: true) }
+    }
+
+    func connectSharedAccount(code: String) async throws {
+        if let reason = accountSwitchUnavailableReason { throw ModelProviderError.message(reason) }
+        guard !customModelProvider.enabled else { throw ModelProviderError.message("请先选择 OpenAI 模型，再添加共享账号。") }
+        let (id, access) = try await accountShareReceiver.pair(code: code, server: remoteServerConfiguration.validatedURL().absoluteString)
+        if !accounts.library.accounts.contains(where: { $0.id == id }) { try accounts.addSharedAccount(id: id, access: access) }
+        accountShareReceiver.finishPairing()
+    }
+
     func switchAccount(to id: String) async {
         guard id != accounts.library.activeID,
               let target = accounts.library.accounts.first(where: { $0.id == id }) else { return }
         if let reason = accountSwitchUnavailableReason { accountSwitchError = reason; return }
         let previousHome = client.codexHomeOverride
         let previousManaged = client.usesManagedAccount
+        let previousAccess = client.sharedAccountAccessProvider
+        let previousRefresh = client.sharedAccountRefreshProvider
         let targetHome = target.isLocal ? localCodexHome : accounts.home(for: target)
         let oldID = accounts.library.activeID
         isSwitchingModelProvider = true
@@ -3102,6 +3130,7 @@ final class AppModel: ObservableObject {
             try accounts.prepareHome(for: target)
             try prepareSharedConversations()
             mergeLegacyConversationPreferences()
+            configureSharedAccount(client, id: id)
             try await client.changeAccount(home: targetHome, managed: !target.isLocal)
             // Verify the actual identity before changing the selected card or local state.
             if target.isLocal {
@@ -3115,6 +3144,8 @@ final class AppModel: ObservableObject {
             }
         } catch {
             do {
+                client.sharedAccountAccessProvider = previousAccess
+                client.sharedAccountRefreshProvider = previousRefresh
                 try await client.changeAccount(home: previousHome, managed: previousManaged)
                 connectionText = "已连接：\(accounts.active.title)（已恢复）"
             } catch {

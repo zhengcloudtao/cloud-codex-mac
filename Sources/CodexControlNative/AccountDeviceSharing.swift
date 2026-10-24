@@ -42,7 +42,7 @@ enum AccountShareCrypto {
         let plain = try AES.GCM.open(AES.GCM.SealedBox(combined: data), using: SymmetricKey(data: key), authenticating: aad)
         return try JSONDecoder().decode(SharedAccountAccess.self, from: plain)
     }
-    static var failure: Error { ModelProviderError.message("账号同步失败，请检查配对或在来源 Mac 重新登录。") }
+    static var failure: Error { ModelProviderError.message("账号同步失败，请检查配对或在来源设备 重新登录。") }
 }
 extension Data {
     fileprivate var base64URLEncoded: String { base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") }
@@ -148,7 +148,7 @@ final class AccountDeviceSharing: ObservableObject {
             save()
             try await api.createAccountShare(id: id, accountRef: SHA256.hash(data: Data(accountID.utf8)).map { String(format: "%02x", $0) }.joined(), code: code, ciphertext: cipher)
             generatedCode = "CCS1.\(id).\(code).\(key.base64URLEncoded)"
-            message = "分享码 10 分钟内有效，仅用于配对一台自己的电脑。请在目标设备配置相同后端；来源 Mac 需保持运行以更新凭据。"
+            message = "分享码 10 分钟内有效，仅用于配对一台自己的电脑。请在目标设备配置相同后端；来源设备 需保持运行以更新凭据。"
             start()
         } catch { message = "无法生成分享码。请确认后端已升级、账号已登录且钥匙串允许访问。" }
     }
