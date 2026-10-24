@@ -85,6 +85,15 @@ final class AppServerClient {
     // response for this process so selecting every subsequent conversation does
     // not keep asking for an optional endpoint the server cannot provide.
     private var threadItemsListAvailability: Bool? = nil
+    private var predictionUnavailable = false
+    private var ephemeralPredictionThreadIDs: Set<String> = []
+    private struct PredictionOperation {
+        let continuation: CheckedContinuation<String?, Error>
+        let timeout: Task<Void, Never>
+        var turnID: String?
+        var text = ""
+    }
+    private var predictions: [String: PredictionOperation] = [:]
     private(set) var connected = false
     var onEvent: EventHandler?
     var onServerRequest: ServerRequestHandler?
@@ -106,6 +115,7 @@ final class AppServerClient {
 
     func start(initializationTimeoutSeconds: UInt64 = 12) async throws {
         if connected { return }
+        predictionUnavailable = false
         output?.readabilityHandler = nil
         errorOutput?.readabilityHandler = nil
         decodingWorker = JSONLineDecodingWorker()
@@ -135,6 +145,10 @@ final class AppServerClient {
         }
         process.environment = environment
         process.arguments = ["app-server", "--stdio"] + (try provider.launchArguments(models: customModelOptions.map(\.model), options: customModelOptions))
+        // Default mode otherwise cannot call request_user_input, leaving only
+        // ordinary text choices after the turn ends. Route mid-turn questions
+        // through the existing bidirectional request/answer panel instead.
+        process.arguments! += ["-c", "features.default_mode_request_user_input=true"]
         if !provider.enabled { process.arguments! += ["-c", "model_provider=\"openai\""] }
         if usesManagedAccount {
             // Codex owns refresh and credential storage; never copy tokens into app preferences.
@@ -763,6 +777,98 @@ final class AppServerClient {
         hasMoreActivityHistory(thread.id) || activityHistoryByThread[thread.id]?.updatedAt != thread.updatedAt
     }
 
+    func requestComposerPrediction(threadID: String, sourceTurnID: String) async throws -> String? {
+        guard !predictionUnavailable else { throw CodexClientError.server("输入预测不可用") }
+        try await beforeTurnSubmission?()
+        try Task.checkCancellation()
+        do {
+            // The native client uses an ephemeral prediction fork. The named
+            // thread/prediction/request endpoint is currently only a stub.
+            let fork = try await request("thread/fork", params: [
+                "threadId": threadID, "experimentalPredictionMode": true,
+                "ephemeral": true, "excludeTurns": true, "deferGoalContinuation": true,
+                "threadSource": "composer_predictions"
+            ], timeoutSeconds: 12)
+            guard let id = (fork["thread"] as? JSON)?["id"] as? String else { throw CodexClientError.invalidResponse }
+            ephemeralPredictionThreadIDs.insert(id)
+            if Task.isCancelled {
+                _ = try? await request("thread/unsubscribe", params: ["threadId": id], timeoutSeconds: 6)
+                throw CancellationError()
+            }
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let timeout = Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: 30_000_000_000)
+                        guard !Task.isCancelled else { return }
+                        self?.finishPrediction(id, result: .failure(CodexClientError.timeout("续问建议")))
+                    }
+                    predictions[id] = PredictionOperation(continuation: continuation, timeout: timeout)
+                    Task { [weak self] in
+                        guard let self, self.predictions[id] != nil else { return }
+                        do {
+                            let turn = try await self.request("turn/start", params: [
+                                "threadId": id, "permissions": ":read-only", "approvalPolicy": "never",
+                                "runtimeWorkspaceRoots": [],
+                                "input": [["type": "text", "text": ComposerPredictionSource.prompt]],
+                                "outputSchema": ["type": "object", "properties": [
+                                    "suggestion": ["type": ["string", "null"]]
+                                ], "required": ["suggestion"], "additionalProperties": false],
+                                "responsesapiClientMetadata": ["prediction_source_thread_id": threadID,
+                                                               "prediction_source_turn_id": sourceTurnID]
+                            ], timeoutSeconds: 12)
+                            self.predictions[id]?.turnID = (turn["turn"] as? JSON)?["id"] as? String
+                        } catch { self.finishPrediction(id, result: .failure(error)) }
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.finishPrediction(id, result: .failure(CancellationError())) }
+            }
+        } catch {
+            let message = error.localizedDescription.lowercased()
+            if message.contains("method not found") || message.contains("unknown method")
+                || message.contains("unsupported method") {
+                predictionUnavailable = true
+            }
+            throw error
+        }
+    }
+
+    private func finishPrediction(_ id: String, result: Result<String?, Error>) {
+        guard let operation = predictions.removeValue(forKey: id) else { return }
+        operation.timeout.cancel()
+        operation.continuation.resume(with: result)
+        Task { [weak self] in
+            guard let self, self.connected else { return }
+            if case .failure = result, let turnID = operation.turnID {
+                _ = try? await self.request("turn/interrupt", params: ["threadId": id, "turnId": turnID], timeoutSeconds: 6)
+            }
+            _ = try? await self.request("thread/unsubscribe", params: ["threadId": id], timeoutSeconds: 6)
+        }
+    }
+
+    private func handlePredictionEvent(_ method: String, params: JSON, threadID: String) {
+        guard predictions[threadID] != nil else { return }
+        if method == "turn/started" {
+            predictions[threadID]?.turnID = (params["turn"] as? JSON)?["id"] as? String
+        } else if method == "item/agentMessage/delta", let delta = params["delta"] as? String {
+            predictions[threadID]?.text += delta
+        } else if method == "item/completed", let item = params["item"] as? JSON,
+                  item["type"] as? String == "agentMessage", let text = item["text"] as? String {
+            predictions[threadID]?.text = text
+        } else if method == "turn/completed" {
+            let turn = params["turn"] as? JSON
+            guard turn?["status"] as? String == "completed" else {
+                finishPrediction(threadID, result: .failure(CodexClientError.invalidResponse))
+                return
+            }
+            let text = predictions[threadID]?.text ?? ""
+            let json = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? JSON
+            finishPrediction(threadID, result: .success(json?["suggestion"] as? String))
+        } else if method == "error", params["willRetry"] as? Bool != true {
+            finishPrediction(threadID, result: .failure(CodexClientError.invalidResponse))
+        }
+    }
+
     func createThread(
         cwd: String,
         model: String?,
@@ -1057,6 +1163,18 @@ final class AppServerClient {
         // so dispatch it before looking for an outbound response.
         if let method = object["method"] as? String,
            let params = object["params"] as? JSON {
+            if method == "thread/started", let thread = params["thread"] as? JSON,
+               thread["ephemeral"] as? Bool == true, let id = thread["id"] as? String {
+                ephemeralPredictionThreadIDs.insert(id)
+            }
+            let eventThreadID = params["threadId"] as? String ?? (params["thread"] as? JSON)?["id"] as? String
+            if let id = eventThreadID, ephemeralPredictionThreadIDs.contains(id) {
+                if let requestID = object["id"] {
+                    try? send(["id": requestID, "error": ["code": -32601, "message": "Tools are unavailable during input prediction"]])
+                    finishPrediction(id, result: .failure(CodexClientError.invalidResponse))
+                } else { handlePredictionEvent(method, params: params, threadID: id) }
+                return
+            }
             if let rawID = object["id"], let requestID = AppServerRequestID(rawID) {
                 onServerRequest?(requestID, method, params)
                 return
@@ -1090,6 +1208,13 @@ final class AppServerClient {
     }
 
     private func handleTermination(_ status: Int32) {
+        let interruptedPredictions = predictions
+        predictions.removeAll()
+        ephemeralPredictionThreadIDs.removeAll()
+        for operation in interruptedPredictions.values {
+            operation.timeout.cancel()
+            operation.continuation.resume(throwing: CodexClientError.notRunning)
+        }
         connected = false
         output?.readabilityHandler = nil
         errorOutput?.readabilityHandler = nil

@@ -58,6 +58,7 @@ final class AppModel: ObservableObject {
     @Published var selectedThreadID: String?
     @Published var messages: [ChatMessage] = []
     @Published var composerText = ""
+    @Published private(set) var composerPredictions: [ComposerPredictionSource: ComposerPredictionState] = [:]
     @Published private(set) var threadOutcomes: [String: ConversationOutcome] = [:]
     @Published private(set) var unreadCompletions = UnreadCompletions()
     @Published private(set) var isLoadingUnreadThreads = false
@@ -190,16 +191,117 @@ final class AppModel: ObservableObject {
         return userInputRequests.filter { $0.threadID == selectedThreadID }
     }
 
-    var assistantReplyChoices: [String] {
-        guard selectedThreadID != nil, !showingNewThread,
-              threadInputAvailability == .available, !isSelectedThreadProcessing,
-              editingWaitingMessageID == nil, selectedWaitingMessages.isEmpty,
+    @Published private(set) var dismissedAssistantReplyQuestions: [String: Set<String>] = [:]
+    @Published private(set) var submittingAssistantReplyThreads: Set<String> = []
+    @Published private(set) var assistantReplyErrors: [String: String] = [:]
+
+    var assistantReplyQuestion: AssistantReplyChoices.Question? {
+        guard let selectedThreadID, !showingNewThread,
+              threadInputAvailability == .available,
+              editingWaitingMessageID == nil,
               selectedUserInputRequests.isEmpty,
-              selectedComputerUseApprovalRequests.isEmpty else { return [] }
-        return AssistantReplyChoices.options(in: messages)
+              selectedComputerUseApprovalRequests.isEmpty else { return nil }
+        return AssistantReplyChoices.question(in: messages,
+            currentTurnID: activeTurnIDsByThread[selectedThreadID],
+            dismissed: dismissedAssistantReplyQuestions[selectedThreadID] ?? [])
+    }
+
+    var assistantReplyChoices: [String] { assistantReplyQuestion?.options ?? [] }
+
+    func dismissAssistantReplyQuestion(_ questionID: String) {
+        guard let selectedThreadID, assistantReplyQuestion?.id == questionID else { return }
+        dismissedAssistantReplyQuestions[selectedThreadID, default: []].insert(questionID)
+    }
+
+    func submitAssistantReplyAnswer(questionID: String, answer: String) async {
+        let answer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let threadID = selectedThreadID, let question = assistantReplyQuestion,
+              question.id == questionID, !answer.isEmpty, creditUsagePauseReason == nil,
+              !isSwitchingModelProvider, !submittingAssistantReplyThreads.contains(threadID) else { return }
+        submittingAssistantReplyThreads.insert(threadID)
+        let errorKey = threadID + ":" + questionID
+        assistantReplyErrors[errorKey] = nil
+        defer { submittingAssistantReplyThreads.remove(threadID) }
+        let text = "关于「\(question.prompt)」\n我的选择：\(answer)"
+        do {
+            if isSelectedThreadProcessing {
+                let turnID: String
+                if let known = activeTurnIDsByThread[threadID] ?? activeTurnID ?? question.turnID {
+                    turnID = known
+                } else {
+                    let runtime = try await client.readLatestThreadActivity(threadID)
+                    guard let turn = runtime.turn, turn.isActive else {
+                        throw CodexClientError.server("当前任务已结束，请重新发送回答。")
+                    }
+                    turnID = turn.id
+                }
+                try await client.steerTurn(threadID: threadID, turnID: turnID, text: text, attachments: [])
+                recordSteeredMessage(WaitingMessage(threadID: threadID, text: text, attachments: [],
+                    model: selectedModel?.model, effort: selectedEffort, permissions: selectedPermissionID,
+                    serviceTier: selectedServiceTier), turnID: turnID)
+            } else {
+                let localID = "local-choice-\(UUID())"
+                do {
+                    try await startTurnOptimistically(threadID: threadID, localMessageID: localID,
+                        text: text, outgoingAttachments: [], model: selectedModel?.model, effort: selectedEffort,
+                        permissions: selectedPermissionID, serviceTier: selectedServiceTier)
+                } catch {
+                    rollbackOptimisticSend(threadID: threadID, localMessageID: localID, text: text,
+                        outgoingAttachments: [], restoreComposer: false)
+                    throw error
+                }
+            }
+            dismissedAssistantReplyQuestions[threadID, default: []].insert(questionID)
+        } catch {
+            assistantReplyErrors[errorKey] = error.localizedDescription
+        }
     }
 
     @Published private(set) var replyChoiceFocusRequest = UUID()
+
+    var composerPredictionSource: ComposerPredictionSource? {
+        guard let selectedThreadID, !showingNewThread, !isConversationLoading,
+              threadInputAvailability == .available, !isSelectedThreadProcessing,
+              !isSwitchingModelProvider, creditUsagePauseReason == nil,
+              composerText.isEmpty, attachments.isEmpty, !isRecording,
+              editingWaitingMessageID == nil, selectedWaitingMessages.isEmpty,
+              selectedUserInputRequests.isEmpty, selectedComputerUseApprovalRequests.isEmpty,
+              assistantReplyChoices.isEmpty,
+              let last = messages.last(where: { $0.role != .activity }),
+              last.role == .assistant, !last.isStreaming,
+              let turnID = last.turnID, !turnID.isEmpty else { return nil }
+        return ComposerPredictionSource(threadID: selectedThreadID, turnID: turnID)
+    }
+
+    var composerSuggestion: String? {
+        guard let source = composerPredictionSource,
+              case .ready(let text) = composerPredictions[source] else { return nil }
+        return text
+    }
+
+    func requestComposerPrediction(_ source: ComposerPredictionSource) async {
+        guard !Task.isCancelled, client.connected, composerPredictionSource == source,
+              composerPredictions[source] == nil else { return }
+        composerPredictions = composerPredictions.filter { $0.key.threadID != source.threadID }
+        composerPredictions[source] = .pending
+        do {
+            let text = (try await client.requestComposerPrediction(threadID: source.threadID, sourceTurnID: source.turnID))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard composerPredictions[source] == .pending else { return }
+            composerPredictions[source] = !text.isEmpty && text.count <= 500 ? .ready(text) : .unavailable
+        } catch {
+            // Predictions are optional; a failed/unsupported service must not
+            // disturb normal input or surface as a conversation failure.
+            if composerPredictions[source] == .pending { composerPredictions[source] = .unavailable }
+        }
+    }
+
+    func acceptComposerSuggestion() {
+        guard let source = composerPredictionSource, let suggestion = composerSuggestion else { return }
+        composerText = suggestion
+        composerPredictions[source] = .consumed
+        replyChoiceFocusRequest = UUID()
+    }
 
     func selectAssistantReplyChoice(_ option: String) {
         let options = assistantReplyChoices
@@ -1992,6 +2094,7 @@ final class AppModel: ObservableObject {
     /// every optimistic local run so the UI does not remain "thinking"
     /// forever, while keeping the conversation and a durable inline reason.
     func handleClientDisconnect(_ message: String) {
+        composerPredictions.removeAll()
         connectionText = "未连接"
         errorMessage = message
         flushPendingDeltas()
@@ -4351,6 +4454,10 @@ final class AppModel: ObservableObject {
         }
         guard method == "item/tool/requestUserInput",
               let request = UserInputRequest(requestID: requestID, params: params, timeout: userInputTimeoutSeconds) else { return }
+        if let ordinary = AssistantReplyChoices.question(in: conversationMessages(for: request.threadID),
+            currentTurnID: request.turnID) {
+            dismissedAssistantReplyQuestions[request.threadID, default: []].insert(ordinary.id)
+        }
         userInputTimeoutTasks.removeValue(forKey: request.id)?.cancel()
         if let index = userInputRequests.firstIndex(where: { $0.id == request.id }) {
             userInputRequests[index] = request
@@ -4758,6 +4865,7 @@ final class AppModel: ObservableObject {
         }
         if method == "turn/completed" { flushPendingDeltas() }
         if method == "turn/started" {
+            composerPredictions = composerPredictions.filter { $0.key.threadID != eventThreadID }
             let turn = params["turn"] as? [String: Any]
             // External turns have no trustworthy composer settings. Leave the
             // badge unknown until this exact turn's persisted context is read.

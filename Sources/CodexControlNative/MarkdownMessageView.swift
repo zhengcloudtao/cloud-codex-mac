@@ -238,9 +238,14 @@ enum MarkdownTextDocument {
             value.foregroundColor = .secondary
             return value
         case .table(let headers, let rows):
-            let allRows = [headers] + rows
-            var value = AttributedString(allRows.map { $0.joined(separator: "  │  ") }.joined(separator: "\n"))
-            value.font = .system(.callout, design: .monospaced)
+            var value = AttributedString()
+            for (rowIndex, row) in ([headers] + rows).enumerated() {
+                if rowIndex > 0 { value.append(AttributedString("\n")) }
+                for (columnIndex, cell) in row.enumerated() {
+                    if columnIndex > 0 { value.append(AttributedString("  │  ")) }
+                    value.append(inline(cell, font: rowIndex == 0 ? .body.weight(.semibold) : .body))
+                }
+            }
             return value
         case .image:
             return AttributedString()
@@ -324,17 +329,45 @@ enum MarkdownTextDocument {
                 ]
             )
         case .table(let headers, let rows):
-            let allRows = [headers] + rows
-            return NSAttributedString(
-                string: allRows.map { $0.joined(separator: "  │  ") }.joined(separator: "\n"),
-                attributes: [.font: NSFont.monospacedSystemFont(
-                    ofSize: preferredAppKitFont(.callout).pointSize,
-                    weight: .regular
-                )]
-            )
+            return tableAppKit(headers: headers, rows: rows)
         case .image:
             return NSAttributedString()
         }
+    }
+
+    private static func tableAppKit(headers: [String], rows: [[String]]) -> NSAttributedString {
+        guard !headers.isEmpty else { return NSAttributedString() }
+        // TextKit lays out cells within the same selectable text document as
+        // the surrounding reply, including wrapped links and inline styles.
+        let table = NSTextTable()
+        table.numberOfColumns = headers.count
+        table.layoutAlgorithm = .fixedLayoutAlgorithm
+        table.collapsesBorders = true
+        table.setValue(100, type: .percentageValueType, for: .width)
+        let result = NSMutableAttributedString()
+        for (rowIndex, row) in ([headers] + rows).enumerated() {
+            for columnIndex in headers.indices {
+                let cell = NSTextTableBlock(table: table, startingRow: rowIndex, rowSpan: 1,
+                                            startingColumn: columnIndex, columnSpan: 1)
+                cell.setValue(100 / CGFloat(headers.count), type: .percentageValueType, for: .width)
+                cell.setWidth(6, type: .absoluteValueType, for: .padding)
+                cell.setWidth(0.5, type: .absoluteValueType, for: .border)
+                cell.setBorderColor(.separatorColor)
+                cell.verticalAlignment = .top
+                if rowIndex == 0 { cell.backgroundColor = NSColor(calibratedWhite: 0.5, alpha: 0.16) }
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.textBlocks = [cell]
+                let content = NSMutableAttributedString(attributedString: inlineAppKit(
+                    columnIndex < row.count ? row[columnIndex] : "",
+                    font: preferredAppKitFont(.body, weight: rowIndex == 0 ? .semibold : .regular)
+                ))
+                content.append(NSAttributedString(string: "\n", attributes: [.font: preferredAppKitFont(.body)]))
+                content.addAttribute(.paragraphStyle, value: paragraph,
+                                     range: NSRange(location: 0, length: content.length))
+                result.append(content)
+            }
+        }
+        return result
     }
 
     private static func inlineAppKit(_ text: String, font: NSFont) -> NSAttributedString {

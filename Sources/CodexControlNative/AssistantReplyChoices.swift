@@ -4,12 +4,33 @@ import SwiftUI
 /// Ordinary assistant questions do not arrive as requestUserInput events.
 /// Offer a bounded, adjacent list as draft suggestions, never as tool answers.
 enum AssistantReplyChoices {
+    struct Question: Identifiable, Equatable {
+        let id: String
+        let turnID: String?
+        let prompt: String
+        let options: [String]
+    }
+
     static func options(in messages: [ChatMessage]) -> [String] {
-        guard let message = messages.last(where: { $0.role != .activity }),
-              message.role == .assistant, !message.isStreaming,
-              message.text.count <= 12_000 else { return [] }
+        question(in: messages)?.options ?? []
+    }
+
+    static func question(in messages: [ChatMessage], currentTurnID: String? = nil,
+                         dismissed: Set<String> = []) -> Question? {
+        let start = messages.lastIndex(where: { $0.role == .user }).map { $0 + 1 } ?? 0
+        let current = messages.dropFirst(start)
+        let turnID = currentTurnID ?? current.last(where: { $0.turnID != nil })?.turnID
+        for message in current.reversed() where message.role == .assistant && !message.isStreaming {
+            if let turnID, let messageTurn = message.turnID, messageTurn != turnID { continue }
+            guard !dismissed.contains(message.id), message.text.count <= 12_000 else { continue }
+            if let question = parse(message) { return question }
+        }
+        return nil
+    }
+
+    private static func parse(_ message: ChatMessage) -> Question? {
         let blocks = MarkdownBlockParser.parse(message.text)
-        var candidates: [[String]] = []
+        var candidates: [Question] = []
         for (index, block) in blocks.enumerated() {
             guard case .paragraph(let prompt) = block,
                   prompt.contains("?") || prompt.contains("？") else { continue }
@@ -24,14 +45,16 @@ enum AssistantReplyChoices {
                     options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))?.characters
                     ?? AttributedString(text).characters).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !plain.isEmpty, plain.count <= 120,
-                      !text.contains("["), !text.contains("`"),
+                      !text.contains("["),
                       !choices.contains(plain) else { choices.removeAll(); break }
                 choices.append(plain)
             }
-            if (2...5).contains(choices.count) { candidates.append(choices) }
+            if (2...5).contains(choices.count) {
+                candidates.append(Question(id: message.id, turnID: message.turnID, prompt: prompt, options: choices))
+            }
         }
         // Multiple questions need an explicit form to avoid mixing answers.
-        return candidates.count == 1 ? candidates[0] : []
+        return candidates.count == 1 ? candidates[0] : nil
     }
 
     static func draft(selecting option: String, options: [String], current: String) -> String {
@@ -39,6 +62,63 @@ enum AssistantReplyChoices {
         if trimmed.isEmpty || options.contains(trimmed) { return option }
         if current.components(separatedBy: .newlines).contains(option) { return current }
         return current + (current.hasSuffix("\n") ? "" : "\n") + option
+    }
+}
+
+struct AssistantReplyQuestionPanel: View {
+    let question: AssistantReplyChoices.Question
+    let isSubmitting: Bool
+    let error: String?
+    let submit: (String) -> Void
+    let dismiss: () -> Void
+    @State private var selectedOption: String?
+    @State private var customAnswer = ""
+
+    private var answer: String {
+        let text = customAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? selectedOption ?? "" : text
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Codex 等待你的选择", systemImage: "questionmark.bubble")
+                    .font(.headline)
+                Text(question.prompt).font(.callout).textSelection(.enabled)
+                ForEach(question.options, id: \.self) { option in
+                    Button {
+                        selectedOption = option
+                        customAnswer = ""
+                    } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: selectedOption == option ? "checkmark.circle.fill" : "circle")
+                            Text(option).multilineTextAlignment(.leading)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(8).contentShape(Rectangle())
+                        .background(Color.accentColor.opacity(selectedOption == option ? 0.12 : 0.04),
+                                    in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain).disabled(isSubmitting)
+                    .accessibilityLabel("选择回答：\(option)")
+                }
+                TextField("或自行填写回答", text: $customAnswer, axis: .vertical)
+                    .lineLimit(1...3).textFieldStyle(.roundedBorder).disabled(isSubmitting)
+                if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                HStack {
+                    Text("选好后发送，回答会提交给当前会话。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("暂不回答", action: dismiss).disabled(isSubmitting)
+                    Button(isSubmitting ? "正在发送…" : "发送回答") { submit(answer) }
+                        .buttonStyle(.borderedProminent).disabled(answer.isEmpty || isSubmitting)
+                }
+            }
+            .padding(14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 20).padding(.vertical, 10)
+        }
+        .frame(maxHeight: 330)
     }
 }
 

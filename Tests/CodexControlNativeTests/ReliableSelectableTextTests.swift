@@ -5,6 +5,54 @@ import SwiftUI
 
 @MainActor
 final class ReliableSelectableTextTests: XCTestCase {
+    func testFormattedTableFitsReplyAndKeepsFollowingTextVisible() throws {
+        let markdown = """
+        **测试结果**
+
+        | 模型 | 综合得分 / 100 | 完成情况 | 线上成绩 |
+        | --- | --- | --- | --- |
+        | **GPT-6 astra** | **92.78** | **85 / 100** | [查看成绩](https://example.com/export?attempt=benchmark&track=comprehensive) |
+        | GPT-5.6 sol | 91.83 | 85 / 100 | [查看成绩](https://example.com/export) |
+        | GPT-6.1 sol | 88.91 | 80 / 100 | [查看成绩](https://example.com/export) |
+
+        表格后面的说明应当完整显示。
+        """
+        let host = NSHostingView(rootView: MarkdownMessageView(markdown: markdown, contentWidth: 692).frame(width: 692))
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 692, height: 600),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        for width: CGFloat in [692, 380, 600] {
+            host.rootView = MarkdownMessageView(markdown: markdown, contentWidth: width).frame(width: width)
+            window.setContentSize(NSSize(width: width, height: 600))
+            host.frame.size = host.fittingSize
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let text = try XCTUnwrap(descendants(host).compactMap { $0 as? ReliableSelectableNSTextView }.first)
+            let manager = try XCTUnwrap(text.layoutManager)
+            let container = try XCTUnwrap(text.textContainer)
+            manager.ensureLayout(for: container)
+            let used = manager.usedRect(for: container)
+            XCTAssertLessThanOrEqual(used.maxX, text.bounds.width + 2)
+            XCTAssertEqual(text.bounds.height, ceil(used.height), accuracy: 2)
+            XCTAssertEqual(text.measuredAttributedSize(width: text.bounds.width).height, ceil(used.height), accuracy: 2)
+            let tail = (text.string as NSString).range(of: "表格后面的说明")
+            let tailRect = manager.boundingRect(forGlyphRange: manager.glyphRange(forCharacterRange: tail, actualCharacterRange: nil), in: container)
+            XCTAssertLessThanOrEqual(tailRect.maxY, text.bounds.height + 2)
+            text.setSelectedRange(NSRange(location: 0, length: (text.string as NSString).length))
+            XCTAssertEqual(text.selectedRange().length, (text.string as NSString).length)
+            text.setSelectedRange(NSRange(location: 0, length: 0))
+            if let directory = ProcessInfo.processInfo.environment["CLOUDCODEX_TABLE_PREVIEW_DIR"],
+               let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?.write(
+                    to: URL(fileURLWithPath: directory).appendingPathComponent("table-\(Int(width)).png"))
+            }
+        }
+    }
+
     func testAllocatedWidthUpdatesIntrinsicHeightWithoutReplacingText() {
         let view = ReliableSelectableNSTextView()
         view.textContainer?.lineFragmentPadding = 0

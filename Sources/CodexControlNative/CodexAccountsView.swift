@@ -16,8 +16,19 @@ struct CodexAccountsSheet: View {
                 Spacer()
                 Button("添加账号", systemImage: "plus") { Task { await store.addAccount() } }
                     .disabled(store.busyID != nil || model.isSwitchingModelProvider || pendingSwitchID != nil)
-                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("完成") { dismiss() }
                     .disabled(store.busyID != nil || model.isSwitchingModelProvider)
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .keyboardShortcut(.cancelAction)
+                .help("关闭账号管理")
+                .accessibilityLabel("关闭账号管理")
             }
             Text("所有账号共用会话和历史记录，登录状态独立保存。切换后保留当前会话和草稿，可用新账号继续任务。")
                 .font(.callout).foregroundStyle(.secondary)
@@ -52,7 +63,8 @@ struct CodexAccountsSheet: View {
         .frame(width: 700, height: 600)
         .background(Color(nsColor: .windowBackgroundColor))
         .interactiveDismissDisabled(store.busyID != nil || model.isSwitchingModelProvider)
-        .task { await store.refresh(store.active) }
+        // Opening this sheet only displays the existing account snapshot.
+        // Refresh explicitly from a card so opening it never locks switching.
         .onDisappear { switchRequestTask?.cancel() }
         .alert("移除账号？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { account in
             Button("取消", role: .cancel) { removing = nil }

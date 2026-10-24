@@ -1223,6 +1223,16 @@ struct ContentView: View {
                             model.submitUserInput(requestID: requestID, answers: answers)
                         }
                     }
+                    if let question = model.assistantReplyQuestion {
+                        Divider()
+                        AssistantReplyQuestionPanel(question: question,
+                            isSubmitting: model.submittingAssistantReplyThreads.contains(thread.id),
+                            error: model.assistantReplyErrors[thread.id + ":" + question.id],
+                            submit: { answer in
+                                Task { await model.submitAssistantReplyAnswer(questionID: question.id, answer: answer) }
+                            }, dismiss: { model.dismissAssistantReplyQuestion(question.id) })
+                            .id(thread.id + ":" + question.id)
+                    }
                     if !model.selectedComputerUseApprovalRequests.isEmpty {
                         Divider()
                         ComputerUseApprovalRequestsPanel(requests: model.selectedComputerUseApprovalRequests) { requestID, decision in
@@ -4644,11 +4654,6 @@ private struct Composer: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                if mode == .conversation, !model.assistantReplyChoices.isEmpty {
-                    AssistantReplyChoicesView(options: model.assistantReplyChoices,
-                                              draft: model.composerText,
-                                              select: model.selectAssistantReplyChoice)
-                }
                 if mode == .conversation, let notice = model.threadOwnershipNotice {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "macwindow.badge.plus")
@@ -4742,12 +4747,26 @@ private struct Composer: View {
                     pasteImages: pasteImages,
                     submit: submit,
                     focusRequest: mode == .newThread ? model.newThreadFocusRequest
-                        : model.editingWaitingMessageID ?? model.replyChoiceFocusRequest
+                        : model.editingWaitingMessageID ?? model.replyChoiceFocusRequest,
+                    suggestion: mode == .conversation ? model.composerSuggestion : nil,
+                    acceptSuggestion: model.acceptComposerSuggestion
                 )
                     .frame(
                         minHeight: mode == .newThread ? 110 : 54,
                         maxHeight: mode == .newThread ? 200 : 120
                     )
+                    .overlay(alignment: .bottomTrailing) {
+                        if mode == .conversation, model.composerSuggestion != nil {
+                            Button("Tab 采纳建议", action: model.acceptComposerSuggestion)
+                                .font(.caption2).buttonStyle(.plain).foregroundStyle(.secondary)
+                                .padding(4)
+                        }
+                    }
+                    .task(id: mode == .conversation ? model.composerPredictionSource : nil) {
+                        if mode == .conversation, let source = model.composerPredictionSource {
+                            await model.requestComposerPrediction(source)
+                        }
+                    }
 
                 if mode == .conversation, model.isExternalThreadProcessing {
                     Label("Codex 中处理中", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
@@ -5441,6 +5460,8 @@ private struct ComposerTextEditor: NSViewRepresentable {
     let pasteImages: () -> Bool
     let submit: () -> Void
     var focusRequest: UUID? = nil
+    var suggestion: String? = nil
+    var acceptSuggestion: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -5468,6 +5489,9 @@ private struct ComposerTextEditor: NSViewRepresentable {
         textView.string = text
         textView.pasteImages = pasteImages
         textView.submit = submit
+        textView.suggestion = suggestion
+        textView.acceptSuggestion = acceptSuggestion
+        textView.toolTip = suggestion.map { "\($0)\n按 Tab 采纳，可编辑后发送" }
         scrollView.documentView = textView
         textView.requestFocus(focusRequest)
         return scrollView
@@ -5478,6 +5502,9 @@ private struct ComposerTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         textView.pasteImages = pasteImages
         textView.submit = submit
+        textView.suggestion = suggestion
+        textView.acceptSuggestion = acceptSuggestion
+        textView.toolTip = suggestion.map { "\($0)\n按 Tab 采纳，可编辑后发送" }
         textView.requestFocus(focusRequest)
         textView.synchronizeBoundText(text)
     }
@@ -5501,8 +5528,46 @@ private struct ComposerTextEditor: NSViewRepresentable {
 final class ComposerNSTextView: NSTextView {
     var pasteImages: (() -> Bool)?
     var submit: (() -> Void)?
+    var suggestion: String? { didSet { if suggestion != oldValue { needsDisplay = true } } }
+    var acceptSuggestion: (() -> Void)?
     private var pendingFocusRequest: UUID?
     private var appliedFocusRequest: UUID?
+
+    var showsSuggestion: Bool { string.isEmpty && !hasMarkedText() && suggestion != nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !hasMarkedText() else { return }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let placeholder = NSAttributedString(string: suggestion ?? "和 Codex 一起工作", attributes: [
+            .font: font ?? NSFont.preferredFont(forTextStyle: .body),
+            .foregroundColor: NSColor.placeholderTextColor,
+            .paragraphStyle: paragraph
+        ])
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        let origin = textContainerOrigin
+        placeholder.draw(with: NSRect(x: origin.x + padding, y: origin.y,
+                                     width: max(0, bounds.width - origin.x * 2 - padding * 2),
+                                     height: min(34, max(0, bounds.height - origin.y - 16))),
+                         options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        needsDisplay = true
+    }
+
+    @discardableResult
+    func acceptVisibleSuggestion() -> Bool {
+        guard showsSuggestion, let suggestion, let acceptSuggestion else { return false }
+        acceptSuggestion()
+        // Apply immediately in the native editor, including its undo stack and
+        // caret, before SwiftUI synchronizes the accepted draft back to us.
+        insertText(suggestion, replacementRange: NSRange(location: 0, length: 0))
+        setSelectedRange(NSRange(location: string.utf16.count, length: 0))
+        return true
+    }
 
     func requestFocus(_ request: UUID?) {
         pendingFocusRequest = request
@@ -5532,9 +5597,14 @@ final class ComposerNSTextView: NSTextView {
         let length = min(selection.length, text.utf16.count - location)
         string = text
         setSelectedRange(NSRange(location: location, length: length))
+        needsDisplay = true
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Handle Tab before AppKit uses it for keyboard focus navigation.
+        if window?.firstResponder === self, event.keyCode == 48,
+           event.modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty,
+           acceptVisibleSuggestion() { return true }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if modifiers == .command,
            event.charactersIgnoringModifiers?.lowercased() == "v",
@@ -5549,7 +5619,14 @@ final class ComposerNSTextView: NSTextView {
         super.paste(sender)
     }
 
+    override func insertTab(_ sender: Any?) {
+        if acceptVisibleSuggestion() { return }
+        super.insertTab(sender)
+    }
+
     override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        if event.keyCode == 48, modifiers.isEmpty, acceptVisibleSuggestion() { return }
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         if isReturn && !event.modifierFlags.contains(.shift) && !hasMarkedText() {
             submit?()

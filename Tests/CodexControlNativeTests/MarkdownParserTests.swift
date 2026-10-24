@@ -60,6 +60,51 @@ final class MarkdownParserTests: XCTestCase {
         XCTAssertEqual(blocks, [.code(language: "swift", text: "let value = 1")])
     }
 
+    func testBenchmarkTablesRenderInlineStylesAndClickableLinks() throws {
+        let markdown = """
+        已完成测试。
+
+        | 模型 | 综合得分 / 100 | 完成情况 | 线上成绩 |
+        | --- | --- | --- | --- |
+        | **GPT-6 astra** | **92.78** | **85 / 100** | [查看成绩](https://example.com/export?attempt=benchmark&track=comprehensive) |
+        | GPT-6 sol | 81.92 | 74 / 100 | 暂无 |
+
+        后续说明。
+        """
+        let blocks = MarkdownBlockParser.parse(markdown)
+        let document = MarkdownTextDocument.appKitAttributed(from: blocks)
+        XCTAssertFalse(document.string.contains("**"))
+        XCTAssertFalse(document.string.contains("](https://"))
+        XCTAssertTrue(document.string.hasPrefix("已完成测试。"))
+        XCTAssertTrue(document.string.hasSuffix("后续说明。"))
+        let boldRange = (document.string as NSString).range(of: "92.78")
+        let font = try XCTUnwrap(document.attribute(.font, at: boldRange.location, effectiveRange: nil) as? NSFont)
+        XCTAssertTrue(NSFontManager.shared.traits(of: font).contains(.boldFontMask))
+        let linkRange = (document.string as NSString).range(of: "查看成绩")
+        XCTAssertEqual(document.attribute(.link, at: linkRange.location, effectiveRange: nil) as? URL,
+                       URL(string: "https://example.com/export?attempt=benchmark&track=comprehensive"))
+        let style = try XCTUnwrap(document.attribute(.paragraphStyle, at: linkRange.location, effectiveRange: nil) as? NSParagraphStyle)
+        let cell = try XCTUnwrap(style.textBlocks.first as? NSTextTableBlock)
+        XCTAssertEqual(cell.startingRow, 1)
+        XCTAssertEqual(cell.startingColumn, 3)
+        XCTAssertEqual(cell.table.numberOfColumns, 4)
+        let portable = MarkdownTextDocument.attributed(from: blocks)
+        XCTAssertFalse(String(portable.characters).contains("**"))
+        XCTAssertTrue(portable.runs.contains { $0.link != nil })
+    }
+
+    func testTablePadsMissingCellsWithoutLosingFollowingParagraph() throws {
+        let document = MarkdownTextDocument.appKitAttributed(from: [
+            .table(headers: ["模型", "得分"], rows: [["测试"]]), .paragraph("说明")
+        ])
+        var cells: [NSTextTableBlock] = []
+        document.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: document.length)) { value, _, _ in
+            if let cell = (value as? NSParagraphStyle)?.textBlocks.first as? NSTextTableBlock { cells.append(cell) }
+        }
+        XCTAssertEqual(cells.count, 4)
+        XCTAssertTrue(document.string.hasSuffix("说明"))
+    }
+
     func testStreamingPreviewFormatsBlocksBeforeCompletion() {
         let text = "## 输出中\n\n- **进度**：已完成 [检查](https://example.com)\n\n```swift\nlet value = 1"
         let preview = StreamingMarkdownWindow.preview(text)
