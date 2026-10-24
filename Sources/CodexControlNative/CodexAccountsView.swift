@@ -53,6 +53,7 @@ struct CodexAccountsSheet: View {
             }
             ScrollView {
                 LazyVStack(spacing: 12) {
+                    AccountSharingStatusView(sharing: model.accountDeviceSharing, accounts: store.library.accounts)
                     ForEach(store.library.accounts) { account in card(account) }
                 }
             }
@@ -65,7 +66,7 @@ struct CodexAccountsSheet: View {
         .interactiveDismissDisabled(store.busyID != nil || model.isSwitchingModelProvider)
         // Opening this sheet only displays the existing account snapshot.
         // Refresh explicitly from a card so opening it never locks switching.
-        .onDisappear { switchRequestTask?.cancel() }
+        .onDisappear { switchRequestTask?.cancel(); model.accountDeviceSharing.generatedCode = nil }
         .alert("移除账号？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { account in
             Button("取消", role: .cancel) { removing = nil }
             Button("退出并移除", role: .destructive) {
@@ -134,6 +135,8 @@ struct CodexAccountsSheet: View {
                     Text("重新授权前，请先切换到本机默认账号。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Button("共享到我的设备") { Task { await model.accountDeviceSharing.create(accountID: account.id) } }
+                    .disabled(busy || account.identity == nil || model.accountDeviceSharing.busy)
                 Spacer()
                 if !current {
                     Button {
@@ -151,5 +154,29 @@ struct CodexAccountsSheet: View {
         .padding(16)
         .background(current ? Color.accentColor.opacity(0.06) : Color.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(current ? Color.accentColor : Color.secondary.opacity(0.2)))
+    }
+}
+
+private struct AccountSharingStatusView: View {
+    @ObservedObject var sharing: AccountDeviceSharing
+    let accounts: [CodexSavedAccount]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let message = sharing.message { Text(message).font(.caption).foregroundStyle(.secondary) }
+            if let code = sharing.generatedCode {
+                HStack {
+                    Text(code).font(.caption.monospaced()).lineLimit(2).textSelection(.enabled)
+                    Button("复制分享码") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string) }
+                    Button("隐藏") { sharing.generatedCode = nil }
+                }
+            }
+            ForEach(sharing.publications) { item in
+                HStack {
+                    Text((accounts.first { $0.id == item.accountID }?.title ?? "来源账号") + " · " + (sharing.receivers[item.id] ?? "等待同步")).font(.caption)
+                    Spacer()
+                    Button("停止共享") { Task { await sharing.revoke(item) } }.disabled(sharing.busy)
+                }
+            }
+        }
     }
 }

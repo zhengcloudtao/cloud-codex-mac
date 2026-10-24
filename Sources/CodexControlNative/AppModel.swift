@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSwitchingModelProvider = false
     private var openAIModelOptions: [CodexModelOption] = []
 
+    let accountDeviceSharing: AccountDeviceSharing
     let accounts: CodexAccountStore
     @Published var showingAccounts = false
     @Published private(set) var accountSwitchError: String?
@@ -984,6 +985,7 @@ final class AppModel: ObservableObject {
     ) {
         let accounts = injectedAccounts ?? CodexAccountStore(defaults: remoteDefaults)
         self.accounts = accounts
+        self.accountDeviceSharing = AccountDeviceSharing(defaults: remoteDefaults)
         self.localCodexHome = injectedClient?.codexHomeOverride
         let home = accounts.home(for: accounts.active)
         self.client = injectedClient ?? AppServerClient(codexHomeOverride: home, usesManagedAccount: !accounts.active.isLocal)
@@ -1494,6 +1496,26 @@ final class AppModel: ObservableObject {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        accountDeviceSharing.loadAccess = { [weak self] id, interaction, forceRefresh in
+            guard let self, !self.isSwitchingModelProvider, self.accounts.busyID == nil,
+                  let account = self.accounts.library.accounts.first(where: { $0.id == id }),
+                  let identity = account.identity else { throw AccountShareCrypto.failure }
+            let home = account.isLocal ? CodexUsageTierStore.home(self.localCodexHome) : self.accounts.home(for: account)!
+            var access = try await Task.detached { try AccountShareKeychain.access(home: home, identity: identity, allowInteraction: interaction) }.value
+            if forceRefresh || access.expiresAt < Date().timeIntervalSince1970 + 300 {
+                if self.accounts.library.activeID == id, self.client.connected, !self.customModelProvider.enabled {
+                    try await self.client.refreshAccountForDeviceSharing()
+                } else {
+                    let client = AppServerClient(codexHomeOverride: home, usesManagedAccount: !account.isLocal)
+                    defer { client.shutdown() }
+                    try await client.start()
+                    try await client.refreshAccountForDeviceSharing()
+                }
+                access = try await Task.detached { try AccountShareKeychain.access(home: home, identity: identity, allowInteraction: interaction) }.value
+            }
+            return access
+        }
+        accountDeviceSharing.start()
         MainThreadWatchdog.shared.start()
         systemMetrics.start()
         connectionHealth.start { [weak self] in

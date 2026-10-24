@@ -254,6 +254,10 @@ final class AppServerClient {
         return environment
     }
 
+    func refreshAccountForDeviceSharing() async throws {
+        _ = try await request("account/read", params: ["refreshToken": true])
+    }
+
     func readAccountIdentity() async throws -> CodexAccountIdentity {
         try CodexAccountIdentity.parse(await request("account/read", params: ["refreshToken": false]))
     }

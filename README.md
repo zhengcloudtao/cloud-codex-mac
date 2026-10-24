@@ -261,3 +261,7 @@ Mac 继续以 `cloudcodex.favoriteConversations.v1` 保存收藏；升级兼容�
 Mac 通过 `GET /api/cloud-codex/agent/favorites/next` 领取收藏操作，校验设备、有效期及真实会话工作区后写入现有收藏，通过 `POST /api/cloud-codex/agent/favorites/{id}` 回传 `applied`/`failed`。操作不晚于 2 分钟过期；新客户端连接旧后端时，此可选接口失败不会中断任务执行。
 
 配套 go-ai 和 mp-ai 需要一同升级。先部署后端的表结构和接口，再安装新版 Mac 并上传小程序；编译和单元测试不能替代双方点击收藏/取消的真机同步验收。
+
+### 本人设备间账号共享
+
+账号管理可为已登录账号生成一次性分享码，供自己的 Windows CloudCodex 配对。配对后来源 Mac 更新短期访问凭据，接收端通过现有后端读取加密更新；长期续期凭据留在来源 Mac。需要同步升级 go-ai 和 Windows 客户端，当前源码完成不代表线上服务已升级。使用、协议、撤销语义和验证边界见 [设备账号共享](docs/account-device-sharing.md)。

@@ -203,6 +203,27 @@ final class RemoteControlAPI: @unchecked Sendable {
         )
     }
 
+    func createAccountShare(id: String, accountRef: String, code: String, ciphertext: String) async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/account-shares", method: "POST",
+            bodyData: JSONSerialization.data(withJSONObject: ["id": id, "accountRef": accountRef, "code": code, "ciphertext": ciphertext, "version": 1]))
+        let status = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard status.status == 0 else { throw AccountShareCrypto.failure }
+    }
+    func listAccountShares() async throws -> [AccountShareRemoteState] {
+        try await request(path: "/api/cloud-codex/agent/account-shares", method: "GET", bodyData: nil)
+    }
+    func publishAccountShare(_ id: String, version: Int64, ciphertext: String) async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/account-shares/\(id)", method: "PUT",
+            bodyData: JSONSerialization.data(withJSONObject: ["version": version, "ciphertext": ciphertext]))
+        let status = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard status.status == 0 else { throw AccountShareCrypto.failure }
+    }
+    func revokeAccountShare(_ id: String) async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/account-shares/\(id)", method: "DELETE", bodyData: nil)
+        let status = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard status.status == 0 else { throw AccountShareCrypto.failure }
+    }
+
     func unpair() async throws {
         let data = try await perform(path: "/api/cloud-codex/agent/unpair", method: "POST", bodyData: nil)
         let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
