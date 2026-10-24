@@ -111,7 +111,6 @@ struct CodexUsageInsightsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var range: UsageActivityRange = .daily
     @State private var showProviderUsage = false
-    @State private var showWeeklyQuotaComparison = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -119,7 +118,6 @@ struct CodexUsageInsightsSheet: View {
                 Label("使用统计", systemImage: "chart.xyaxis.line")
                     .font(.headline)
                 Spacer()
-                Button("周额度对比") { showWeeklyQuotaComparison = true }
                 Picker("统计来源", selection: $showProviderUsage) {
                     Text("Codex 账号").tag(false)
                     Text("第三方 API").tag(true)
@@ -172,7 +170,6 @@ struct CodexUsageInsightsSheet: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: 940, height: 690)
-        .sheet(isPresented: $showWeeklyQuotaComparison) { WeeklyQuotaComparisonSheet() }
         .task {
             showProviderUsage = model.customModelProvider.enabled
             if model.usageInsights == nil { await model.refreshUsageInsights() }

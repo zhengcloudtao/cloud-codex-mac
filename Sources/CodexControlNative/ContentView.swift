@@ -498,7 +498,6 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingRemoteControl) { RemoteControlSheet() }
         .sheet(isPresented: $model.showingAccounts) { CodexAccountsSheet(store: model.accounts) }
         .sheet(isPresented: $model.showingUsageInsights) { CodexUsageInsightsSheet() }
-        .sheet(isPresented: $model.showingWeeklyQuotaComparison) { WeeklyQuotaComparisonSheet() }
         .sheet(isPresented: $model.showingPersonalSkills) { CodexPersonalSkillsSheet() }
         .alert("操作未完成", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -4519,11 +4518,17 @@ private struct ActivityBubble: View {
         _isExpanded = State(initialValue: message.id.hasPrefix("connection-notice-"))
     }
 
+    private var usageLimit: UsageLimitPresentation? {
+        message.activityKind == .warning ? UsageLimitPresentation(message.text) : nil
+    }
+
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             // Do not parse or lay out hidden logs, especially while streaming.
             if isExpanded && !message.text.isEmpty {
-                if message.activityKind == .reasoning || message.activityKind == .plan {
+                if let usageLimit {
+                    UsageLimitDetailView(usageLimit: usageLimit, originalError: message.text)
+                } else if message.activityKind == .reasoning || message.activityKind == .plan {
                     Group {
                         if message.isStreaming {
                             StreamingMarkdownContent(text: message.text)
@@ -4563,7 +4568,7 @@ private struct ActivityBubble: View {
                 Image(systemName: message.activityKind?.iconName ?? "gearshape.2")
                     .foregroundStyle(iconColor)
                     .frame(width: 20)
-                Text(message.activityTitle ?? "Codex 处理过程")
+                Text(usageLimit != nil ? "Codex 使用额度已用尽" : (message.activityTitle ?? "Codex 处理过程"))
                     .font(compact ? .caption.weight(.medium) : .callout.weight(.medium))
                     .lineLimit(1)
                 Spacer()

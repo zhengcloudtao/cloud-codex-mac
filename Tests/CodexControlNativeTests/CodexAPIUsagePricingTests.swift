@@ -54,9 +54,7 @@ final class CodexAPIUsagePricingTests: XCTestCase {
         XCTAssertFalse(report.complete)
         XCTAssertEqual(report.knownDollars, 0)
         XCTAssertEqual(report.unpricedTokens, 110)
-        var sample = WeeklyQuotaComparison.Sample(plan: "Plus", percent: 5, tokens: 110, dollars: 1, monthlyPrice: nil)
-        sample.costReport = report
-        XCTAssertNil(sample.weeklyDollars)
+
     }
 
     func testInvalidCachePartitionAndUnverifiedTierAreUnpriced() {

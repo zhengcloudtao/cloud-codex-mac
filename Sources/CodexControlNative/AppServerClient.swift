@@ -349,25 +349,6 @@ final class AppServerClient {
         )
     }
 
-    func readWeeklyQuotaSnapshot(usageTimeoutSeconds: UInt64 = 45, quotaTimeoutSeconds: UInt64 = 20) async throws -> WeeklyQuotaComparison.Snapshot {
-        // Bracket the token read with quota reads; refuse a moving quota boundary.
-        let startAccount = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: quotaTimeoutSeconds)
-        let before = try await readAccountOverview(timeoutSeconds: quotaTimeoutSeconds)
-        let usage = try await request("account/usage/read", params: [:], timeoutSeconds: usageTimeoutSeconds)
-        let after = try await readAccountOverview(timeoutSeconds: quotaTimeoutSeconds)
-        let endAccount = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: quotaTimeoutSeconds)
-        return try WeeklyQuotaComparison.parseSnapshot(startAccount: startAccount, before: before,
-                                                       usage: usage, after: after, endAccount: endAccount)
-    }
-
-    func readWeeklyQuotaForLocalUsage(knownLifetimeTokens: Int64 = 0) async throws -> WeeklyQuotaComparison.Snapshot {
-        let start = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: 20)
-        let quota = try await readAccountOverview(timeoutSeconds: 20)
-        let end = try await request("account/read", params: ["refreshToken": false], timeoutSeconds: 20)
-        return try WeeklyQuotaComparison.parseSnapshot(startAccount: start, before: quota,
-            usage: [:], after: quota, endAccount: end, fallbackLifetimeTokens: knownLifetimeTokens)
-    }
-
     func readUsageInsights() async throws -> CodexUsageInsights {
         let account = try await request("account/read", params: ["refreshToken": false])
         let usage = try await request("account/usage/read", params: [:])

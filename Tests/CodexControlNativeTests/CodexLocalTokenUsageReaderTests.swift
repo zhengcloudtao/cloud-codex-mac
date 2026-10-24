@@ -146,16 +146,5 @@ final class CodexLocalTokenUsageReaderTests: XCTestCase {
         XCTAssertEqual(isolated.cost.unpricedTokens, 110)
     }
 
-    func testOptionalExistingMeasurementCanBeRecoveredFromLocalLogs() async throws {
-        guard ProcessInfo.processInfo.environment["CLOUDCODEX_LOCAL_QUOTA_SMOKE"] == "1" else {
-            throw XCTSkip("Opt-in local metadata-only measurement recovery")
-        }
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "com.zhengyuntao.cloudcodex"))
-        let sampler = AutomaticWeeklyQuotaSampler.load(defaults)
-        let start = try XCTUnwrap(sampler.baseline?.date)
-        let result = try await CodexLocalTokenUsageReader().read(since: start, through: Date())
-        XCTAssertGreaterThan(result.tokens, 0)
-        XCTAssertGreaterThan(result.eventCount, 0)
-        print("local-log-backfill: events=\(result.eventCount); models=\(result.cost.lines.map(\.model)); knownUSD=\(result.cost.knownDollars); unpricedTokens=\(result.cost.unpricedTokens)")
-    }
+
 }

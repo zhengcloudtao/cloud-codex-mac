@@ -367,10 +367,6 @@ struct AccountOverviewView: View {
                         expanded = false
                         model.showingAccounts = true
                     }
-                    Button("周额度对比") {
-                        expanded = false
-                        model.showingWeeklyQuotaComparison = true
-                    }
                     Button("刷新") { Task { await model.connectionHealth.check() } }
                         .disabled(model.connectionHealth.isChecking)
                 }
