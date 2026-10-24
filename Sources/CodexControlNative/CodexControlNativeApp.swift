@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct CloudCodexApp: App {
+    @StateObject private var startupSession = StartupAnimationSession()
     @StateObject private var model = AppModel()
     @StateObject private var updateController = CloudCodexUpdateController()
     @StateObject private var sparkleUpdater = CloudCodexSparkleUpdater()
@@ -9,8 +10,10 @@ struct CloudCodexApp: App {
 
     var body: some Scene {
         WindowGroup("CloudCodex") {
-            ContentView(updateController: updateController)
-                .environmentObject(model)
+            StartupAnimationHost(session: startupSession) {
+                ContentView(updateController: updateController)
+                    .environmentObject(model)
+            }
                 // CloudCodex is a three-column application.  Keeping enough
                 // room for every column prevents a selected long conversation
                 // from forcing the workspace column into a compressed layout.

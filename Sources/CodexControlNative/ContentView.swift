@@ -1415,6 +1415,7 @@ struct ContentView: View {
                 preferencesPage {
                     appearanceModeSettingsSection
                     backgroundSettingsSection
+                    StartupAnimationSettings()
                 }
                 .tabItem { Label("外观与背景", systemImage: "paintpalette") }.tag(0)
 
@@ -1784,13 +1785,15 @@ struct ContentView: View {
 private struct ThreadInputUnavailableView: View {
     @EnvironmentObject private var model: AppModel
     let state: ThreadInputAvailability
+    @State private var showsOriginalError = false
 
     private var isChecking: Bool { state == .checking }
+    private var resumePresentation: ThreadResumePresentation { ThreadResumePresentation(model.threadOwnershipNotice) }
     private var title: String {
         switch state {
         case .checking: return "正在恢复会话"
         case .occupied: return "已在另一个应用中打开"
-        case .unavailable: return "暂时无法继续会话"
+        case .unavailable: return resumePresentation.title
         case .available: return "可以继续会话"
         }
     }
@@ -1798,7 +1801,7 @@ private struct ThreadInputUnavailableView: View {
         switch state {
         case .checking: return "历史记录可以正常查看，恢复完成后即可继续发送。"
         case .occupied: return model.threadOwnershipNotice ?? AppModel.occupiedThreadMessage
-        case .unavailable: return model.threadOwnershipNotice ?? "本地服务暂未响应，请重试。"
+        case .unavailable: return resumePresentation.detail
         case .available: return ""
         }
     }
@@ -1815,7 +1818,22 @@ private struct ThreadInputUnavailableView: View {
                 Text(detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if state == .unavailable, let original = resumePresentation.originalError {
+                    DisclosureGroup("查看错误详情", isExpanded: $showsOriginalError) {
+                        ScrollView {
+                            Text(original)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(height: 80)
+                    }
+                    .font(.caption)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 16)
 
@@ -1829,6 +1847,7 @@ private struct ThreadInputUnavailableView: View {
             .padding(.horizontal, 12)
             // A restore is already in flight; do not queue duplicate retries.
             .allowsHitTesting(!isChecking)
+            .disabled(isChecking)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 18)
@@ -1839,8 +1858,9 @@ private struct ThreadInputUnavailableView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(title + "，" + detail)
+        .accessibilityElement(children: .contain)
+        .onChange(of: model.threadOwnershipNotice) { _, _ in showsOriginalError = false }
+        .onChange(of: model.selectedThreadID) { _, _ in showsOriginalError = false }
         .transaction { transaction in
             transaction.animation = nil
         }

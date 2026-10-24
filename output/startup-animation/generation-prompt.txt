@@ -1,0 +1,6 @@
+Tool: built-in image_gen (keyframe), FFmpeg (animation assembly).
+Reference image: Resources/CodexControlIcon-1024.png
+
+Create a polished landscape 16:9 title keyframe for a CloudCodex macOS app startup GIF, inspired by the iconic Chinese meme '原神，启动！' game startup title reveal, rebranded entirely to CloudCodex. Use provided application icon as identity reference: stacked cobalt-blue terminal windows, white >_ prompt and cyan four-point star. Place a small refined faithful version of that icon centered above a very large elegant game-title wordmark reading exactly 'CloudCodex'. Under it text exactly '启动！' in tasteful Chinese title typography. White to very pale icy-blue background, subtle blue-gray fantasy cloud wisps only at far edges, sharp navy lettering, restrained cyan glints, tiny ornamental four-point star above wordmark. Symmetrical cinematic title screen, generous clear negative space, professional readable typography, no extra text, no Genshin logo, no watermark, no checkerboard. All essential content in central 65 percent. This is the final bright title reveal frame; produce a single image not a storyboard.
+
+Animation: dark opening with cyan light line, 0.45-second reveal starting at 0.25 seconds, gentle 1.06-to-1.0 scale settling, title hold. 3 seconds, 960x540, 20 fps, 60 frames. GIF has no audio.
