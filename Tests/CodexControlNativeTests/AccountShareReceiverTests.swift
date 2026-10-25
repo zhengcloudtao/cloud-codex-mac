@@ -111,6 +111,19 @@ final class AccountShareReceiverTests: XCTestCase {
         XCTAssertEqual(fetched.accessToken, access.accessToken); XCTAssertEqual(claims, 2); XCTAssertEqual(reads, 1)
         let renewed = try await restored.access(accountID: accountID, refresh: true)
         XCTAssertEqual(renewed.chatgptAccountId, access.chatgptAccountId)
+        let available = try await restored.availability(accountID: accountID)
+        XCTAssertTrue(available)
+        AccountReceiverProtocol.handler = { _ in
+            Data("{\"status\":403,\"msg\":\"配对已过期、已撤销或设备凭据无效\",\"data\":null}".utf8)
+        }
+        let revoked = try await restored.availability(accountID: accountID)
+        XCTAssertFalse(revoked)
+        AccountReceiverProtocol.handler = { _ in throw URLError(.timedOut) }
+        do { _ = try await restored.availability(accountID: accountID); XCTFail("Network failure must remain unknown") }
+        catch { XCTAssertTrue(error is URLError) }
+        AccountReceiverProtocol.handler = { _ in Data("{\"status\":403,\"msg\":\"unrelated authentication error\"}".utf8) }
+        do { _ = try await restored.availability(accountID: accountID); XCTFail("Unrelated auth error must not retire the share") }
+        catch { }
         XCTAssertFalse(String(decoding: try XCTUnwrap(vault[accountID]), as: UTF8.self).contains(access.accessToken))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

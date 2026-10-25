@@ -56,7 +56,14 @@ struct CodexAccountsSheet: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     AccountSharingStatusView(sharing: model.accountDeviceSharing, accounts: store.library.accounts)
-                    ForEach(store.library.accounts) { account in card(account) }
+                    ForEach(store.library.accounts.filter { $0.sharedUnavailable != true || $0.id == store.library.activeID }) { account in card(account) }
+                    let unavailable = store.library.accounts.filter { $0.isShared && $0.sharedUnavailable == true && $0.id != store.library.activeID }
+                    if !unavailable.isEmpty {
+                        DisclosureGroup("不可用的共享账号（\(unavailable.count)）") {
+                            ForEach(unavailable) { account in card(account) }
+                        }
+                        .font(.callout).foregroundStyle(.secondary)
+                    }
                 }
             }
             Text("新增账号的登录凭据由 Codex 保存在 macOS 钥匙串。首次访问可能需要系统授权。")
@@ -66,8 +73,13 @@ struct CodexAccountsSheet: View {
         .frame(width: 700, height: 600)
         .background(Color(nsColor: .windowBackgroundColor))
         .interactiveDismissDisabled(store.busyID != nil || model.isSwitchingModelProvider)
-        // Opening this sheet only displays the existing account snapshot.
-        // Refresh explicitly from a card so opening it never locks switching.
+        // Check only shared authorization; never auto-refresh quota or lock switching.
+        .task {
+            while !Task.isCancelled {
+                await store.reconcileSharedAccounts()
+                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            }
+        }
         .sheet(isPresented: $showReceive) { AccountShareReceiveSheet().environmentObject(model) }
         .onDisappear { switchRequestTask?.cancel(); model.accountDeviceSharing.generatedCode = nil }
         .alert("移除账号？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { account in
@@ -110,7 +122,7 @@ struct CodexAccountsSheet: View {
                     .font(.title2).foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(account.title).font(.headline).textSelection(.enabled)
-                    Text(account.isShared ? "来自其他设备的共享账号" : (account.isLocal ? "本机默认账号" : "独立账号"))
+                    Text(account.sharedUnavailable == true ? "共享授权已失效" : (account.isShared ? "来自其他设备的共享账号" : (account.isLocal ? "本机默认账号" : "独立账号")))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -152,7 +164,7 @@ struct CodexAccountsSheet: View {
                             .frame(width: 88)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(busy || (!account.isLocal && account.identity == nil))
+                    .disabled(busy || account.sharedUnavailable == true || (!account.isLocal && account.identity == nil))
                 }
             }
         }

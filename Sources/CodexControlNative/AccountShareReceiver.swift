@@ -2,13 +2,14 @@ import Foundation
 import Security
 
 enum AccountSharePairingError: LocalizedError {
-    case invalidCode, differentPending, busy, http(Int), rejected
+    case invalidCode, differentPending, busy, http(Int), rejected, unavailable
 
     var errorDescription: String? {
         switch self {
         case .invalidCode: return "分享码格式不正确，请从来源设备复制完整的 CCS1 分享码。"
         case .differentPending: return "还有另一个账号正在等待配对。请留空重试原配对；如需使用新分享码，请先清除待配对记录。"
         case .busy: return "正在连接共享账号，请等待本次配对完成。"
+        case .unavailable: return "共享授权已失效或已被来源设备停止，请重新配对。"
         case .http(401), .http(403): return "后端拒绝了配对请求。请确认两台设备使用相同后端，且后端支持分享码配对。"
         case .http(404), .http(410): return "此分享记录不可用，请确认两台设备使用相同后端，并在来源设备重新生成分享码。"
         case .http(429): return "配对请求过于频繁，请稍后重试。"
@@ -123,6 +124,20 @@ final class AccountShareReceiver {
         finishPairing()
     }
     func remove(_ id: String) { delete(id) }
+    // Only the relay's explicit share-denied response changes the saved card's
+    // availability. Transport/authentication failures must not retire accounts.
+    func availability(accountID: String) async throws -> Bool {
+        let value = try binding(accountID)
+        guard value.code.isEmpty else { throw AccountShareCrypto.failure }
+        do {
+            let data = try await request(value)
+            struct Envelope: Decodable { let data: AccountShareSnapshot }
+            _ = try value.open(JSONDecoder().decode(Envelope.self, from: data).data)
+            return true
+        } catch AccountSharePairingError.unavailable {
+            return false
+        }
+    }
     private func request(_ value: AccountShareBinding, suffix: String = "", method: String = "GET", body: [String: String]? = nil) async throws -> Data {
         let base = try AccountShareBinding.serverURL(value.serverAddress)
         guard let url = URL(string: base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/api/cloud-codex/account-shares/\(value.id)" + suffix) else { throw AccountShareCrypto.failure }
@@ -135,7 +150,12 @@ final class AccountShareReceiver {
         guard response.expectedContentLength <= 40000 else { throw AccountShareCrypto.failure }
         var data = Data()
         for try await byte in bytes { guard data.count < 40000 else { throw AccountShareCrypto.failure }; data.append(byte) }
-        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any], envelope["status"] as? Int == 0 else { throw AccountSharePairingError.rejected }
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AccountShareCrypto.failure }
+        if value.code.isEmpty, envelope["status"] as? Int == 403,
+           envelope["msg"] as? String == "配对已过期、已撤销或设备凭据无效" {
+            throw AccountSharePairingError.unavailable
+        }
+        guard envelope["status"] as? Int == 0 else { throw AccountSharePairingError.rejected }
         return data
     }
     func access(accountID: String, refresh: Bool = false) async throws -> SharedAccountAccess {

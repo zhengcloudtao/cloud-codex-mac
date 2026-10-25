@@ -4,6 +4,34 @@ import SwiftUI
 
 @MainActor
 final class CodexAccountsTests: XCTestCase {
+    func testSharedAvailabilityKeepsLocalLoginAndHistoryAndRecoversAfterRecheck() async throws {
+        let f = try fixture()
+        defer { f.stop() }
+        let id = UUID().uuidString
+        try f.store.addSharedAccount(id: id, access: .init(accessToken: "synthetic", chatgptAccountId: "fixture", chatgptPlanType: "plus", email: "fixture@example.invalid", expiresAt: Date().timeIntervalSince1970 + 1800))
+        let home = try XCTUnwrap(f.store.home(for: f.store.library.accounts.last!))
+        let history = home.appendingPathComponent("history-fixture.txt")
+        try Data("keep history".utf8).write(to: history)
+        f.store.checkSharedAccess = { _ in throw URLError(.timedOut) }
+        await f.store.reconcileSharedAccounts()
+        XCTAssertNil(f.store.library.accounts.last?.sharedUnavailable)
+        f.store.checkSharedAccess = { _ in false }
+        await f.store.reconcileSharedAccounts()
+        XCTAssertEqual(f.store.library.accounts.last?.sharedUnavailable, true)
+        XCTAssertEqual(f.store.active.id, "local")
+        XCTAssertNil(f.store.busyID)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: history.path))
+        let reloaded = CodexAccountStore(defaults: f.defaults, root: f.store.root)
+        XCTAssertEqual(reloaded.library.accounts.last?.sharedUnavailable, true)
+        f.store.activate(id)
+        await f.store.reconcileSharedAccounts()
+        XCTAssertEqual(f.store.active.id, id, "Status checks must not switch or stop the active account")
+        f.store.checkSharedAccess = { _ in true }
+        await f.store.reconcileSharedAccounts()
+        XCTAssertEqual(f.store.library.accounts.last?.sharedUnavailable, false)
+        XCTAssertNil(f.store.issues[id])
+    }
+
     @MainActor
     private struct Fixture {
         let root: URL

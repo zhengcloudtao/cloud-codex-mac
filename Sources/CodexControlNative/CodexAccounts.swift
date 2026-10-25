@@ -20,6 +20,7 @@ struct CodexSavedAccount: Identifiable, Codable, Equatable {
     let id: String
     var identity: CodexAccountIdentity?
     var shared: Bool?
+    var sharedUnavailable: Bool?
     var isShared: Bool { shared == true }
     var isLocal: Bool { id == Self.localID }
     var title: String { identity?.email ?? (isLocal ? "本机默认账号" : "待登录账号") }
@@ -46,6 +47,8 @@ final class CodexAccountStore: ObservableObject {
     private let openURL: (URL) -> Bool
     var configureSharedClient: ((AppServerClient, String) -> Void)?
     var removeSharedBinding: ((String) -> Void)?
+    var checkSharedAccess: ((String) async throws -> Bool)?
+    private var checkingSharedAccess = false
     private var worker: AppServerClient?
     private var loginID: String?
     private var generation = 0
@@ -202,6 +205,11 @@ final class CodexAccountStore: ObservableObject {
 
     func refresh(_ account: CodexSavedAccount) async {
         guard busyID == nil else { return }
+        if account.isShared {
+            await reconcileSharedAccounts()
+            guard library.accounts.first(where: { $0.id == account.id })?.sharedUnavailable != true else { return }
+        }
+        guard busyID == nil else { return }
         busyID = account.id
         let ticket = generation
         let client = makeClient(home(for: account), !account.isLocal)
@@ -221,6 +229,31 @@ final class CodexAccountStore: ObservableObject {
             guard generation == ticket else { return }
             issues[account.id] = "读取失败：登录可能已失效，或网络暂时不可用。"
             // Keep the last snapshot with its original timestamp, never fabricate a new quota.
+        }
+    }
+
+    func reconcileSharedAccounts() async {
+        guard !checkingSharedAccess, busyID == nil, let checkSharedAccess else { return }
+        checkingSharedAccess = true
+        defer { checkingSharedAccess = false }
+        for account in library.accounts where account.isShared {
+            guard !Task.isCancelled else { return }
+            do {
+                let available = try await checkSharedAccess(account.id)
+                guard !Task.isCancelled,
+                      let index = library.accounts.firstIndex(where: { $0.id == account.id && $0.isShared }) else { continue }
+                let wasUnavailable = library.accounts[index].sharedUnavailable == true
+                library.accounts[index].sharedUnavailable = !available
+                if available {
+                    if wasUnavailable { issues[account.id] = nil }
+                } else {
+                    overviews[account.id] = nil
+                    issues[account.id] = "共享授权已失效或已被来源设备停止，请重新配对。"
+                }
+                if wasUnavailable != !available { save() }
+            } catch {
+                // Keep the prior state on network, server, keychain or expiry errors.
+            }
         }
     }
 

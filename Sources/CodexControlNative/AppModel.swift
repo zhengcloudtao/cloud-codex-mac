@@ -1483,6 +1483,10 @@ final class AppModel: ObservableObject {
         hasStarted = true
         accounts.configureSharedClient = { [weak self] client, id in self?.configureSharedAccount(client, id: id) }
         accounts.removeSharedBinding = { [weak self] id in self?.accountShareReceiver.remove(id) }
+        accounts.checkSharedAccess = { [weak self] id in
+            guard let self else { throw AccountShareCrypto.failure }
+            return try await self.accountShareReceiver.availability(accountID: id)
+        }
         configureSharedAccount(client, id: accounts.library.activeID)
         accountDeviceSharing.loadAccess = { [weak self] id, interaction, forceRefresh in
             guard let self, !self.isSwitchingModelProvider, self.accounts.busyID == nil,
@@ -2941,6 +2945,10 @@ final class AppModel: ObservableObject {
     func switchAccount(to id: String) async {
         guard id != accounts.library.activeID,
               let target = accounts.library.accounts.first(where: { $0.id == id }) else { return }
+        guard target.sharedUnavailable != true else {
+            accountSwitchError = "此共享授权已失效，请在来源设备生成新的分享码后重新配对。"
+            return
+        }
         if let reason = accountSwitchUnavailableReason { accountSwitchError = reason; return }
         let previousHome = client.codexHomeOverride
         let previousManaged = client.usesManagedAccount
