@@ -115,6 +115,12 @@ private struct StartupWindowOverlay: NSViewRepresentable {
 }
 
 enum StartupAnimationLayout {
+    static func fittedSize(image: CGSize, container: CGSize) -> CGSize {
+        guard image.width > 0, image.height > 0 else { return container }
+        let scale = min(container.width / image.width, container.height / image.height)
+        return CGSize(width: image.width * scale, height: image.height * scale)
+    }
+
     static func filledSize(image: CGSize, container: CGSize) -> CGSize {
         guard image.width > 0, image.height > 0 else { return container }
         let scale = max(container.width / image.width, container.height / image.height)
@@ -151,10 +157,19 @@ struct StartupAnimationPlayer: View {
             Color(nsColor: .windowBackgroundColor)
             if let image {
                 GeometryReader { geometry in
-                    let size = StartupAnimationLayout.filledSize(image: image.size, container: geometry.size)
-                    AnimatedStartupImage(image: image, animates: !reduceMotion)
-                        .frame(width: size.width, height: size.height)
-                        .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                    let backgroundSize = StartupAnimationLayout.filledSize(image: image.size, container: geometry.size)
+                    let foregroundSize = StartupAnimationLayout.fittedSize(image: image.size, container: geometry.size)
+                    ZStack {
+                        // Only the ambient background is cropped; the complete GIF stays visible in front.
+                        AnimatedStartupImage(image: image, animates: !reduceMotion)
+                            .frame(width: backgroundSize.width, height: backgroundSize.height)
+                            .scaleEffect(1.12)
+                            .blur(radius: 32, opaque: true)
+                            .accessibilityHidden(true)
+                        AnimatedStartupImage(image: image, animates: !reduceMotion)
+                            .frame(width: foregroundSize.width, height: foregroundSize.height)
+                    }
+                    .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
                 }
                 .clipped()
                 .accessibilityLabel("自定义启动动画")

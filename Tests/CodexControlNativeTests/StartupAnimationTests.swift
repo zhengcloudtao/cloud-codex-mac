@@ -4,6 +4,18 @@ import UniformTypeIdentifiers
 @testable import CloudCodex
 
 final class StartupAnimationTests: XCTestCase {
+    func testForegroundKeepsEntireImageInsideDifferentWindowShapes() {
+        let image = CGSize(width: 960, height: 540)
+        for container in [CGSize(width: 1220, height: 780), CGSize(width: 1140, height: 900),
+                          CGSize(width: 1800, height: 640), CGSize(width: 680, height: 500)] {
+            let size = StartupAnimationLayout.fittedSize(image: image, container: container)
+            XCTAssertLessThanOrEqual(size.width, container.width + 0.001)
+            XCTAssertLessThanOrEqual(size.height, container.height + 0.001)
+            XCTAssertEqual(size.width / size.height, 16.0 / 9.0, accuracy: 0.001)
+            XCTAssertTrue(abs(size.width - container.width) < 0.001 || abs(size.height - container.height) < 0.001)
+        }
+    }
+
     func testFillCoversWindowWithoutStretching() {
         let wide = StartupAnimationLayout.filledSize(image: CGSize(width: 960, height: 540),
                                                      container: CGSize(width: 1220, height: 780))
