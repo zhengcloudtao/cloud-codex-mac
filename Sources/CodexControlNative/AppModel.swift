@@ -18,6 +18,7 @@ final class AppModel: ObservableObject {
     private var openAIModelOptions: [CodexModelOption] = []
 
     let accountShareReceiver: AccountShareReceiver
+    @Published private(set) var isConnectingSharedAccount = false
     let accountDeviceSharing: AccountDeviceSharing
     let accounts: CodexAccountStore
     @Published var showingAccounts = false
@@ -972,12 +973,13 @@ final class AppModel: ObservableObject {
         creditTurnInterrupter: ((String, String) async throws -> Void)? = nil,
         remoteAPILoader: (@Sendable (Bool) async throws -> RemoteControlAPI)? = nil,
         client injectedClient: AppServerClient? = nil,
-        accounts injectedAccounts: CodexAccountStore? = nil
+        accounts injectedAccounts: CodexAccountStore? = nil,
+        accountShareReceiver injectedShareReceiver: AccountShareReceiver? = nil
     ) {
         let accounts = injectedAccounts ?? CodexAccountStore(defaults: remoteDefaults)
         self.accounts = accounts
         self.accountDeviceSharing = AccountDeviceSharing(defaults: remoteDefaults)
-        self.accountShareReceiver = AccountShareReceiver(defaults: remoteDefaults)
+        self.accountShareReceiver = injectedShareReceiver ?? AccountShareReceiver(defaults: remoteDefaults)
         self.localCodexHome = injectedClient?.codexHomeOverride
         let home = accounts.home(for: accounts.active)
         self.client = injectedClient ?? AppServerClient(codexHomeOverride: home, usesManagedAccount: !accounts.active.isLocal)
@@ -2926,8 +2928,11 @@ final class AppModel: ObservableObject {
     }
 
     func connectSharedAccount(code: String) async throws {
-        if let reason = accountSwitchUnavailableReason { throw ModelProviderError.message(reason) }
-        guard !customModelProvider.enabled else { throw ModelProviderError.message("请先选择 OpenAI 模型，再添加共享账号。") }
+        // Pairing only adds an inactive account; it does not replace the running
+        // client's identity. Keep the task/queue guards on switchAccount instead.
+        guard !isConnectingSharedAccount else { throw AccountSharePairingError.busy }
+        isConnectingSharedAccount = true
+        defer { isConnectingSharedAccount = false }
         let (id, access) = try await accountShareReceiver.pair(code: code, server: remoteServerConfiguration.validatedURL().absoluteString)
         if !accounts.library.accounts.contains(where: { $0.id == id }) { try accounts.addSharedAccount(id: id, access: access) }
         accountShareReceiver.finishPairing()

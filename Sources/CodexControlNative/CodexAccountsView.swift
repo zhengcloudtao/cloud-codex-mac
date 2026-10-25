@@ -196,19 +196,24 @@ private struct AccountShareReceiveSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("通过分享码添加账号").font(.title2.bold()); Spacer(); Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction) }
             SecureField("粘贴完整分享码；留空可重试上次配对", text: $code)
+                .disabled(busy || model.isConnectingSharedAccount)
             Text(status).font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack {
                 Button(busy ? "正在配对…" : "连接 / 重试") {
                     busy = true
                     Task {
                         defer { busy = false }
                         do { try await model.connectSharedAccount(code: code); code = ""; status = "账号已添加，请返回账号管理点击切换。来源电脑需保持运行以更新凭据。" }
-                        catch { status = "连接未完成：请检查分享码、相同后端及来源设备。可留空重试；更换分享码前请先清除待配对记录。" }
+                        catch { status = AccountSharePairingError.message(for: error) }
                     }
-                }.disabled(busy)
-                Button("清除待配对记录") { model.accountShareReceiver.discardPending(preserving: Set(model.accounts.library.accounts.map(\.id))); code = ""; status = "已清除待配对记录，可输入新的分享码。" }.disabled(busy)
+                }.disabled(busy || model.isConnectingSharedAccount)
+                Button("清除待配对记录") { model.accountShareReceiver.discardPending(preserving: Set(model.accounts.library.accounts.map(\.id))); code = ""; status = "已清除待配对记录，可输入新的分享码。" }.disabled(busy || model.isConnectingSharedAccount)
             }
-            Text("共享账号只接收短期访问凭据，不覆盖本机登录；无法再次转分享。来源电脑离线时暂时无法续期。").font(.caption).foregroundStyle(.secondary)
+            Text("可在任务执行期间添加共享账号，任务结束后再切换使用。共享账号只接收短期访问凭据；来源电脑离线时暂时无法续期。")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }.padding(24).frame(width: 540)
     }
 }

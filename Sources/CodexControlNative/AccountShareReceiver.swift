@@ -1,6 +1,29 @@
 import Foundation
 import Security
 
+enum AccountSharePairingError: LocalizedError {
+    case invalidCode, differentPending, busy, http(Int), rejected
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidCode: return "分享码格式不正确，请从来源设备复制完整的 CCS1 分享码。"
+        case .differentPending: return "还有另一个账号正在等待配对。请留空重试原配对；如需使用新分享码，请先清除待配对记录。"
+        case .busy: return "正在连接共享账号，请等待本次配对完成。"
+        case .http(401), .http(403): return "后端拒绝了配对请求。请确认两台设备使用相同后端，且后端支持分享码配对。"
+        case .http(404), .http(410): return "此分享记录不可用，请确认两台设备使用相同后端，并在来源设备重新生成分享码。"
+        case .http(429): return "配对请求过于频繁，请稍后重试。"
+        case .http: return "配对服务暂时不可用，请稍后重试。"
+        case .rejected: return "分享码未被接受，可能已过期、已被使用或已撤销。请确认后端一致，并在来源设备重新生成分享码。"
+        }
+    }
+
+    static func message(for error: Error) -> String {
+        if let known = error as? Self { return known.localizedDescription }
+        if error is URLError { return "无法连接配对服务，请检查网络和后端地址后重试。待配对记录已保留。" }
+        return "未能读取共享账号。请确认来源设备在线、账号已登录且允许访问钥匙串，然后留空重试。"
+    }
+}
+
 struct AccountShareBinding: Codable {
     let id: String
     var code: String
@@ -17,8 +40,10 @@ struct AccountShareBinding: Codable {
     }
     static func parse(_ code: String, server: String) throws -> Self {
         let parts = code.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: ".")
-        guard parts.count == 4, parts[0] == "CCS1", UUID(uuidString: parts[1]) != nil else { throw AccountShareCrypto.failure }
-        _ = try decodeProof(parts[2]); _ = try decodeProof(parts[3]); _ = try serverURL(server)
+        guard parts.count == 4, parts[0] == "CCS1", UUID(uuidString: parts[1]) != nil else { throw AccountSharePairingError.invalidCode }
+        do { _ = try decodeProof(parts[2]); _ = try decodeProof(parts[3]) }
+        catch { throw AccountSharePairingError.invalidCode }
+        _ = try serverURL(server)
         return .init(id: parts[1], code: parts[2], key: parts[3], receiverSecret: AccountShareCrypto.randomProof(), serverAddress: server)
     }
     static func serverURL(_ server: String) throws -> URL {
@@ -81,7 +106,7 @@ final class AccountShareReceiver {
             if code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { accountID = pending }
             else {
                 let next = try AccountShareBinding.parse(code, server: server)
-                guard existing.id == next.id, existing.key == next.key, existing.serverAddress == next.serverAddress else { throw AccountShareCrypto.failure }
+                guard existing.id == next.id, existing.key == next.key, existing.serverAddress == next.serverAddress else { throw AccountSharePairingError.differentPending }
                 accountID = pending
             }
         } else {
@@ -105,10 +130,12 @@ final class AccountShareReceiver {
         request.setValue(value.receiverSecret, forHTTPHeaderField: "X-CloudCodex-Share-Token")
         if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= 40000 else { throw AccountShareCrypto.failure }
+        guard let http = response as? HTTPURLResponse else { throw AccountShareCrypto.failure }
+        guard http.statusCode == 200 else { throw AccountSharePairingError.http(http.statusCode) }
+        guard response.expectedContentLength <= 40000 else { throw AccountShareCrypto.failure }
         var data = Data()
         for try await byte in bytes { guard data.count < 40000 else { throw AccountShareCrypto.failure }; data.append(byte) }
-        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any], envelope["status"] as? Int == 0 else { throw AccountShareCrypto.failure }
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any], envelope["status"] as? Int == 0 else { throw AccountSharePairingError.rejected }
         return data
     }
     func access(accountID: String, refresh: Bool = false) async throws -> SharedAccountAccess {

@@ -4,6 +4,55 @@ import CryptoKit
 
 @MainActor
 final class AccountShareReceiverTests: XCTestCase {
+    func testPairingAddsInactiveAccountWhileQueueRemainsAndSwitchIsBlocked() async throws {
+        let suite = "AccountShareReceiverTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+        var vault: [String: Data] = [:]
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [AccountReceiverProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); AccountReceiverProtocol.handler = nil }
+        let key = Data(0..<32), id = UUID().uuidString.lowercased()
+        let proof = key.base64EncodedString().replacingOccurrences(of: "=", with: "")
+        let access = SharedAccountAccess(accessToken: "synthetic-only", chatgptAccountId: "fixture-account", chatgptPlanType: "plus", email: "fixture@example.invalid", expiresAt: Date().timeIntervalSince1970 + 1800)
+        AccountReceiverProtocol.handler = { request in
+            XCTAssertTrue(request.url!.path.hasSuffix("/claim"))
+            let cipher = try AccountShareCrypto.seal(access, id: id, version: 1, key: key)
+            return try JSONSerialization.data(withJSONObject: ["status": 0, "data": ["id": id, "version": 1, "ciphertext": cipher]])
+        }
+        let receiver = AccountShareReceiver(defaults: defaults, session: session,
+            load: { try XCTUnwrap(vault[$0]) }, save: { vault[$1] = $0 }, delete: { vault[$0] = nil })
+        let accounts = CodexAccountStore(defaults: defaults, root: root)
+        let client = AppServerClient(codexHomeOverride: root.appendingPathComponent("local"))
+        let model = AppModel(remoteDefaults: defaults, client: client, accounts: accounts, accountShareReceiver: receiver)
+        model.handleEvent("turn/started", ["threadId": "fixture-thread", "turn": ["id": "fixture-turn"]])
+        let queued = AppModel.WaitingMessage(threadID: "fixture-thread", text: "fixture draft", attachments: [], model: nil, effort: nil, permissions: nil, serviceTier: nil)
+        model.waitingMessages = [queued]
+        XCTAssertNotNil(model.accountSwitchUnavailableReason)
+        try await model.connectSharedAccount(code: "CCS1.\(id).\(proof).\(proof)")
+        let added = try XCTUnwrap(accounts.library.accounts.last)
+        XCTAssertTrue(added.isShared)
+        XCTAssertEqual(added.identity?.email, access.email)
+        XCTAssertEqual(accounts.active.id, "local")
+        XCTAssertEqual(model.waitingMessages.map(\.id), [queued.id])
+        XCTAssertFalse(model.isConnectingSharedAccount)
+        await model.switchAccount(to: added.id)
+        XCTAssertEqual(accounts.active.id, "local", "Switching must still wait for queued work")
+        XCTAssertEqual(model.waitingMessages.map(\.id), [queued.id])
+        model.waitingMessages = []
+        XCTAssertNotNil(model.accountSwitchUnavailableReason, "Running work must still block switching after the queue is empty")
+        await model.switchAccount(to: added.id)
+        XCTAssertEqual(accounts.active.id, "local")
+    }
+
+    func testPairingDiagnosticsAreSpecificAndDoNotExposeRawErrors() {
+        XCTAssertTrue(AccountSharePairingError.message(for: AccountSharePairingError.http(401)).contains("后端拒绝"))
+        XCTAssertTrue(AccountSharePairingError.message(for: AccountSharePairingError.differentPending).contains("清除待配对记录"))
+        XCTAssertTrue(AccountSharePairingError.message(for: URLError(.timedOut)).contains("网络"))
+        XCTAssertFalse(AccountSharePairingError.message(for: ModelProviderError.message("synthetic-private-diagnostic")).contains("synthetic-private-diagnostic"))
+    }
+
     func testWindowsCiphertextValidationRejectsReplayAccountChangeAndExpiry() throws {
         let key = Data(0..<32)
         let id = "11111111-2222-3333-4444-555555555555"
