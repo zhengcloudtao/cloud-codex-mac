@@ -646,12 +646,17 @@ final class AppServerClient {
             return turn
         }
         let messages = Self.parseMessages(from: turns, metadataByTurnID: metadata).map { message in
-            RemoteHistoryMessage(id: "\(message.turnID ?? ""):\(message.id)",
+            let files = message.attachments.compactMap { attachment -> String? in
+                guard let id = RemoteTaskFiles.historyFileID(attachment.path) else { return nil }
+                let name = attachment.name.replacingOccurrences(of: "]", with: "］")
+                return "[\(name)](cloudcodex-file:\(id))"
+            }
+            return RemoteHistoryMessage(id: "\(message.turnID ?? ""):\(message.id)",
                 role: message.role == .user ? "user" : (message.role == .assistant ? "assistant" : "activity"),
-                text: message.text, title: message.activityTitle ?? "",
+                text: ([message.text] + files).filter { !$0.isEmpty }.joined(separator: "\n"), title: message.activityTitle ?? "",
                 timestamp: message.timestamp?.timeIntervalSince1970,
                 model: message.model ?? "", effort: message.reasoningEffort ?? "",
-                attachments: message.attachments.map { $0.name },
+                attachments: message.attachments.filter { RemoteTaskFiles.historyFileID($0.path) == nil }.map { $0.name },
                 images: imagesByID["\(message.turnID ?? ""):\(message.id)"])
         }
         return RemoteHistoryPage(messages: messages, nextCursor: response["nextCursor"] as? String)

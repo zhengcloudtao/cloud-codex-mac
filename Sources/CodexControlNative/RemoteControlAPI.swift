@@ -41,6 +41,7 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     var systemMetrics: SystemMetricsSnapshot? = nil
     var connectionHealth: RemoteConnectionHealthSnapshot? = nil
     var supportsFavorites: Bool = true
+    var supportsFiles: Bool = true
 }
 
 struct RemoteTask: Codable, Equatable {
@@ -55,6 +56,7 @@ struct RemoteTask: Codable, Equatable {
     var speed: String? = nil
     var permissionMode: String? = nil
     var imageUrls: [String]? = nil
+    var files: [RemoteTaskFile]? = nil
     var action: String? = nil // Reject legacy queued file-preview actions.
 }
 
@@ -105,7 +107,7 @@ struct RemoteTaskStatusBody: Codable, Equatable {
     let status: String
     let threadId: String
     let turnId: String
-    let result: String
+    var result: String
     let error: String
     var fileDiff: String? = nil
     var progress: RemoteTaskProgress? = nil
@@ -154,6 +156,7 @@ enum RemoteControlError: LocalizedError {
 final class RemoteControlAPI: @unchecked Sendable {
     static let defaultBaseURL = URL(string: "https://api.cloudslow.com/ai")!
 
+    let fileExporter = RemoteFileExporter()
     let deviceID: String
     private let deviceSecret: String
     let deviceName: String
@@ -269,6 +272,20 @@ final class RemoteControlAPI: @unchecked Sendable {
         guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
     }
 
+    func fileURL(taskID: String, fileID: String) async throws -> RemoteFileDownload {
+        try await request(path: "/api/cloud-codex/agent/tasks/\(taskID)/files/\(fileID)", method: "GET", bodyData: nil)
+    }
+
+    func uploadFile(_ bytes: Data, name: String, scope: String) async throws -> RemoteTaskFile {
+        let boundary = "CloudCodex-" + UUID().uuidString
+        let safeName = name.replacingOccurrences(of: "\"", with: "_").replacingOccurrences(of: "\r", with: "_").replacingOccurrences(of: "\n", with: "_")
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(safeName)\"\r\nContent-Type: application/octet-stream\r\n\r\n".utf8)
+        body.append(bytes)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let data = try await perform(path: "/api/cloud-codex/agent/\(scope)/files", method: "POST", bodyData: body, contentType: "multipart/form-data; boundary=\(boundary)")
+        return try Self.decodeEnvelope(RemoteTaskFile.self, data: data)
+    }
+
     func updateTask(_ taskID: String, body: RemoteTaskStatusBody) async throws {
         let data = try JSONEncoder().encode(body)
         let responseData = try await perform(
@@ -311,14 +328,15 @@ final class RemoteControlAPI: @unchecked Sendable {
     private func perform(
         path: String,
         method: String,
-        bodyData: Data?
+        bodyData: Data?,
+        contentType: String = "application/json"
     ) async throws -> Data {
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         let endpoint = baseURL.appendingPathComponent(cleanPath)
         var request = URLRequest(url: endpoint)
         request.httpMethod = method
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = contentType == "application/json" ? 15 : 120
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.setValue(deviceID, forHTTPHeaderField: "X-CloudCodex-Device")
         request.setValue(deviceSecret, forHTTPHeaderField: "X-CloudCodex-Token")
         request.httpBody = bodyData

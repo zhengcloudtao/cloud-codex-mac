@@ -3680,7 +3680,10 @@ final class AppModel: ObservableObject {
                             guard self.remoteControlEnabled, self.makeRemoteHeartbeat(ready: true).workspaces.contains(where: { $0.path == read.workspace }) else {
                                 throw RemoteControlError.server("工作区不在远程授权范围内")
                             }
-                            let page = try await self.client.readRemoteHistory(read)
+                            var page = try await self.client.readRemoteHistory(read)
+                            for index in page.messages.indices where page.messages[index].role == "assistant" {
+                                page.messages[index].text = await api.fileExporter.rewrite(page.messages[index].text, workspace: read.workspace, scope: "history/" + read.id, cacheScope: "thread/" + read.threadId, api: api)
+                            }
                             guard try JSONEncoder().encode(page).count <= 8 * 1024 * 1024 else {
                                 throw RemoteControlError.server("此轮会话过大，请在 Mac 查看完整内容")
                             }
@@ -3960,7 +3963,8 @@ final class AppModel: ObservableObject {
             default: throw RemoteControlError.server("不支持的远程速度选项。")
             }
             if !(task.imageUrls ?? []).isEmpty { remoteControlStatus = "正在下载并准备任务图片…" }
-            let attachments = try await RemoteImageLoader.attachments(task.imageUrls ?? [])
+            var attachments = try await RemoteImageLoader.attachments(task.imageUrls ?? [])
+            attachments += try await RemoteTaskFiles.download(task.files ?? [], task: task, api: api)
             if threadID.isEmpty {
                 let thread = try await client.createThread(
                     cwd: task.workspace,
@@ -4196,7 +4200,12 @@ final class AppModel: ObservableObject {
     private func uploadRemoteStatus(_ taskID: String, body: RemoteTaskStatusBody, api: RemoteControlAPI) async {
         guard remoteStatusOutbox.pending(deviceID: api.deviceID)[taskID] == body else { return }
         do {
-            try await api.updateTask(taskID, body: body)
+            var outgoing = body
+            if body.status == "completed", let thread = try? await client.readThreadState(body.threadId),
+               folderCatalog.contains(where: { $0.path == thread.cwd }) {
+                outgoing.result = await api.fileExporter.rewrite(body.result, workspace: thread.cwd, scope: "tasks/" + taskID, api: api)
+            }
+            try await api.updateTask(taskID, body: outgoing)
             remoteStatusOutbox.acknowledge(deviceID: api.deviceID, taskID: taskID, body: body)
         } catch {
             if !Task.isCancelled, remoteControlAPI === api { remoteControlStatus = "任务状态待补传，网络恢复后自动重试" }
