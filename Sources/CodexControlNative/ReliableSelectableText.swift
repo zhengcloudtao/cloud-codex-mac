@@ -15,7 +15,6 @@ struct ReliableSelectableText: NSViewRepresentable {
         // a default NSTextView can use TextKit 2 and draw shorter paragraphs,
         // leaving its TextKit 1 allocation as a blank tail in history replies.
         let textView = ReliableSelectableNSTextView(usingTextLayoutManager: false)
-        textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
         textView.importsGraphics = false
@@ -170,7 +169,6 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
         // leaving its TextKit 1 allocation as a blank tail in history replies.
         let textView = ReliableSelectableNSTextView(usingTextLayoutManager: false)
         textView.delegate = context.coordinator
-        textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true
         textView.importsGraphics = false
@@ -231,6 +229,20 @@ struct ReliableSelectableAttributedText: NSViewRepresentable {
 /// at mouse-down and handling both copy entry points makes the visible
 /// selection authoritative.
 final class ReliableSelectableNSTextView: NSTextView {
+    // Message surfaces are permanently read-only, including during creation.
+    // Calling NSTextView.setEditable from makeNSView updates global input
+    // contexts. On macOS 27 the IMK deactivation wait can pump the run loop
+    // and re-enter the SwiftUI graph that is still creating this very view
+    // (2026-10-26 hang report). Never enter that setter for message views.
+    override var isEditable: Bool {
+        get { false }
+        set { }
+    }
+
+    // Selection and copy still use the responder chain, but displaying a
+    // message must not create an input-method session for it.
+    override var inputContext: NSTextInputContext? { nil }
+
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = abs(newSize.width - frame.width) > 0.5
         super.setFrameSize(newSize)

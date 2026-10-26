@@ -5,6 +5,52 @@ import SwiftUI
 
 @MainActor
 final class ReliableSelectableTextTests: XCTestCase {
+    func testMessageSurfaceIsPermanentlyReadOnlyAndCannotInsertText() {
+        let view = ReliableSelectableNSTextView(usingTextLayoutManager: false)
+        view.isSelectable = true
+        view.string = "只读消息正文"
+        view.isEditable = true
+        XCTAssertFalse(view.isEditable)
+        XCTAssertNil(view.inputContext)
+        XCTAssertTrue(view.isSelectable)
+        view.setSelectedRange(NSRange(location: 0, length: 2))
+        view.insertText("不应写入", replacementRange: view.selectedRange())
+        XCTAssertEqual(view.string, "只读消息正文")
+    }
+
+    func testCreatingMessageViewsDuringLayoutPreservesComposerFocus() throws {
+        let composer = NSTextView(frame: CGRect(x: 0, y: 0, width: 400, height: 80))
+        let container = NSView(frame: CGRect(x: 0, y: 0, width: 500, height: 400))
+        let window = NSWindow(contentRect: container.frame, styleMask: .borderless,
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        container.addSubview(composer)
+        defer { window.contentView = nil; window.close() }
+        XCTAssertTrue(window.makeFirstResponder(composer))
+        for index in 0..<20 {
+            let host = NSHostingView(rootView: VStack {
+                ReliableSelectableText(text: "用户消息 \(index)")
+                ReliableSelectableAttributedText(text: NSAttributedString(string: "助手回复"))
+            }.frame(width: 400))
+            container.addSubview(host)
+            host.frame.size = host.fittingSize
+            host.layoutSubtreeIfNeeded()
+            XCTAssertTrue(window.firstResponder === composer)
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let messages = descendants(host).compactMap { $0 as? ReliableSelectableNSTextView }
+            XCTAssertEqual(messages.count, 2)
+            for message in messages {
+                XCTAssertFalse(message.isEditable)
+                XCTAssertNil(message.inputContext)
+                XCTAssertTrue(message.isSelectable)
+                XCTAssertTrue(window.makeFirstResponder(message))
+                XCTAssertTrue(window.makeFirstResponder(composer))
+            }
+            host.removeFromSuperview()
+        }
+    }
+
     func testFormattedTableFitsReplyAndKeepsFollowingTextVisible() throws {
         let markdown = """
         **测试结果**
