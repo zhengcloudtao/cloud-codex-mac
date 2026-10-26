@@ -41,6 +41,47 @@ final class AppModel: ObservableObject {
     @Published private(set) var isLoadingUsageInsights = false
     @Published var showingUsageInsights = false
     @Published private(set) var providerUsage = ProviderUsageLedger()
+    @Published private(set) var turnTokenUsage = TurnTokenUsageLedger()
+    @Published private(set) var historicalTurnTokenUsage = TurnTokenUsageLedger()
+    private let turnTokenHistoryReader = TurnTokenHistoryReader()
+
+    func tokenUsage(for message: ChatMessage) -> TurnTokenUsageLedger.Record? {
+        guard let thread = selectedThreadID, let turn = message.turnID else { return nil }
+        return tokenUsage(thread: thread, turn: turn)
+    }
+
+    func tokenUsage(thread: String, turn: String) -> TurnTokenUsageLedger.Record? {
+        var candidates = [turnTokenUsage.record(thread: thread, turn: turn),
+                          historicalTurnTokenUsage.record(thread: thread, turn: turn)].compactMap { $0 }
+        let suffix = "\u{001F}" + thread + "\u{001F}" + turn
+        let entries = providerUsage.entries.filter { $0.id.hasSuffix(suffix) && $0.calls > 0 }
+        if !entries.isEmpty {
+            var fallback = TurnTokenUsageLedger.Record(partial: true)
+            for entry in entries { fallback.tokens.add(entry.tokens) }
+            candidates.append(fallback)
+        }
+        return candidates.sorted {
+            if $0.tokens.total != $1.tokens.total { return $0.tokens.total > $1.tokens.total }
+            return !$0.partial && $1.partial
+        }.first
+    }
+
+    func showsTokenUsage(for message: ChatMessage) -> Bool {
+        guard message.role == .assistant, let turn = message.turnID else { return false }
+        return messages.last(where: { $0.role == .assistant && $0.turnID == turn })?.id == message.id
+    }
+
+    private func refreshTurnTokenHistory(_ thread: CodexThread) {
+        guard let path = thread.path else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let history = await self.turnTokenHistoryReader.read(path: path, thread: thread.id)
+            var updated = self.historicalTurnTokenUsage
+            updated.merge(history)
+            if updated != self.historicalTurnTokenUsage { self.historicalTurnTokenUsage = updated }
+        }
+    }
+
     @Published private(set) var personalSkills: [CodexPersonalSkill] = []
     @Published private(set) var personalSkillsError: String?
     @Published private(set) var isLoadingPersonalSkills = false
@@ -757,8 +798,34 @@ final class AppModel: ObservableObject {
     @Published private(set) var isConversationLoading = false
     @Published var isSending = false
     @Published var isExternalThreadProcessing = false
+    @Published private(set) var externallyOpenedThreadIDs: Set<String> = []
+    private var hasWriterPresenceSnapshot = false
+
+    func isThreadOpenedElsewhere(_ id: String) -> Bool {
+        if externallyOpenedThreadIDs.contains(id) { return true }
+        return !hasWriterPresenceSnapshot && selectedThreadID == id && threadInputAvailability == .occupied
+    }
+
+    func applyWriterPresence(_ ids: Set<String>) {
+        hasWriterPresenceSnapshot = true
+        if externallyOpenedThreadIDs != ids { externallyOpenedThreadIDs = ids }
+    }
+
+    private func refreshWriterPresence() async {
+        let generation = accountGeneration
+        guard let ids = await client.externallyOpenedThreads(), generation == accountGeneration,
+              !isSwitchingModelProvider, !Task.isCancelled else { return }
+        applyWriterPresence(ids)
+    }
+
     @Published var threadOwnershipNotice: String?
-    @Published private(set) var threadInputAvailability: ThreadInputAvailability = .available
+    @Published private(set) var threadInputAvailability: ThreadInputAvailability = .available {
+        didSet {
+            guard let id = selectedThreadID else { return }
+            if threadInputAvailability == .occupied { externallyOpenedThreadIDs.insert(id) }
+            else if threadInputAvailability == .available { externallyOpenedThreadIDs.remove(id) }
+        }
+    }
     @Published var hasMoreThreads = false
     @Published var errorMessage: String?
     @Published var showingNewThread = false
@@ -815,6 +882,8 @@ final class AppModel: ObservableObject {
     private var selectedThreadMonitorTask: Task<Void, Never>?
     private var selectedThreadMetadataTask: Task<Void, Never>?
     private var threadStatusMonitorTask: Task<Void, Never>?
+    private var outcomeEventRevisions: [String: Int] = [:]
+    private var outcomeChecks: [String: (generation: Int, revision: Date, checkedAt: Date)] = [:]
     private var clientReconnectTask: Task<Void, Never>?
     private var turnProgressHintTask: Task<Void, Never>?
     private var pendingDeltaFlushTask: Task<Void, Never>?
@@ -997,6 +1066,7 @@ final class AppModel: ObservableObject {
         self.connectionHealth = ConnectionHealth(refreshInterval: accountRefreshInterval)
         self.remoteServerConfiguration = RemoteServerConfiguration.load(remoteDefaults)
         self.providerUsage = ProviderUsageLedger.load(remoteDefaults)
+        self.turnTokenUsage = TurnTokenUsageLedger.load(remoteDefaults)
         self.creditUsageReader = creditUsageReader
         self.creditTurnInterrupter = creditTurnInterrupter
         self.userInputTimeoutSeconds = userInputTimeoutSeconds
@@ -1828,6 +1898,8 @@ final class AppModel: ObservableObject {
                       let index = folderCatalog.firstIndex(where: { $0.path == path }) {
                 folderCatalog[index].threadCount = page.hasMore ? nil : page.threads.count
             }
+            await refreshWriterPresence()
+            await refreshThreadOutcomes(page.threads)
         } catch {
             guard generation == threadRequestGeneration else { return }
             errorMessage = error.localizedDescription
@@ -1891,15 +1963,54 @@ final class AppModel: ObservableObject {
                 incoming.status != "active" && threads.contains { $0.id == incoming.id && $0.status == "active" }
             }
             applyThreadListSnapshot(page.threads)
-            for thread in ended {
-                guard let snapshot = try? await client.readLatestThreadActivity(thread.id, knownThread: thread),
-                      let turn = snapshot.turn, turn.status == "completed" else { continue }
-                threadOutcomes[thread.id] = .completed
-                recordCompletedConversation(thread.id, turnID: turn.id,
-                    viewed: selectedThreadID == thread.id)
-            }
+            await refreshWriterPresence()
+            await refreshThreadOutcomes(page.threads, justEnded: Set(ended.map(\.id)))
         } catch {
             // Status lights are best-effort and must never interrupt the task.
+        }
+    }
+
+    /// Fill badges independently of selection. Cache unchanged snapshots and
+    /// periodically reconcile missed external turns, without generating unread
+    /// notifications for old history discovered at startup.
+    func refreshThreadOutcomes(_ snapshot: [CodexThread], justEnded: Set<String> = [],
+                              fetch: ((String) async throws -> TurnRuntimeState?)? = nil) async {
+        let generation = accountGeneration
+        let folder = selectedFolder
+        let now = Date()
+        let ids = Set(snapshot.map(\.id))
+        outcomeChecks = outcomeChecks.filter { ids.contains($0.key) }
+        for thread in snapshot {
+            guard !Task.isCancelled, generation == accountGeneration,
+                  !isSwitchingModelProvider, folder == selectedFolder else { return }
+            guard thread.status != "active", !locallyRunningThreadIDs.contains(thread.id) else {
+                outcomeChecks.removeValue(forKey: thread.id)
+                continue
+            }
+            if let check = outcomeChecks[thread.id], check.generation == generation,
+               check.revision == thread.updatedAt, !justEnded.contains(thread.id),
+               now.timeIntervalSince(check.checkedAt) < 60 { continue }
+            outcomeChecks[thread.id] = (generation, thread.updatedAt, now)
+            let eventRevision = outcomeEventRevisions[thread.id, default: 0]
+            do {
+                let turn: TurnRuntimeState?
+                if let fetch { turn = try await fetch(thread.id) }
+                else { turn = try await client.readLatestTurnState(thread.id) }
+                guard !Task.isCancelled, generation == accountGeneration,
+                      !isSwitchingModelProvider, folder == selectedFolder else { return }
+                guard outcomeEventRevisions[thread.id, default: 0] == eventRevision,
+                      let current = threads.first(where: { $0.id == thread.id }),
+                      current.updatedAt == thread.updatedAt, current.status != "active",
+                      !locallyRunningThreadIDs.contains(thread.id) else { continue }
+                let outcome = turn.flatMap { ConversationOutcome(rawValue: $0.status) }
+                if threadOutcomes[thread.id] != outcome { threadOutcomes[thread.id] = outcome }
+                if justEnded.contains(thread.id), outcome == .completed, let turn {
+                    recordCompletedConversation(thread.id, turnID: turn.id, viewed: selectedThreadID == thread.id)
+                }
+            } catch {
+                // Retry after the cache interval, without replacing known state
+                // or interrupting task execution when the server is unavailable.
+            }
         }
     }
 
@@ -2367,7 +2478,7 @@ final class AppModel: ObservableObject {
             permissions: permissions,
             serviceTier: serviceTier
         )
-        liveTurnMetadataByThread[threadID] = TurnModelMetadata(model: model, reasoningEffort: effort)
+        liveTurnMetadataByThread[threadID] = TurnModelMetadata(model: model, reasoningEffort: effort, serviceTier: customModelProvider.enabled ? nil : serviceTier)
         setLocalTurnRunning(threadID, permissions: permissions)
         if selectedThreadID == threadID {
             isExternalThreadProcessing = false
@@ -2392,6 +2503,23 @@ final class AppModel: ObservableObject {
             serviceTier: serviceTier
         )
         setLocalTurnRunning(threadID, turnID: turnID)
+        applyAcceptedTurnSpeed(threadID: threadID, turnID: turnID)
+    }
+
+    private func applyAcceptedTurnSpeed(threadID: String, turnID: String?) {
+        guard let turnID, let tier = client.acknowledgedTier(thread: threadID, turn: turnID) else { return }
+        applyTurnSpeed(threadID: threadID, turnID: turnID, tier: tier)
+    }
+
+    func applyTurnSpeed(threadID: String, turnID: String, tier: String) {
+        if activeTurnIDsByThread[threadID] == turnID {
+            liveTurnMetadataByThread[threadID]?.serviceTier = tier
+        }
+        var history = conversationMessages(for: threadID)
+        for index in history.indices where history[index].turnID == turnID {
+            history[index].serviceTier = tier
+        }
+        storeMessages(history, for: threadID)
     }
 
     func appendOptimisticUserMessage(
@@ -2413,7 +2541,10 @@ final class AppModel: ObservableObject {
                     kind: $0.isImage ? .image : .file
                 )
             },
-            timestamp: Date()
+            timestamp: Date(),
+            model: liveTurnMetadataByThread[threadID]?.model,
+            reasoningEffort: liveTurnMetadataByThread[threadID]?.reasoningEffort,
+            serviceTier: liveTurnMetadataByThread[threadID]?.serviceTier
         ))
         storeMessages(history, for: threadID)
     }
@@ -2578,6 +2709,7 @@ final class AppModel: ObservableObject {
 
     func applyExternalActivitySnapshot(_ snapshot: ThreadActivitySnapshot, threadID: String) {
         guard selectedThreadID == threadID, !isSending else { return }
+        refreshTurnTokenHistory(snapshot.thread)
         let isActive = snapshot.turn?.isActive == true || snapshot.thread.status == "active"
         if isActive {
             threadOutcomes.removeValue(forKey: threadID)
@@ -2960,6 +3092,8 @@ final class AppModel: ObservableObject {
         accountSwitchError = nil
         accounts.lockForSwitch(id)
         accountGeneration += 1
+        externallyOpenedThreadIDs = []
+        hasWriterPresenceSnapshot = false
         // Keep the user's enabled/paired state. Stop dispatching remote work and
         // drain reads/uploads against the old account before replacing its client.
         let remoteLoop = remoteControlLoopTask
@@ -3682,6 +3816,11 @@ final class AppModel: ObservableObject {
                             }
                             var page = try await self.client.readRemoteHistory(read)
                             for index in page.messages.indices where page.messages[index].role == "assistant" {
+                                let turn = page.messages[index].turnId
+                                if let turn, !page.messages.dropFirst(index + 1).contains(where: { $0.role == "assistant" && $0.turnId == turn }) {
+                                    page.messages[index].tokenUsage = TurnTokenUsageLedger.preferred(
+                                        page.messages[index].tokenUsage, self.tokenUsage(thread: read.threadId, turn: turn))
+                                }
                                 page.messages[index].text = await api.fileExporter.rewrite(page.messages[index].text, workspace: read.workspace, scope: "history/" + read.id, cacheScope: "thread/" + read.threadId, api: api)
                             }
                             guard try JSONEncoder().encode(page).count <= 8 * 1024 * 1024 else {
@@ -4006,7 +4145,7 @@ final class AppModel: ObservableObject {
             setThreadRunning(threadID, running: true)
             // Capture this remote request, never the visible composer's model.
             liveTurnMetadataByThread[threadID] = TurnModelMetadata(
-                model: modelOverride, reasoningEffort: effort
+                model: modelOverride, reasoningEffort: effort, serviceTier: customModelProvider.enabled ? nil : tier
             )
             let turnID = try await client.startTurn(
                 threadID: threadID,
@@ -4019,6 +4158,7 @@ final class AppModel: ObservableObject {
                 approvalPolicy: approval,
                 approvalsReviewer: reviewer
             )
+            applyAcceptedTurnSpeed(threadID: threadID, turnID: turnID)
             if remoteExecutions[threadID]?.taskID == task.taskId {
                 remoteExecutions[threadID]?.turnID = turnID
             }
@@ -4173,7 +4313,8 @@ final class AppModel: ObservableObject {
 
     private func reportRemoteTaskStatus(_ taskID: String, body: RemoteTaskStatusBody, api sourceAPI: RemoteControlAPI? = nil) async {
         guard let api = sourceAPI ?? remoteControlAPI else { return }
-        let body = await client.withActualTurnSettings(body)
+        var body = await client.withActualTurnSettings(body)
+        body.tokenUsage = TurnTokenUsageLedger.preferred(body.tokenUsage, tokenUsage(thread: body.threadId, turn: body.turnId))
         applyVerifiedRemoteSettings(body)
         remoteStatusOutbox.enqueue(deviceID: api.deviceID, taskID: taskID, body: body)
         await uploadRemoteStatus(taskID, body: body, api: api)
@@ -4181,7 +4322,8 @@ final class AppModel: ObservableObject {
 
     func applyVerifiedRemoteSettings(_ body: RemoteTaskStatusBody) {
         guard !body.turnId.isEmpty, let model = body.actualModel, !model.isEmpty else { return }
-        let metadata = TurnModelMetadata(model: model, reasoningEffort: body.actualEffort)
+        let metadata = TurnModelMetadata(model: model, reasoningEffort: body.actualEffort,
+            serviceTier: activeTurnIDsByThread[body.threadId] == body.turnId ? liveTurnMetadataByThread[body.threadId]?.serviceTier : nil)
         if activeTurnIDsByThread[body.threadId] == body.turnId {
             liveTurnMetadataByThread[body.threadId] = metadata
         }
@@ -4719,6 +4861,24 @@ final class AppModel: ObservableObject {
     }
 
     func handleEvent(_ method: String, _ params: [String: Any]) {
+        if ["turn/started", "turn/completed"].contains(method), let thread = params["threadId"] as? String {
+            outcomeEventRevisions[thread, default: 0] += 1
+        }
+        if method == "thread/tokenUsage/updated" {
+            var updated = turnTokenUsage
+            updated.consume(params)
+            if updated != turnTokenUsage {
+                turnTokenUsage = updated
+                if let data = try? JSONEncoder().encode(updated) {
+                    remoteDefaults.set(data, forKey: TurnTokenUsageLedger.defaultsKey)
+                }
+            }
+        }
+        if method == "turn/completed", let id = params["threadId"] as? String,
+           let thread = threadSummaries[id] ?? threads.first(where: { $0.id == id }) {
+            refreshTurnTokenHistory(thread)
+        }
+
         if customModelProvider.enabled,
            ["turn/started", "turn/completed", "thread/tokenUsage/updated"].contains(method) {
             var updated = providerUsage
@@ -5030,7 +5190,8 @@ final class AppModel: ObservableObject {
                         timestamp: Date(),
                         turnID: params["turnId"] as? String,
                         model: metadata?.model,
-                        reasoningEffort: metadata?.reasoningEffort
+                        reasoningEffort: metadata?.reasoningEffort,
+                        serviceTier: metadata?.serviceTier
                     ))
                 }
             } else {
@@ -5212,6 +5373,7 @@ final class AppModel: ObservableObject {
                 approvalsReviewer: state.settings.approvalsReviewer
             )
             setLocalTurnRunning(threadID, turnID: turnID, permissions: state.settings.permissions)
+            applyAcceptedTurnSpeed(threadID: threadID, turnID: turnID)
             setThreadRunning(threadID, running: true)
         } catch {
             guard capacityRetryStates[threadID]?.attempt == expectedAttempt else { return }
@@ -5523,7 +5685,8 @@ final class AppModel: ObservableObject {
                         isStreaming: true,
                         turnID: activeTurnIDsByThread[threadID],
                         model: metadata?.model,
-                        reasoningEffort: metadata?.reasoningEffort
+                        reasoningEffort: metadata?.reasoningEffort,
+                        serviceTier: metadata?.serviceTier
                     ))
                 }
             }
@@ -5541,12 +5704,16 @@ final class AppModel: ObservableObject {
         for index in updatedMessages.indices {
             guard let turnID = updatedMessages[index].turnID,
                   let metadata = metadataByTurnID[turnID] else { continue }
-            if updatedMessages[index].model != metadata.model {
-                updatedMessages[index].model = metadata.model
+            if let tier = metadata.serviceTier, updatedMessages[index].serviceTier != tier {
+                updatedMessages[index].serviceTier = tier
                 didChange = true
             }
-            if updatedMessages[index].reasoningEffort != metadata.reasoningEffort {
-                updatedMessages[index].reasoningEffort = metadata.reasoningEffort
+            if let model = metadata.model, updatedMessages[index].model != model {
+                updatedMessages[index].model = model
+                didChange = true
+            }
+            if let effort = metadata.reasoningEffort, updatedMessages[index].reasoningEffort != effort {
+                updatedMessages[index].reasoningEffort = effort
                 didChange = true
             }
         }
@@ -5580,6 +5747,7 @@ final class AppModel: ObservableObject {
         messages loadedMessages: [ChatMessage],
         threadID: String
     ) {
+        refreshTurnTokenHistory(thread)
         let turnIDs = Set(loadedMessages.compactMap(\.turnID))
         guard !turnIDs.isEmpty else { return }
         selectedThreadMetadataTask?.cancel()
@@ -5602,6 +5770,7 @@ final class AppModel: ObservableObject {
         guard let metadata = liveTurnMetadataByThread[threadID] else { return }
         message.model = metadata.model
         message.reasoningEffort = metadata.reasoningEffort
+        if let tier = metadata.serviceTier { message.serviceTier = tier }
     }
 
     private func completeStreamingActivities() {

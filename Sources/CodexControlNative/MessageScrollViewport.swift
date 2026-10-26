@@ -31,6 +31,67 @@ final class MessageScrollViewportController: ObservableObject {
     private var requestScheduled = false
     private var lastReportedLatest: Bool?
     private var observations: [NSObjectProtocol] = []
+    private var followsLatest = false
+    private var bottomPositionScheduled = false
+    private var attachmentGeneration = 0
+    private var pinnedDocumentSize: NSSize?
+    private var pinnedViewportSize: NSSize?
+    private var positioningBottom = false
+
+    private func boundsChanged() {
+        // Native scroller/keyboard movement can occur without live-scroll
+        // notifications. Distinguish it from a changed document/viewport size.
+        if followsLatest, !positioningBottom, let scroll = scrollView, let document = scroll.documentView,
+           pinnedDocumentSize == document.bounds.size, pinnedViewportSize == scroll.contentView.bounds.size {
+            let visible = scroll.documentVisibleRect
+            let remaining = document.isFlipped ? document.bounds.maxY - visible.maxY : visible.minY - document.bounds.minY
+            if remaining > 28 { followsLatest = false }
+        }
+        reportHistoryPosition()
+    }
+
+    func followLatest() {
+        followsLatest = true
+        pinnedDocumentSize = nil
+        pinnedViewportSize = nil
+        pendingAnchor = nil
+        scheduleBottomPosition()
+    }
+
+    func detach(_ view: NSScrollView) {
+        guard scrollView === view else { return }
+        attachmentGeneration += 1
+        bottomPositionScheduled = false
+        requestScheduled = false
+        observations.forEach { NotificationCenter.default.removeObserver($0) }
+        observations.removeAll()
+        scrollView = nil
+    }
+
+    private func scheduleBottomPosition() {
+        guard followsLatest, !bottomPositionScheduled, scrollView != nil else { return }
+        bottomPositionScheduled = true
+        let generation = attachmentGeneration
+        // Never scroll inside a document frame notification / SwiftUI layout.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.attachmentGeneration == generation else { return }
+            self.bottomPositionScheduled = false
+            guard self.followsLatest, let scroll = self.scrollView,
+                  scroll.window != nil, let document = scroll.documentView else { return }
+            let clip = scroll.contentView
+            let target = NSPoint(x: document.bounds.minX,
+                y: document.isFlipped ? max(document.bounds.minY, document.bounds.maxY - clip.bounds.height) : document.bounds.minY)
+            if abs(clip.bounds.minY - target.y) > 0.5 || abs(clip.bounds.minX - target.x) > 0.5 {
+                self.positioningBottom = true
+                clip.scroll(to: target)
+                scroll.reflectScrolledClipView(clip)
+                self.positioningBottom = false
+            }
+            self.pinnedDocumentSize = document.bounds.size
+            self.pinnedViewportSize = clip.bounds.size
+            self.reportHistoryPosition()
+        }
+    }
 
     deinit {
         observations.forEach { NotificationCenter.default.removeObserver($0) }
@@ -38,21 +99,36 @@ final class MessageScrollViewportController: ObservableObject {
 
     func attach(_ scrollView: NSScrollView) {
         guard self.scrollView !== scrollView else { return }
+        attachmentGeneration += 1
+        bottomPositionScheduled = false
+        requestScheduled = false
         observations.forEach { NotificationCenter.default.removeObserver($0) }
         observations.removeAll()
         triggerWasVisible = false
         lastReportedLatest = nil
         self.scrollView = scrollView
+        pinnedDocumentSize = nil
+        pinnedViewportSize = nil
+        observations.append(NotificationCenter.default.addObserver(
+            forName: NSScrollView.willStartLiveScrollNotification, object: scrollView, queue: .main
+        ) { [weak self] _ in
+            self?.followsLatest = false
+        })
+        scrollView.contentView.postsFrameChangedNotifications = true
+        observations.append(NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: .main
+        ) { [weak self] _ in self?.scheduleBottomPosition() })
         scrollView.contentView.postsBoundsChangedNotifications = true
         observations.append(NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main
-        ) { [weak self] _ in self?.reportHistoryPosition() })
+        ) { [weak self] _ in self?.boundsChanged() })
         if let document = scrollView.documentView {
             document.postsFrameChangedNotifications = true
             observations.append(NotificationCenter.default.addObserver(
                 forName: NSView.frameDidChangeNotification, object: document, queue: .main
             ) { [weak self] _ in self?.reportHistoryPosition() })
         }
+        scheduleBottomPosition()
     }
 
     func register(_ view: MessageHistoryProbeView) {
@@ -93,24 +169,31 @@ final class MessageScrollViewportController: ObservableObject {
             let remaining = document.isFlipped
                 ? document.bounds.maxY - visible.maxY
                 : visible.minY - document.bounds.minY
-            let latest = remaining <= 28
+            if followsLatest && remaining > 0.5 { scheduleBottomPosition() }
+            let latest = followsLatest || remaining <= 28
             if latest != lastReportedLatest {
                 lastReportedLatest = latest
-                DispatchQueue.main.async { [weak self] in self?.onLatestChanged?(latest) }
+                let generation = attachmentGeneration
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.attachmentGeneration == generation, self.lastReportedLatest == latest else { return }
+                    self.onLatestChanged?(latest)
+                }
             }
         }
+        guard !followsLatest else { triggerWasVisible = false; return }
         let visible = triggerView.flatMap { viewportFrame(of: $0) }
             .map { HistoryAutoLoad.triggerIsVisible($0) } ?? false
         guard visible != triggerWasVisible else { return }
         triggerWasVisible = visible
         guard visible, !requestScheduled else { return }
         requestScheduled = true
+        let generation = attachmentGeneration
         // AppKit may report bounds during a SwiftUI layout pass. Schedule only
         // this boundary event, never each scrolling frame, after that pass.
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.attachmentGeneration == generation else { return }
             self.requestScheduled = false
-            guard self.triggerWasVisible else { return }
+            guard !self.followsLatest, self.triggerWasVisible else { return }
             self.onHistoryRequested?()
         }
     }

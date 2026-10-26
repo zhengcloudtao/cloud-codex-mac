@@ -9,6 +9,7 @@ struct RecentConversationRow: Identifiable, Equatable {
     let hasUnreadCompletion: Bool
     let needsUserInput: Bool
     let isFavorite: Bool
+    var isOpenedElsewhere = false
     let relativeTimeBucket: Int = Int(Date().timeIntervalSince1970 / 60)
 
     var id: String { thread.id }
@@ -52,6 +53,7 @@ struct RecentConversationList: View, Equatable {
                           outcome: row.outcome, showPreview: row.showPreview,
                           hasUnreadCompletion: row.hasUnreadCompletion,
                           needsUserInput: row.needsUserInput,
+                          isOpenedElsewhere: row.isOpenedElsewhere,
                           relativeTimeBucket: row.relativeTimeBucket)
                     .equatable()
             }

@@ -72,6 +72,11 @@ final class AppServerClient {
     }
     private var releaseOperations: [String: ReleaseOperation] = [:]
     private var serviceTierByThreadID: [String: String] = [:]
+    private var acknowledgedTurnTiers: [String: (turn: String, tier: String)] = [:]
+    func acknowledgedTier(thread: String, turn: String) -> String? {
+        guard let value = acknowledgedTurnTiers[thread], value.turn == turn else { return nil }
+        return value.tier
+    }
     private struct ActivityHistory {
         var turnID: String
         var tailCursor: String?
@@ -578,6 +583,8 @@ final class AppServerClient {
         return updates
     }
 
+    private let remoteTokenHistoryReader = TurnTokenHistoryReader()
+
     func readRemoteHistory(_ read: RemoteHistoryRead) async throws -> RemoteHistoryPage {
         let state = try await readThreadState(read.threadId)
         guard state.cwd == read.workspace else { throw RemoteControlError.server("会话工作区不匹配") }
@@ -586,8 +593,9 @@ final class AppServerClient {
         let response = try await request("thread/turns/list", params: params)
         let ids = Set((response["data"] as? [JSON] ?? []).compactMap { $0["id"] as? String })
         let metadata = await readTurnModelMetadata(for: state, turnIDs: ids)
+        let usage = await remoteTokenUsage(for: state)
         return await Task.detached(priority: .utility) {
-            Self.remoteHistoryPage(response, metadata: metadata)
+            Self.remoteHistoryPage(response, metadata: metadata, usage: usage, threadID: read.threadId)
         }.value
     }
 
@@ -597,10 +605,18 @@ final class AppServerClient {
         guard !body.threadId.isEmpty, !body.turnId.isEmpty,
               let thread = try? await readThreadState(body.threadId) else { return body }
         let metadata = await readTurnModelMetadata(for: thread, turnIDs: [body.turnId])
-        return body.withActualSettings(metadata[body.turnId])
+        var result = body.withActualSettings(metadata[body.turnId])
+        let usage = await remoteTokenUsage(for: thread)
+        result.tokenUsage = TurnTokenUsageLedger.preferred(result.tokenUsage, usage.record(thread: body.threadId, turn: body.turnId))
+        return result
     }
 
-    nonisolated static func remoteHistoryPage(_ response: JSON, metadata: [String: TurnModelMetadata] = [:]) -> RemoteHistoryPage {
+    private func remoteTokenUsage(for thread: CodexThread) async -> TurnTokenUsageLedger {
+        guard let path = thread.path else { return .init() }
+        return await remoteTokenHistoryReader.read(path: path, thread: thread.id)
+    }
+
+    nonisolated static func remoteHistoryPage(_ response: JSON, metadata: [String: TurnModelMetadata] = [:], usage: TurnTokenUsageLedger = .init(), threadID: String = "") -> RemoteHistoryPage {
         var imagesByID: [String: [RemoteHistoryImage]] = [:]
         var imageCount = 0
         let turns = (response["data"] as? [JSON] ?? []).reversed().map { original -> JSON in
@@ -645,7 +661,12 @@ final class AppServerClient {
             }
             return turn
         }
-        let messages = Self.parseMessages(from: turns, metadataByTurnID: metadata).map { message in
+        let parsed = Self.parseMessages(from: turns, metadataByTurnID: metadata)
+        var lastAnswers: [String: String] = [:]
+        for message in parsed where message.role == .assistant {
+            if let turn = message.turnID { lastAnswers[turn] = message.id }
+        }
+        let messages = parsed.map { message in
             let files = message.attachments.compactMap { attachment -> String? in
                 guard let id = RemoteTaskFiles.historyFileID(attachment.path) else { return nil }
                 let name = attachment.name.replacingOccurrences(of: "]", with: "］")
@@ -657,7 +678,10 @@ final class AppServerClient {
                 timestamp: message.timestamp?.timeIntervalSince1970,
                 model: message.model ?? "", effort: message.reasoningEffort ?? "",
                 attachments: message.attachments.filter { RemoteTaskFiles.historyFileID($0.path) == nil }.map { $0.name },
-                images: imagesByID["\(message.turnID ?? ""):\(message.id)"])
+                images: imagesByID["\(message.turnID ?? ""):\(message.id)"],
+                turnId: message.turnID,
+                tokenUsage: message.role == .assistant && lastAnswers[message.turnID ?? ""] == message.id
+                    ? usage.record(thread: threadID, turn: message.turnID ?? "") : nil)
         }
         return RemoteHistoryPage(messages: messages, nextCursor: response["nextCursor"] as? String)
     }
@@ -679,8 +703,40 @@ final class AppServerClient {
         for thread: CodexThread,
         turnIDs: Set<String>
     ) async -> [String: TurnModelMetadata] {
-        guard let path = thread.path, !turnIDs.isEmpty else { return [:] }
-        return await turnMetadataReader.metadata(filePath: path, turnIDs: turnIDs)
+        guard !turnIDs.isEmpty else { return [:] }
+        var metadata: [String: TurnModelMetadata] = [:]
+        if let path = thread.path { metadata = await turnMetadataReader.metadata(filePath: path, turnIDs: turnIDs) }
+        let home = sharedConversationHome ?? CodexUsageTierStore.home(codexHomeOverride)
+        let tiers = await Task.detached(priority: .utility) { CodexUsageTierStore.load(home: home) }.value
+        for turn in turnIDs {
+            guard let entry = tiers[thread.id + ":" + turn] else { continue }
+            var value = metadata[turn] ?? TurnModelMetadata(model: nil, reasoningEffort: nil)
+            if value.serviceTier == nil || entry.source == "API 返回档位" { value.serviceTier = entry.tier }
+            metadata[turn] = value
+        }
+        return metadata
+    }
+
+    func externallyOpenedThreads() async -> Set<String>? {
+        guard let process, process.isRunning else { return nil }
+        let pid = process.processIdentifier
+        let homes = Set([CodexUsageTierStore.home(codexHomeOverride), sharedConversationHome].compactMap { $0 })
+        return await Task.detached(priority: .utility) {
+            var result: Set<String> = []
+            for home in homes {
+                guard let ids = ThreadWriterPresence.read(home: home, ownPID: pid) else { return nil }
+                result.formUnion(ids)
+            }
+            return result
+        }.value
+    }
+
+    /// List badges need only the last turn's state, never its message history.
+    func readLatestTurnState(_ id: String) async throws -> TurnRuntimeState? {
+        let response = try await request("thread/turns/list", params: [
+            "threadId": id, "limit": 1, "itemsView": "summary", "sortDirection": "desc"
+        ])
+        return (response["data"] as? [JSON])?.first.flatMap(Self.parseTurnRuntime)
     }
 
     func readLatestThreadActivity(
@@ -1010,6 +1066,13 @@ final class AppServerClient {
             params: params
         )
         if !customModelProvider.enabled {
+            if let turn = result["turn"] as? JSON, let id = turn["id"] as? String {
+                let response = turn["response"] as? JSON
+                if let tier = response?["service_tier"] as? String ?? turn["serviceTier"] as? String
+                    ?? result["serviceTier"] as? String ?? params["serviceTier"] as? String {
+                    acknowledgedTurnTiers[threadID] = (id, tier)
+                }
+            }
             CodexUsageTierStore.acceptedTurn(threadID: threadID, result: result,
                 requested: params["serviceTier"] as? String, home: sharedConversationHome ?? CodexUsageTierStore.home(codexHomeOverride))
         }
@@ -1306,7 +1369,8 @@ final class AppServerClient {
                             timestamp: turnStartedAt,
                             turnID: turnID,
                             model: turnMetadata?.model,
-                            reasoningEffort: turnMetadata?.reasoningEffort
+                            reasoningEffort: turnMetadata?.reasoningEffort,
+                            serviceTier: turnMetadata?.serviceTier
                         ))
                     }
                 case "agentMessage":
@@ -1318,7 +1382,8 @@ final class AppServerClient {
                             timestamp: turnCompletedAt,
                             turnID: turnID,
                             model: turnMetadata?.model,
-                            reasoningEffort: turnMetadata?.reasoningEffort
+                            reasoningEffort: turnMetadata?.reasoningEffort,
+                            serviceTier: turnMetadata?.serviceTier
                         ))
                     }
                 case "reasoning":
@@ -1601,7 +1666,8 @@ actor TurnMetadataReader {
                let turnID = payload["turn_id"] as? String {
                 metadataByTurnID[turnID] = TurnModelMetadata(
                     model: payload["model"] as? String,
-                    reasoningEffort: payload["effort"] as? String
+                    reasoningEffort: payload["effort"] as? String,
+                    serviceTier: payload["service_tier"] as? String ?? payload["serviceTier"] as? String
                 )
             }
             searchStart = markerRange.upperBound

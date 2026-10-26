@@ -243,6 +243,37 @@ final class ConversationLayoutTests: XCTestCase {
 
     }
 
+    func testSwitchingHistorySettlesAtBottomAfterLateTextLayout() throws {
+        let suite = "CloudCodex.InitialBottomTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(remoteDefaults: defaults)
+        let first = try makeThread(id: "bottom-first", name: "First", preview: "")
+        let second = try makeThread(id: "bottom-second", name: "Second", preview: "")
+        model.threads = [first, second]
+        let host = NSHostingView(rootView: ContentView().environmentObject(model))
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 1220, height: 780),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        for thread in [first, second, first] {
+            selectFixture(thread, messages: [], model: model)
+            settleLayout(host)
+            model.messages = (0..<20).map { .init(id: "\(thread.id)-\($0)", role: .assistant,
+                text: String(repeating: "排版完成后应显示最新消息。\n", count: 12)) }
+            settleLayout(host)
+            // Same final message ID, but Markdown/native text height changes later.
+            model.messages[19].text += String(repeating: "追加的完整回复内容。\n", count: 25)
+            settleLayout(host)
+            let scroll = try timelineScrollView(in: host)
+            let document = try XCTUnwrap(scroll.documentView)
+            let remaining = document.isFlipped ? document.bounds.maxY - scroll.documentVisibleRect.maxY
+                : scroll.documentVisibleRect.minY - document.bounds.minY
+            XCTAssertLessThanOrEqual(abs(remaining), 2, "Switching and late layout must finish at the actual bottom")
+        }
+    }
+
     func testResizableColumnWidthsStayWithinUsableBounds() {
         XCTAssertEqual(
             MainColumnLayout.clamped(100, to: MainColumnLayout.workspaceRange),

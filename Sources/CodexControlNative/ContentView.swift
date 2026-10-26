@@ -1114,7 +1114,8 @@ struct ContentView: View {
                         showPreview: showConversationPreview,
                         hasUnreadCompletion: (showUnreadCompletionDot || showingUnreadThreads) && model.unreadCompletions.unread.contains(thread.id),
                         needsUserInput: model.userInputRequests.contains { $0.threadID == thread.id },
-                        isFavorite: model.isFavoriteConversation(thread.id)
+                        isFavorite: model.isFavoriteConversation(thread.id),
+                        isOpenedElsewhere: model.isThreadOpenedElsewhere(thread.id)
                     )
                 },
                 onSelect: model.selectThread,
@@ -1792,7 +1793,7 @@ private struct ThreadInputUnavailableView: View {
     private var title: String {
         switch state {
         case .checking: return "正在恢复会话"
-        case .occupied: return "已在另一个应用中打开"
+        case .occupied: return "已在其他应用中打开 · 当前只读"
         case .unavailable: return resumePresentation.title
         case .available: return "可以继续会话"
         }
@@ -2278,6 +2279,7 @@ struct ThreadRow: View, Equatable {
     var showPreview = true
     var hasUnreadCompletion = false
     var needsUserInput = false
+    var isOpenedElsewhere = false
     var relativeTimeBucket: Int? = nil
 
     var body: some View {
@@ -2297,7 +2299,12 @@ struct ThreadRow: View, Equatable {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ZStack(alignment: .trailing) {
                     Color.clear
-                    if needsUserInput {
+                    if isOpenedElsewhere {
+                        Label("其他应用中", systemImage: "macwindow.on.rectangle")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.white : Color.secondary)
+                            .help("此会话已在其他应用中打开，当前在这里仅可查看；这不表示任务已停止。")
+                    } else if needsUserInput {
                         Label("待输入", systemImage: "questionmark.bubble.fill")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(isSelected ? Color.white : Color.orange)
@@ -2309,7 +2316,7 @@ struct ThreadRow: View, Equatable {
                             .help("最近一轮：\(outcome.title)")
                     }
                 }
-                .frame(width: 64, alignment: .trailing)
+                .frame(width: isOpenedElsewhere ? 84 : 64, alignment: .trailing)
             }
             .frame(height: 18)
             if showPreview {
@@ -2712,6 +2719,7 @@ private struct MessageList: View, Equatable {
         // anchor. This is an instant jump and deliberately avoids ScrollView
         // position bindings / proxy scrolling, both of which can create a
         // persistent SwiftUI focus-layout feedback loop on very long content.
+        scrollViewportController.followLatest()
         isAtLatest = true
         hasUnseenUpdates = false
         viewportResetID = UUID()
@@ -2928,6 +2936,7 @@ final class ScrollLatestProbeView: NSView {
     }
 
     func disconnect() {
+        if let observedScrollView { viewportController?.detach(observedScrollView) }
         connectionGeneration += 1
         connectionScheduled = false
         positionReportScheduled = false
@@ -3167,6 +3176,7 @@ private struct MessageBubbleContent: View, Equatable {
                             }
 
                             MessageMetadataFooter(message: message)
+                            TurnTokenUsageFooter(message: message)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -3690,6 +3700,33 @@ private struct InterruptedMessageEditor: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.gray.opacity(0.18), in: RoundedRectangle(cornerRadius: 13))
         .overlay(RoundedRectangle(cornerRadius: 13).stroke(.quaternary))
+    }
+}
+
+private struct TurnTokenUsageFooter: View {
+    @EnvironmentObject private var model: AppModel
+    let message: ChatMessage
+
+    var body: some View {
+        if model.showsTokenUsage(for: message) {
+            if let usage = model.tokenUsage(for: message) {
+                Label {
+                    Text("本轮 Token：\(usage.tokens.total.formatted())\(usage.partial ? "（已记录）" : "") · 输入 \(usage.tokens.input.formatted()) · 输出 \(usage.tokens.output.formatted())")
+                } icon: {
+                    Image(systemName: "number.circle")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .help("缓存命中：\(usage.tokens.cached.formatted())（包含在输入中）\n推理：\(usage.tokens.reasoning.formatted())（包含在输出中）\n" + (usage.partial ? "记录可能不完整，仅展示已记录用量。" : "按本轮收到的用量记录汇总。") + "执行期间持续更新；不代表订阅额度百分比。")
+            } else {
+                Text(message.isStreaming ? "本轮 Token：等待用量回报" : "本轮 Token：用量未知")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .help("本轮尚无可恢复的 Token 用量记录。")
+            }
+        }
     }
 }
 

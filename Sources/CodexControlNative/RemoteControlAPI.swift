@@ -115,6 +115,7 @@ struct RemoteTaskStatusBody: Codable, Equatable {
     var waitReason: String? = nil
     var actualModel: String? = nil
     var actualEffort: String? = nil
+    var tokenUsage: TurnTokenUsageLedger.Record? = nil
 
     func withActualSettings(_ metadata: TurnModelMetadata?) -> Self {
         var copy = self

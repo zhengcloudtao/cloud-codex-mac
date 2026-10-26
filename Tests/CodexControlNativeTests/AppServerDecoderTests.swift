@@ -93,8 +93,8 @@ final class AppServerDecoderTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(messages.first { $0.id == "answer-old" }?.modelUsageLabel, "gpt-5.6-sol · 极高")
-        XCTAssertEqual(messages.first { $0.id == "answer-new" }?.modelUsageLabel, "gpt-6-astra · 高")
+        XCTAssertEqual(messages.first { $0.id == "answer-old" }?.modelUsageLabel, "gpt-5.6-sol · 极高 · 速度未知")
+        XCTAssertEqual(messages.first { $0.id == "answer-new" }?.modelUsageLabel, "gpt-6-astra · 高 · 速度未知")
         XCTAssertEqual(messages.first { $0.id == "answer-old" }?.turnID, "turn-old")
         XCTAssertEqual(messages.first { $0.id == "answer-new" }?.turnID, "turn-new")
         XCTAssertEqual(

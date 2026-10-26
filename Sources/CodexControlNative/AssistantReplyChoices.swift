@@ -73,6 +73,7 @@ struct AssistantReplyQuestionPanel: View {
     let dismiss: () -> Void
     @State private var selectedOption: String?
     @State private var customAnswer = ""
+    @State private var contentHeight: CGFloat = 330
 
     private var answer: String {
         let text = customAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -117,8 +118,23 @@ struct AssistantReplyQuestionPanel: View {
             .padding(14)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 20).padding(.vertical, 10)
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: ReplyPanelHeightKey.self, value: geometry.size.height)
+                }
+            }
         }
-        .frame(maxHeight: 330)
+        .onPreferenceChange(ReplyPanelHeightKey.self) { height in
+            if height > 0 { contentHeight = ceil(height) }
+        }
+        .frame(maxHeight: min(contentHeight, 330))
+    }
+}
+
+private struct ReplyPanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

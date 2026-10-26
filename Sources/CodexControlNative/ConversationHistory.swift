@@ -39,6 +39,7 @@ enum ConversationHistory {
                 }
                 new.model = new.model ?? old.model
                 new.reasoningEffort = new.reasoningEffort ?? old.reasoningEffort
+                new.serviceTier = new.serviceTier ?? old.serviceTier
                 new.turnID = new.turnID ?? old.turnID
                 new.timestamp = new.timestamp ?? old.timestamp
                 new.startedAt = new.startedAt ?? old.startedAt

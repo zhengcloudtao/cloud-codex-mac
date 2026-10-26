@@ -20,6 +20,8 @@ struct RemoteHistoryMessage: Codable {
     var effort: String
     var attachments: [String]
     var images: [RemoteHistoryImage]? = nil
+    var turnId: String? = nil
+    var tokenUsage: TurnTokenUsageLedger.Record? = nil
 }
 struct RemoteHistoryImage: Codable {
     var name: String

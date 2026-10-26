@@ -4,6 +4,25 @@ import UniformTypeIdentifiers
 @testable import CloudCodex
 
 final class RemoteHistoryTests: XCTestCase {
+    func testPerTurnTokensAppearOnlyOnLastAnswerAndSurviveEncoding() throws {
+        var usage = TurnTokenUsageLedger()
+        let tokens = ProviderUsageLedger.Tokens(json: ["inputTokens": 100, "outputTokens": 20,
+            "cachedInputTokens": 40, "reasoningOutputTokens": 5, "totalTokens": 120])!
+        usage.observe(thread: "thread", turn: "turn", total: tokens, last: tokens)
+        let page = AppServerClient.remoteHistoryPage(["data": [["id": "turn", "items": [
+            ["id": "u", "type": "userMessage", "content": [["type": "inputText", "text": "question"]]],
+            ["id": "a", "type": "agentMessage", "text": "progress"],
+            ["id": "b", "type": "agentMessage", "text": "answer"]
+        ]]]], usage: usage, threadID: "thread")
+        let decoded = try JSONDecoder().decode(RemoteHistoryPage.self, from: JSONEncoder().encode(page))
+        XCTAssertEqual(decoded.messages.compactMap(\.tokenUsage).count, 1)
+        XCTAssertEqual(decoded.messages.last?.tokenUsage?.tokens.total, 120)
+        XCTAssertEqual(decoded.messages.last?.turnId, "turn")
+        var body = RemoteTaskStatusBody(status: "completed", threadId: "thread", turnId: "turn", result: "answer", error: "")
+        body.tokenUsage = decoded.messages.last?.tokenUsage
+        XCTAssertEqual(try JSONDecoder().decode(RemoteTaskStatusBody.self, from: JSONEncoder().encode(body)), body)
+    }
+
     private func imageData(width: Int = 20, height: Int = 30) throws -> Data {
         let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
                                              bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),

@@ -19,6 +19,40 @@ final class MessageScrollViewportTests: XCTestCase {
         XCTAssertTrue(cache.entries(from: []).isEmpty)
     }
 
+    func testInitialBottomTracksLateLayoutAndStopsForUserScroll() {
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 600, height: 400),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
+        let document = FlippedTimelineDocument(frame: CGRect(x: 0, y: 0, width: 600, height: 1000))
+        scroll.documentView = document
+        window.contentView = scroll
+        let controller = MessageScrollViewportController()
+        defer { controller.detach(scroll); window.contentView = nil; window.close() }
+        controller.followLatest() // Request may precede native attachment.
+        controller.attach(scroll)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        XCTAssertEqual(scroll.documentVisibleRect.maxY, document.bounds.maxY, accuracy: 1)
+
+        document.setFrameSize(CGSize(width: 600, height: 2300))
+        NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: document)
+        XCTAssertLessThan(scroll.documentVisibleRect.maxY, 2300, "no synchronous layout reentry")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        XCTAssertEqual(scroll.documentVisibleRect.maxY, 2300, accuracy: 1)
+
+        NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: scroll)
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: 700))
+        document.setFrameSize(CGSize(width: 600, height: 2700))
+        controller.reportHistoryPosition()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        XCTAssertEqual(scroll.contentView.bounds.minY, 700, accuracy: 1, "reading history must not snap back")
+
+        controller.followLatest()
+        controller.detach(scroll) // Switching away cancels pending positioning.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        XCTAssertEqual(scroll.contentView.bounds.minY, 700, accuracy: 1)
+    }
+
     func testNativeFrameUsesTopOffsetForBothCoordinateDirections() {
         let viewport = CGRect(x: 20, y: 500, width: 600, height: 400)
         XCTAssertEqual(MessageScrollViewportController.topLeadingFrame(
@@ -71,3 +105,5 @@ final class MessageScrollViewportTests: XCTestCase {
         XCTAssertEqual(requests, 2)
     }
 }
+
+private final class FlippedTimelineDocument: NSView { override var isFlipped: Bool { true } }

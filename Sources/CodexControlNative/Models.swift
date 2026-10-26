@@ -250,6 +250,7 @@ struct TurnRuntimeState {
 struct TurnModelMetadata: Hashable {
     let model: String?
     let reasoningEffort: String?
+    var serviceTier: String? = nil
 
     var displayLabel: String? {
         guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -469,11 +470,19 @@ struct ChatMessage: Identifiable, Hashable {
     var turnID: String? = nil
     var model: String? = nil
     var reasoningEffort: String? = nil
+    var serviceTier: String? = nil
     var collaborationChildTasks: [CollaborationChildTask] = []
     var fileChanges: [ConversationFileChange] = []
 
     var modelUsageLabel: String? {
-        TurnModelMetadata(model: model, reasoningEffort: reasoningEffort).displayLabel
+        guard let label = TurnModelMetadata(model: model, reasoningEffort: reasoningEffort).displayLabel else { return nil }
+        let speed: String
+        switch serviceTier?.lowercased() {
+        case "default", "standard": speed = "标准"
+        case "priority", "fast", "ultrafast": speed = "加速"
+        default: speed = "速度未知"
+        }
+        return label + " · " + speed
     }
 }
 
