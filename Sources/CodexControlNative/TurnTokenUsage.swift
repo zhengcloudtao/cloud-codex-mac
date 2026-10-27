@@ -11,6 +11,7 @@ struct TurnTokenUsageLedger: Codable, Equatable {
     struct Baseline: Codable, Equatable {
         var turn: String
         var tokens: Tokens
+        var observedAt: Double? = nil
     }
     var records: [String: Record] = [:]
     var baselines: [String: Baseline] = [:]
@@ -45,7 +46,19 @@ struct TurnTokenUsageLedger: Codable, Equatable {
             if total.total != last.total || previous != nil { record.partial = true }
         }
         records[key] = record
-        baselines[thread] = Baseline(turn: turn, tokens: total)
+        baselines[thread] = Baseline(turn: turn, tokens: total, observedAt: Date().timeIntervalSince1970)
+    }
+
+    /// Only a measured delta omitted by this event is evidence of lost usage.
+    /// A sticky per-turn partial flag (e.g. inherited history) is not evidence.
+    func missingDeltaBaseline(_ params: [String: Any], credited: Int64) -> Double? {
+        guard let thread = params["threadId"] as? String,
+              let previous = baselines[thread], let observedAt = previous.observedAt,
+              let usage = params["tokenUsage"] as? [String: Any],
+              let json = usage["total"] as? [String: Any], let total = Tokens(json: json),
+              total.total > previous.tokens.total,
+              total.total - previous.tokens.total > credited else { return nil }
+        return observedAt
     }
 
     mutating func consume(_ params: [String: Any]) {

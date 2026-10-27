@@ -114,6 +114,7 @@ final class AppModel: ObservableObject {
     private let favoriteConversationsKey = "cloudcodex.favoriteConversations.v1"
     private let quotaConsumptionHistoryKey = "cloudcodex.quotaConsumptionHistory.v1"
     private let revertedFileChangesKey = "cloudcodex.revertedFileChanges.v1"
+    @Published private(set) var quotaCycleHistory = QuotaCycleHistory()
     private var quotaConsumptionTracker = QuotaConsumptionTracker()
     private var quotaRestorationTracker = QuotaRestorationTracker()
     @Published private(set) var allowsExtraCreditUsage = false
@@ -1092,6 +1093,7 @@ final class AppModel: ObservableObject {
             quotaConsumptionTracker = saved
             recentThirtyMinuteConsumptionRate = saved.consumptionRate(at: Date().timeIntervalSince1970)
         }
+        quotaCycleHistory = QuotaCycleHistory.load(remoteDefaults)
         revertedFileChanges = Set(remoteDefaults.stringArray(forKey: revertedFileChangesKey) ?? [])
         isFastModeEnabled = remoteDefaults.bool(forKey: fastModeKey)
         remoteControlEnabled = remoteDefaults.bool(forKey: remoteControlEnabledKey)
@@ -1640,6 +1642,8 @@ final class AppModel: ObservableObject {
 
     private func applyAccountOverview(_ overview: AccountOverview) {
         guard !customModelProvider.enabled else { return }
+        quotaCycleHistory.record(overview)
+        saveQuotaCycleHistory()
         let restored = quotaRestorationTracker.record(overview)
         accountOverview = overview
         accounts.setOverview(overview, for: accounts.library.activeID)
@@ -1653,6 +1657,12 @@ final class AppModel: ObservableObject {
         recentThirtyMinuteConsumptionRate = quotaConsumptionTracker.record(account: overview)
         if let data = try? JSONEncoder().encode(quotaConsumptionTracker) {
             remoteDefaults.set(data, forKey: quotaConsumptionHistoryKey)
+        }
+    }
+
+    private func saveQuotaCycleHistory() {
+        if let data = try? JSONEncoder().encode(quotaCycleHistory) {
+            remoteDefaults.set(data, forKey: QuotaCycleHistory.defaultsKey)
         }
     }
 
@@ -3006,7 +3016,7 @@ final class AppModel: ObservableObject {
 
     /// Usage follows the login; conversation preferences stay shared.
     private var accountPreferenceKeys: [String] {
-        [quotaConsumptionHistoryKey, Self.creditUsagePauseKey]
+        [quotaConsumptionHistoryKey, QuotaCycleHistory.defaultsKey, Self.creditUsagePauseKey]
     }
 
     private func prepareSharedConversations() throws {
@@ -3040,6 +3050,7 @@ final class AppModel: ObservableObject {
     }
 
     private func exchangeAccountPreferences(from oldID: String, to newID: String) {
+        saveQuotaCycleHistory()
         let prefix = "CloudCodex.accountPreferences.v1."
         var saved: [String: Any] = [:]
         for key in accountPreferenceKeys { saved[key] = remoteDefaults.object(forKey: key) }
@@ -3049,6 +3060,7 @@ final class AppModel: ObservableObject {
             if let value = restored[key] { remoteDefaults.set(value, forKey: key) }
             else { remoteDefaults.removeObject(forKey: key) }
         }
+        quotaCycleHistory = QuotaCycleHistory.load(remoteDefaults)
         quotaConsumptionTracker = remoteDefaults.data(forKey: quotaConsumptionHistoryKey)
             .flatMap { try? JSONDecoder().decode(QuotaConsumptionTracker.self, from: $0) } ?? QuotaConsumptionTracker()
     }
@@ -4868,6 +4880,16 @@ final class AppModel: ObservableObject {
             var updated = turnTokenUsage
             updated.consume(params)
             if updated != turnTokenUsage {
+                if !customModelProvider.enabled, !isSwitchingModelProvider,
+                   let thread = params["threadId"] as? String,
+                   let turn = params["turnId"] as? String,
+                   let record = updated.record(thread: thread, turn: turn) {
+                    let previous = turnTokenUsage.record(thread: thread, turn: turn)?.tokens.total ?? 0
+                    let delta = max(0, record.tokens.total - previous)
+                    quotaCycleHistory.addTokens(delta,
+                        missingSince: turnTokenUsage.missingDeltaBaseline(params, credited: delta))
+                    saveQuotaCycleHistory()
+                }
                 turnTokenUsage = updated
                 if let data = try? JSONEncoder().encode(updated) {
                     remoteDefaults.set(data, forKey: TurnTokenUsageLedger.defaultsKey)

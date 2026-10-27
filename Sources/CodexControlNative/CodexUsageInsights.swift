@@ -111,6 +111,7 @@ struct CodexUsageInsightsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var range: UsageActivityRange = .daily
     @State private var showProviderUsage = false
+    @State private var showQuotaCycles = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -122,8 +123,14 @@ struct CodexUsageInsightsSheet: View {
                     Text("Codex 账号").tag(false)
                     Text("第三方 API").tag(true)
                 }.frame(width: 160)
+                Toggle("额度周期", isOn: $showQuotaCycles)
+                    .toggleStyle(.button)
+                    .disabled(showProviderUsage)
                 Button {
-                    Task { await model.refreshUsageInsights() }
+                    Task {
+                        if showQuotaCycles { await model.connectionHealth.check() }
+                        else { await model.refreshUsageInsights() }
+                    }
                 } label: {
                     Label("刷新", systemImage: "arrow.clockwise")
                 }
@@ -138,6 +145,13 @@ struct CodexUsageInsightsSheet: View {
             Group {
                 if showProviderUsage {
                     ProviderUsageView()
+                } else if showQuotaCycles {
+                    VStack(spacing: 0) {
+                        if let error = model.accountOverviewError {
+                            Text(error).font(.caption).foregroundStyle(.orange).padding(.horizontal, 30)
+                        }
+                        QuotaCycleHistoryView(history: model.quotaCycleHistory)
+                    }
                 } else if model.customModelProvider.enabled {
                     ContentUnavailableView("当前使用第三方 API", systemImage: "chart.bar",
                         description: Text("请选择第三方 API 查看本机用量统计；账号额度请在服务商控制台查看。"))
