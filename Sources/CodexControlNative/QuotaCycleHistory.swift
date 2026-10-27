@@ -6,13 +6,20 @@ import Foundation
 struct QuotaCycleHistory: Codable, Equatable {
     static let defaultsKey = "cloudcodex.quotaCycles.v1"
 
+    struct Breakdown: Codable, Equatable {
+        var input: Int64 = 0
+        var output: Int64 = 0
+        var total: Int64 { input + output }
+    }
+
     struct Sample: Codable, Equatable {
         let capturedAt: Double
         let usedPercent: Double
         let tokens: Int64
+        var breakdown: Breakdown? = nil
 
         func hasSameUsage(as other: Sample) -> Bool {
-            usedPercent == other.usedPercent && tokens == other.tokens
+            usedPercent == other.usedPercent && tokens == other.tokens && breakdown == other.breakdown
         }
     }
 
@@ -26,7 +33,11 @@ struct QuotaCycleHistory: Codable, Equatable {
         let minutes: Int
         let startedAt: Double
         var endedAt: Double?
+        var initialUsedPercent: Double?
+        var startingUsedPercent: Double { initialUsedPercent ?? samples.first?.usedPercent ?? 0 }
         var tokens: Int64 = 0
+        var breakdown: Breakdown? = nil
+        var unclassifiedTokens: Int64 { max(0, tokens - (breakdown?.total ?? 0)) }
         var consumedPercent: Double = 0
         var samples: [Sample] = []
         // Optional for compatibility with v1 records, which stored only a
@@ -42,6 +53,16 @@ struct QuotaCycleHistory: Codable, Equatable {
         var hasUsage = false
 
         var title: String { minutes == 300 ? "5 小时额度" : "每周额度" }
+
+        var estimatedInputTokens: Double? {
+            guard unclassifiedTokens == 0, let breakdown, let total = estimatedTotalTokens else { return nil }
+            return total * Double(breakdown.input) / Double(tokens)
+        }
+
+        var estimatedOutputTokens: Double? {
+            guard unclassifiedTokens == 0, let breakdown, let total = estimatedTotalTokens else { return nil }
+            return total * Double(breakdown.output) / Double(tokens)
+        }
 
         /// A proportional projection, not an account-provided token allowance.
         var estimatedTotalTokens: Double? {
@@ -109,7 +130,7 @@ struct QuotaCycleHistory: Codable, Equatable {
             cycles[index].consumedPercent += max(0, used - previous.usedPercent)
             cycles[index].hasUsage = cycles[index].hasUsage || used > 0.001
             cycles[index].lastReset = reset
-            let sample = Sample(capturedAt: at, usedPercent: used, tokens: cycles[index].tokens)
+            let sample = Sample(capturedAt: at, usedPercent: used, tokens: cycles[index].tokens, breakdown: cycles[index].breakdown)
             if sample.hasSameUsage(as: previous) {
                 // Keep the latest observation for freshness/stale-event rejection;
                 // the original cycle start is retained separately in startedAt.
@@ -121,20 +142,30 @@ struct QuotaCycleHistory: Codable, Equatable {
                 cycles[index].endedAt = at
             } else { return }
         }
-        // Starting halfway through a window would fabricate a full-cycle baseline.
-        guard used <= 0.001 else { return }
+        // A mid-window start records only future deltas, never prior usage.
         var cycle = Cycle(bucketID: bucketID, minutes: minutes, startedAt: at)
+        cycle.initialUsedPercent = used
+        cycle.hasUsage = used > 0.001
+        cycle.breakdown = Breakdown()
         cycle.lastReset = reset
-        cycle.samples = [.init(capturedAt: at, usedPercent: used, tokens: 0)]
+        cycle.samples = [.init(capturedAt: at, usedPercent: used, tokens: 0, breakdown: Breakdown())]
         cycles.append(cycle)
     }
 
-    mutating func addTokens(_ delta: Int64, missingSince: Double? = nil, at: Double = Date().timeIntervalSince1970) {
+    mutating func addTokens(_ delta: Int64, input: Int64? = nil, output: Int64? = nil, missingSince: Double? = nil, at: Double = Date().timeIntervalSince1970) {
         guard delta > 0, at.isFinite else { return }
         for index in cycles.indices where cycles[index].endedAt == nil && cycles[index].bucketID == activeBucketID && at >= cycles[index].startedAt {
             let sum = cycles[index].tokens.addingReportingOverflow(delta)
             guard !sum.overflow else { cycles[index].recordGap(.tokenOverflow); continue }
             cycles[index].tokens = sum.partialValue
+            if let input, let output, input >= 0, output >= 0,
+               input <= delta, output == delta - input {
+                var breakdown = cycles[index].breakdown ?? Breakdown()
+                // Classified totals cannot exceed the checked total above.
+                breakdown.input += input
+                breakdown.output += output
+                cycles[index].breakdown = breakdown
+            }
             // Tokens alone cannot establish that account quota left 100% (e.g. credits).
             if let missingSince, missingSince >= cycles[index].startedAt, missingSince <= at {
                 cycles[index].recordGap(.unrecordedTokenDelta)

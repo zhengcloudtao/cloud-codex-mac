@@ -62,6 +62,7 @@ struct CodexAccountsSheet: View {
                         DisclosureGroup("不可用的共享账号（\(unavailable.count)）") {
                             ForEach(unavailable) { account in card(account) }
                         }
+                        .disclosureGroupStyle(AccountSectionDisclosureStyle())
                         .font(.callout).foregroundStyle(.secondary)
                     }
                 }
@@ -227,5 +228,35 @@ private struct AccountShareReceiveSheet: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }.padding(24).frame(width: 540)
+    }
+}
+
+/// Make the whole section header a target, including the space after its label.
+private struct AccountSectionDisclosureStyle: DisclosureGroupStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                configuration.isExpanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 14)
+                    configuration.label
+                    Spacer(minLength: 8)
+                    Text(configuration.isExpanded ? "收起" : "展开")
+                        .font(.caption)
+                }
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(configuration.isExpanded ? "已展开" : "已收起")
+            if configuration.isExpanded {
+                configuration.content
+            }
+        }
     }
 }

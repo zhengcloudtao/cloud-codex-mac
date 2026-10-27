@@ -40,6 +40,7 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     var defaultEffort: String? = nil
     var systemMetrics: SystemMetricsSnapshot? = nil
     var connectionHealth: RemoteConnectionHealthSnapshot? = nil
+    var watchSnapshot: CloudCodexWatchSnapshot? = nil
     var supportsFavorites: Bool = true
     var supportsFiles: Bool = true
 }
@@ -403,5 +404,22 @@ struct RemoteFavoriteChange: Codable, Equatable {
         if let date = formatter.date(from: expiresAt) { return date <= now }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: expiresAt).map { $0 <= now } ?? true
+    }
+}
+
+struct CloudCodexWatchLink: Codable {
+    let controlToken: String?
+    let deviceId: String
+    let token: String
+    let expiresAt: Double
+}
+extension RemoteControlAPI {
+    func createWatchLink() async throws -> CloudCodexWatchLink {
+        try await request(path: "/api/cloud-codex/agent/app-link", method: "POST", bodyData: nil)
+    }
+    func revokeWatchLink() async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/watch-link", method: "DELETE", bodyData: nil)
+        let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
     }
 }

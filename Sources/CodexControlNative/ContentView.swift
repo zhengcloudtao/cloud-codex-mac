@@ -1970,6 +1970,7 @@ private struct RemoteControlSheet: View {
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
 
                     RemoteServerSettingsView()
+                    CloudCodexWatchSettingsView()
 
                     HStack(spacing: 10) {
                         Circle()
@@ -3935,8 +3936,12 @@ private struct UserMessageContent: View {
     let maximumContentWidth: CGFloat
     @State private var isExpanded = false
 
+    private var visibleText: String {
+        UserMessageContentParser.removingAttachmentManifest(from: message.text, attachments: message.attachments)
+    }
+
     private var displayedText: String {
-        isExpanded ? message.text : UserMessagePresentation.collapsedText(message.text)
+        isExpanded ? visibleText : UserMessagePresentation.collapsedText(visibleText)
     }
 
     @ViewBuilder
@@ -3953,7 +3958,7 @@ private struct UserMessageContent: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !visibleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     let selectableText = ReliableSelectableText(
                         text: displayedText,
@@ -3973,7 +3978,7 @@ private struct UserMessageContent: View {
                             .frame(width: maximumContentWidth, alignment: .leading)
                     }
 
-                    if UserMessagePresentation.shouldCollapse(message.text) {
+                    if UserMessagePresentation.shouldCollapse(visibleText) {
                         Button {
                             withAnimation(.easeInOut(duration: 0.16)) {
                                 isExpanded.toggle()
@@ -4024,14 +4029,29 @@ private struct MessageAttachmentCard: View {
                     .padding(6)
                     .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
                 } else {
-                    Label(attachment.name, systemImage: attachment.kind == .image ? "photo" : "doc")
-                        .font(.callout)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: 260, alignment: .leading)
-                        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: attachment.kind == .image ? "photo" : "doc.text")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, height: 40)
+                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(attachment.name)
+                                .font(.callout.weight(.medium))
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(fileTypeLabel)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.leading, 10)
+                    .padding(.trailing, attachment.path.isEmpty ? 10 : 38)
+                    .padding(.vertical, 10)
+                    .frame(width: 280, alignment: .leading)
+                    .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
                 }
             }
             .buttonStyle(.plain)
@@ -4049,6 +4069,11 @@ private struct MessageAttachmentCard: View {
                 .help("在 Finder 中显示")
             }
         }
+    }
+
+    private var fileTypeLabel: String {
+        let ext = (attachment.name as NSString).pathExtension.uppercased()
+        return ext.isEmpty ? "文件 · 点击预览" : "\(ext) 文件 · 点击预览"
     }
 
     private func openAttachment() {
@@ -4572,7 +4597,8 @@ private struct ActivityBubble: View {
     init(message: ChatMessage, compact: Bool = false) {
         self.message = message
         self.compact = compact
-        _isExpanded = State(initialValue: message.id.hasPrefix("connection-notice-"))
+        _isExpanded = State(initialValue: message.id.hasPrefix("connection-notice-")
+            || (message.activityKind == .warning && UsageLimitPresentation(message.text) != nil))
     }
 
     private var usageLimit: UsageLimitPresentation? {
@@ -4603,8 +4629,9 @@ private struct ActivityBubble: View {
                         .padding(.top, 9)
                 } else {
                     Text(String(message.text.prefix(visibleDetailLimit)))
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                            .font(message.activityKind == .warning ? .body : .system(.caption, design: .monospaced))
+                            .foregroundStyle(message.activityKind == .warning ? .primary : .secondary)
+                            .lineSpacing(message.activityKind == .warning ? 4 : 0)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4648,7 +4675,15 @@ private struct ActivityBubble: View {
         }
         .padding(.horizontal, compact ? 4 : 12)
         .padding(.vertical, compact ? 7 : 10)
-        .background(Color.secondary.opacity(compact ? 0 : 0.07), in: RoundedRectangle(cornerRadius: 12))
+        .background {
+            if message.activityKind == .warning {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.95))
+            } else {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.secondary.opacity(compact ? 0 : 0.07))
+            }
+        }
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(compact ? Color.clear : Color.secondary.opacity(0.2)))
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)

@@ -11,6 +11,11 @@ final class UsageLimitPresentationTests: XCTestCase {
         XCTAssertTrue(value.showsUsageLink)
         XCTAssertTrue(value.showsPlanLink)
     }
+    func testTimeOnlyRecoveryDoesNotInventDateOrTimezone() throws {
+        XCTAssertEqual(try XCTUnwrap(UsageLimitPresentation("You've hit your usage limit. try again at 2:40 PM.")).recoveryTime, "14:40")
+        XCTAssertEqual(try XCTUnwrap(UsageLimitPresentation("You've hit your usage limit. try again at 12:05 AM.")).recoveryTime, "00:05")
+    }
+
     func testMissingOrMalformedTimeKeepsQuotaExplanation() throws {
         XCTAssertNil(try XCTUnwrap(UsageLimitPresentation("You've hit your usage limit.")).recoveryTime)
         XCTAssertNil(try XCTUnwrap(UsageLimitPresentation("You've hit your usage limit. try again at unknown")).recoveryTime)
@@ -20,7 +25,7 @@ final class UsageLimitPresentationTests: XCTestCase {
         guard let directory = ProcessInfo.processInfo.environment["CLOUDCODEX_QUOTA_PREVIEW_DIR"] else {
             throw XCTSkip("Set CLOUDCODEX_QUOTA_PREVIEW_DIR to render the quota notice")
         }
-        let raw = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 25th, 2026 12:28 AM."
+        let raw = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 2:40 PM."
         let view = NSHostingView(rootView: UsageLimitDetailView(usageLimit: try XCTUnwrap(UsageLimitPresentation(raw)), originalError: raw)
             .padding(20).frame(width: 620).background(Color(nsColor: .windowBackgroundColor)).preferredColorScheme(.dark))
         view.frame = NSRect(x: 0, y: 0, width: 620, height: view.fittingSize.height)

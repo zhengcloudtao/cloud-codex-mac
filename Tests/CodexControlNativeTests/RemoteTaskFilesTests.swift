@@ -2,6 +2,33 @@ import XCTest
 @testable import CloudCodex
 
 final class RemoteTaskFilesTests: XCTestCase {
+    @MainActor func testOrdinaryFilesReachModelVisibleTurnInput() throws {
+        let file = ComposerAttachment(url: URL(fileURLWithPath: "/tmp/project/.cloudcodex-attachments-fixture/后端文档 (最终版).md"))
+        let params = AppServerClient.turnStartParameters(threadID: "thread", text: "分析我发的文件",
+            attachments: [file], model: nil, effort: nil, permissions: nil, serviceTier: nil)
+        let input = try XCTUnwrap(params["input"] as? [[String: Any]])
+        XCTAssertEqual(input.first?["text"] as? String, "分析我发的文件")
+        XCTAssertTrue(input.contains { $0["type"] as? String == "mention" && $0["path"] as? String == file.url.path })
+        let visible = input.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        XCTAssertTrue(visible.contains(file.url.path), "A mention alone is not model-visible file context")
+        XCTAssertTrue(visible.contains(file.url.lastPathComponent))
+    }
+
+    @MainActor func testFileOnlyAndMixedAttachmentsPreserveImagesAndQuotedNames() throws {
+        let file = ComposerAttachment(url: URL(fileURLWithPath: "/tmp/quote\"\n文档.md"))
+        let second = ComposerAttachment(url: URL(fileURLWithPath: "/tmp/second.pdf"))
+        let image = ComposerAttachment(url: URL(fileURLWithPath: "/tmp/photo.png"))
+        let input = AppServerClient.turnInput(text: "", attachments: [file, second, image])
+        XCTAssertEqual(input.filter { $0["type"] as? String == "localImage" }.count, 1)
+        let text = try XCTUnwrap(input.last?["text"] as? String)
+        let json = try XCTUnwrap(text.components(separatedBy: "附件列表（JSON）：\n").last?.data(using: .utf8))
+        let files = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [[String: String]])
+        XCTAssertEqual(files.map { $0["path"] }, [file.url.path, second.url.path])
+        XCTAssertFalse(text.contains("photo.png"))
+        XCTAssertEqual(AppServerClient.turnInput(text: "hello", attachments: []).count, 1)
+        XCTAssertEqual(AppServerClient.turnInput(text: "", attachments: [image]).count, 1)
+    }
+
     func testExportIsLimitedToRegularWorkspaceFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -29,6 +56,15 @@ final class RemoteTaskFilesTests: XCTestCase {
         let api = RemoteControlAPI(deviceSecret: "test-device-secret", baseURL: URL(string: "https://relay.example.test/ai")!, session: session, defaults: defaults)
         let rewritten = await api.fileExporter.rewrite("[报告](report(1).pdf)", workspace: root.path, scope: "tasks/test", api: api)
         XCTAssertEqual(rewritten, "[报告](cloudcodex-file:11111111-1111-1111-1111-111111111111)")
+        try Data("fixture".utf8).write(to: root.appendingPathComponent("generated.png"))
+        try Data("fixture".utf8).write(to: root.appendingPathComponent("统计 report.xlsx"))
+        let outputs = await api.fileExporter.rewrite("![生成图片](generated.png)\n![](generated.png)\n[下载表格](<统计 report.xlsx>)",
+            workspace: root.path, scope: "tasks/test", api: api)
+        XCTAssertEqual(outputs, "![生成图片](cloudcodex-file:11111111-1111-1111-1111-111111111111)\n![](cloudcodex-file:11111111-1111-1111-1111-111111111111)\n[下载表格](<cloudcodex-file:11111111-1111-1111-1111-111111111111>)")
+        let imageCode = "`![示例](generated.png)`\n```\n![示例](generated.png)\n```"
+        let preservedImageCode = await api.fileExporter.rewrite(imageCode, workspace: root.path, scope: "tasks/test", api: api)
+        XCTAssertEqual(preservedImageCode, imageCode)
+
         let code = "```markdown\n[示例](report(1).pdf)\n```\n`[示例](report(1).pdf)`"
         let preserved = await api.fileExporter.rewrite(code, workspace: root.path, scope: "tasks/test", api: api)
         XCTAssertEqual(preserved, code)
@@ -38,6 +74,12 @@ final class RemoteTaskFilesTests: XCTestCase {
         XCTAssertEqual(attachments.count, 1)
         XCTAssertEqual(try Data(contentsOf: attachments[0].url), Data("fixture".utf8))
         XCTAssertEqual(attachments[0].userInput["type"] as? String, "mention")
+        let visibleInput = await MainActor.run {
+            AppServerClient.turnInput(text: "分析附件", attachments: attachments)
+                .filter { $0["type"] as? String == "text" }
+                .compactMap { $0["text"] as? String }.joined(separator: "\n")
+        }
+        XCTAssertTrue(visibleInput.contains(attachments[0].url.path), "Downloaded files must reach model-visible input")
         XCTAssertEqual(RemoteTaskFiles.historyFileID(attachments[0].url.path), file.id)
         XCTAssertNotNil(RemoteTaskFiles.exportURL(attachments[0].url.path, workspace: root.path), "edited input files can be exported as new artifacts")
         XCTAssertNil(RemoteTaskFiles.historyFileID("/tmp/unrelated/file.pdf"))

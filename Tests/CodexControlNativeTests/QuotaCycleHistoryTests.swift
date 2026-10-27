@@ -21,16 +21,27 @@ final class QuotaCycleHistoryTests: XCTestCase {
         XCTAssertFalse(history.cycles[0].hasObservationGap)
     }
 
-    func testWaitsForFullAndRejectsStaleAndInvalidSamples() {
+    func testMidWindowStartTracksOnlyNewConsumptionAndRejectsStaleSamples() throws {
         var history = QuotaCycleHistory()
-        history.record(bucketID: "codex", minutes: 300, used: 20, at: 1, resetsAt: 100)
-        history.addTokens(100, at: 2)
-        XCTAssertTrue(history.cycles.isEmpty)
-        history.record(bucketID: "codex", minutes: 300, used: 0, at: 3, resetsAt: 100)
-        history.record(bucketID: "codex", minutes: 300, used: 30, at: 2, resetsAt: 100)
+        history.record(bucketID: "codex", minutes: 300, used: 60, at: 1, resetsAt: 100)
+        XCTAssertEqual(history.cycles.count, 1)
+        XCTAssertEqual(history.cycles[0].startingUsedPercent, 60)
+        XCTAssertEqual(history.cycles[0].consumedPercent, 0)
+        XCTAssertNil(history.cycles[0].estimatedTotalTokens)
+        history.addTokens(100, input: 80, output: 20, at: 2)
+        history.record(bucketID: "codex", minutes: 300, used: 65, at: 3, resetsAt: 100)
+        history.record(bucketID: "codex", minutes: 300, used: 90, at: 2, resetsAt: 100)
         history.record(bucketID: "codex", minutes: 300, used: .nan, at: 4, resetsAt: 100)
-        XCTAssertEqual(history.cycles[0].samples.count, 1)
-        XCTAssertEqual(history.cycles[0].tokens, 0)
+        XCTAssertEqual(history.cycles[0].consumedPercent, 5)
+        XCTAssertEqual(history.cycles[0].estimatedTotalTokens, 2000)
+        history = try JSONDecoder().decode(QuotaCycleHistory.self, from: JSONEncoder().encode(history))
+        XCTAssertEqual(history.cycles[0].startingUsedPercent, 60)
+        history.record(bucketID: "codex", minutes: 300, used: 0, at: 101, resetsAt: 200)
+        XCTAssertEqual(history.cycles.count, 2)
+        XCTAssertEqual(history.cycles[0].endedAt, 101)
+        XCTAssertFalse(history.cycles[0].hasObservationGap)
+        XCTAssertEqual(history.cycles[1].startingUsedPercent, 0)
+        XCTAssertEqual(history.cycles[1].tokens, 0)
     }
 
     func testWindowsIndependentAndPartialRecoveryDoesNotEndCycle() throws {
@@ -81,6 +92,7 @@ final class QuotaCycleHistoryTests: XCTestCase {
         app.handleEvent("thread/tokenUsage/updated", params)
         app.handleEvent("thread/tokenUsage/updated", params)
         XCTAssertEqual(app.quotaCycleHistory.cycles[0].tokens, 12)
+        XCTAssertEqual(app.quotaCycleHistory.cycles[0].breakdown, .init(input: 10, output: 2))
         XCTAssertEqual(QuotaCycleHistory.load(defaults).cycles[0].tokens, 12)
     }
 
@@ -247,6 +259,41 @@ final class QuotaCycleHistoryTests: XCTestCase {
         history.addTokens(10, missingSince: 11, at: 12)
         defaults.set(try JSONEncoder().encode(history), forKey: QuotaCycleHistory.defaultsKey)
         XCTAssertEqual(QuotaCycleHistory.load(defaults).cycles[0].gapReasons, [.unrecordedTokenDelta])
+    }
+
+    func testBreakdownPersistsSnapshotsAndEstimatesWithoutDoubleCounting() throws {
+        var history = QuotaCycleHistory()
+        history.record(bucketID: "codex", minutes: 300, used: 0, at: 1, resetsAt: 100)
+        history.addTokens(100, input: 80, output: 20, at: 2)
+        history.record(bucketID: "codex", minutes: 300, used: 25, at: 3, resetsAt: 100)
+        history = try JSONDecoder().decode(QuotaCycleHistory.self, from: JSONEncoder().encode(history))
+        let cycle = history.cycles[0]
+        XCTAssertEqual(cycle.breakdown, .init(input: 80, output: 20))
+        XCTAssertEqual(cycle.samples.last?.breakdown, cycle.breakdown)
+        XCTAssertEqual(cycle.estimatedInputTokens, 320)
+        XCTAssertEqual(cycle.estimatedOutputTokens, 80)
+        history.record(bucketID: "codex", minutes: 300, used: 0, at: 101, resetsAt: 200)
+        XCTAssertEqual(history.cycles[1].breakdown, .init())
+    }
+
+    func testUnclassifiedLegacyTokensAreNotFabricatedOrExtrapolated() throws {
+        var history = QuotaCycleHistory()
+        history.record(bucketID: "codex", minutes: 300, used: 0, at: 1, resetsAt: 100)
+        history.addTokens(200, at: 2)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(history)) as? [String: Any])
+        var cycles = try XCTUnwrap(json["cycles"] as? [[String: Any]])
+        cycles[0].removeValue(forKey: "breakdown")
+        json["cycles"] = cycles
+        history = try JSONDecoder().decode(QuotaCycleHistory.self, from: JSONSerialization.data(withJSONObject: json))
+        history.addTokens(100, input: 80, output: 20, at: 3)
+        history.record(bucketID: "codex", minutes: 300, used: 25, at: 4, resetsAt: 100)
+        XCTAssertEqual(history.cycles[0].tokens, 300)
+        XCTAssertEqual(history.cycles[0].unclassifiedTokens, 200)
+        XCTAssertEqual(history.cycles[0].breakdown, .init(input: 80, output: 20))
+        XCTAssertNil(history.cycles[0].estimatedInputTokens)
+        XCTAssertNil(history.cycles[0].estimatedOutputTokens)
+        history.addTokens(10, input: 10, output: 10, at: 5)
+        XCTAssertEqual(history.cycles[0].unclassifiedTokens, 210)
     }
 
 }

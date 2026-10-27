@@ -3968,7 +3968,7 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshRemoteUsageIfNeeded() {
-        guard remoteControlPaired, remoteUsageTask == nil,
+        guard (remoteControlPaired || watchSharingEnabled), remoteUsageTask == nil,
               remoteUsageLastAttempt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true else { return }
         remoteUsageLastAttempt = Date()
         // Independent request: slow quota reads must not block device heartbeats
@@ -4010,6 +4010,73 @@ final class AppModel: ObservableObject {
         remoteSchedulingState.replace(with: snapshot)
     }
 
+    private var watchSharingKey: String {
+        "CloudCodex.watchSharing.v1." + ((try? remoteServerConfiguration.validatedURL()).map(RemoteServerConfiguration.scope) ?? "invalid")
+    }
+    var watchSharingEnabled: Bool { remoteDefaults.bool(forKey: watchSharingKey) }
+
+    func createWatchConnectionCode() async throws -> String {
+        guard remoteControlEnabled, let api = remoteControlAPI else {
+            throw RemoteControlError.server("请先开启远程连接并等待设备注册。")
+        }
+        let server = try remoteServerConfiguration.validatedURL().absoluteString
+        let sharingKey = watchSharingKey
+        let link = try await api.createWatchLink()
+        remoteDefaults.set(true, forKey: sharingKey)
+        objectWillChange.send()
+        if remoteControlAPI === api, remoteControlEnabled {
+            refreshRemoteUsageIfNeeded()
+            _ = try? await api.heartbeat(makeRemoteHeartbeat(ready: true))
+        }
+        guard let controlToken = link.controlToken, !controlToken.isEmpty else {
+            throw RemoteControlError.server("请先更新远程服务，以启用 App 扫码控制绑定。")
+        }
+        let code = WatchConnectionCode(version: 2, server: server, deviceId: link.deviceId, token: link.token, expiresAt: link.expiresAt, controlToken: controlToken)
+        return "CCA1." + (try JSONEncoder().encode(code)).base64EncodedString()
+    }
+    func revokeWatchConnection() async throws {
+        guard let api = remoteControlAPI else { throw RemoteControlError.server("请先连接远程服务。") }
+        let sharingKey = watchSharingKey
+        try await api.revokeWatchLink()
+        remoteDefaults.set(false, forKey: sharingKey)
+        objectWillChange.send()
+    }
+    private func makeWatchSnapshot(_ snapshots: [RemoteThreadSnapshot]) -> CloudCodexWatchSnapshot? {
+        guard watchSharingEnabled else { return nil }
+        let usage = remoteUsageSnapshot
+        let bucket = usage?.buckets.first(where: { $0.id == "codex" }) ?? usage?.buckets.first
+        let five = bucket?.windows.first(where: { $0.windowDurationMins == 300 })
+        let week = bucket?.windows.first(where: { $0.windowDurationMins == 10080 })
+        let waiting = Set(userInputRequests.map(\.threadID) + computerUseApprovalRequests.map(\.threadID))
+        let sorted = snapshots.sorted {
+            let l = $0.status == "active" || waiting.contains($0.id)
+            let r = $1.status == "active" || waiting.contains($1.id)
+            if l != r { return l }
+            return ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0)
+        }
+        let tasks = sorted.prefix(20).map { thread in
+            let outcome = threadOutcomes[thread.id]
+            let status: String
+            if waiting.contains(thread.id) { status = "待处理" }
+            else if thread.status == "active" { status = "运行中" }
+            else if outcome == .completed { status = "已完成" }
+            else if outcome == .failed { status = "失败" }
+            else if outcome == .interrupted { status = "已中止" }
+            else { status = thread.status == "idle" ? "空闲" : "未知" }
+            return CloudCodexWatchSnapshot.TaskStatus(id: thread.id, title: String(thread.title.prefix(100)), status: status)
+        }
+        var snapshot = CloudCodexWatchSnapshot(version: 1, capturedAt: Date().timeIntervalSince1970,
+                     quotaCapturedAt: usage?.available == true ? usage?.capturedAt : nil,
+                     plan: usage?.plan.map(CodexPlanName.displayName), subscriptionPeriodEnd: usage?.subscriptionPeriodEnd,
+                     fiveHourRemaining: five?.usedPercent.map { max(0, min(100, 100 - $0)) },
+                     weeklyRemaining: week?.usedPercent.map { max(0, min(100, 100 - $0)) },
+                     fiveHourResetsAt: five?.resetsAt, weeklyResetsAt: week?.resetsAt,
+                     tasks: tasks, runningCount: snapshots.filter { $0.status == "active" && !waiting.contains($0.id) }.count,
+                     waitingCount: snapshots.filter { waiting.contains($0.id) }.count)
+        snapshot.applyAccountMetrics(usage)
+        return snapshot
+    }
+
     func makeRemoteHeartbeat(ready: Bool) -> RemoteHeartbeatBody {
         let workspaces = folderCatalog.prefix(200).map {
             RemoteWorkspaceSnapshot(path: $0.path, name: $0.name)
@@ -4040,7 +4107,8 @@ final class AppModel: ObservableObject {
             defaultModel: selectedModelCapabilities?.model,
             defaultEffort: selectedEffort,
             systemMetrics: remoteControlPaired && systemMetrics.snapshot.hasValues ? systemMetrics.snapshot : nil,
-            connectionHealth: remoteControlPaired ? connectionHealth.remoteSnapshot : nil
+            connectionHealth: remoteControlPaired ? connectionHealth.remoteSnapshot : nil,
+            watchSnapshot: makeWatchSnapshot(snapshots)
         )
     }
 
@@ -4884,9 +4952,10 @@ final class AppModel: ObservableObject {
                    let thread = params["threadId"] as? String,
                    let turn = params["turnId"] as? String,
                    let record = updated.record(thread: thread, turn: turn) {
-                    let previous = turnTokenUsage.record(thread: thread, turn: turn)?.tokens.total ?? 0
-                    let delta = max(0, record.tokens.total - previous)
-                    quotaCycleHistory.addTokens(delta,
+                    let previous = turnTokenUsage.record(thread: thread, turn: turn)?.tokens ?? .init()
+                    let breakdown = record.tokens.subtracting(previous)
+                    let delta = breakdown.total
+                    quotaCycleHistory.addTokens(delta, input: breakdown.input, output: breakdown.output,
                         missingSince: turnTokenUsage.missingDeltaBaseline(params, credited: delta))
                     saveQuotaCycleHistory()
                 }

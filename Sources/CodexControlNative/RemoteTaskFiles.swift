@@ -96,15 +96,16 @@ enum RemoteTaskFiles {
 actor RemoteFileExporter {
     private var cache: [String: String] = [:]
     func rewrite(_ text: String, workspace: String, scope: String, cacheScope: String? = nil, api: RemoteControlAPI) async -> String {
-        guard !workspace.isEmpty, let regex = try? NSRegularExpression(pattern: #"(?<!!)\[[^\]\n]+\]\(<?((?:[^\s<>()]|\([^\s()]*\))+)>?(?:\s+\"[^\"]*\")?\)"#) else { return text }
+        guard !workspace.isEmpty, let regex = try? NSRegularExpression(pattern: #"\[[^\]\n]*\]\((?:<([^>\n]+)>|((?:[^\s<>()]|\([^\s()]*\))+))(?:\s+\"[^\"]*\")?\)"#) else { return text }
         var result = text
         let code = try? NSRegularExpression(pattern: #"(?s)```.*?(?:```|\z)|~~~.*?(?:~~~|\z)|`[^`\n]*`"#)
         let codeRanges = code?.matches(in: text, range: NSRange(text.startIndex..., in: text)).map(\.range) ?? []
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         var count = 0
         for match in matches.reversed() {
+            let pathGroup = match.range(at: 1).location != NSNotFound ? 1 : 2
             guard !codeRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }),
-                  count < 8, let range = Range(match.range(at: 1), in: text),
+                  count < 8, let range = Range(match.range(at: pathGroup), in: text),
                   let url = RemoteTaskFiles.exportURL(String(text[range]), workspace: workspace) else { continue }
             count += 1
             do {
@@ -120,7 +121,7 @@ actor RemoteFileExporter {
                     cache[key] = id
                 }
                 // Reverse replacement keeps all original NSRange offsets valid.
-                if let destination = Range(match.range(at: 1), in: result) {
+                if let destination = Range(match.range(at: pathGroup), in: result) {
                     result.replaceSubrange(destination, with: "cloudcodex-file:" + id)
                 }
             } catch { /* Keep the original path visible; never claim a failed upload is downloadable. */ }
