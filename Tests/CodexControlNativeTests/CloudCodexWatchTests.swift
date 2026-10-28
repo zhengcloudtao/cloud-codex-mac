@@ -3,6 +3,28 @@ import CoreImage
 @testable import CloudCodex
 
 final class CloudCodexWatchTests: XCTestCase {
+    func testHardwareBindingUsesReadOnlyLegacyFormat() throws {
+        let fixture = WatchConnectionCode(version: 1, server: "https://relay.example.invalid/prefix",
+            deviceId: "fixture-computer", token: String(repeating: "x", count: 43), expiresAt: 2000000000)
+        let code = "CCW1." + (try JSONEncoder().encode(fixture)).base64EncodedString()
+        let decoded = try XCTUnwrap(Data(base64Encoded: String(code.dropFirst(5))))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: decoded) as? [String: Any])
+        XCTAssertEqual(json["version"] as? Int, 1)
+        XCTAssertEqual(json["deviceId"] as? String, "fixture-computer")
+        XCTAssertNil(json["controlToken"])
+    }
+
+    @MainActor func testHardwareOptInPublishesSnapshotWithoutWatch() throws {
+        let suite = "CloudCodexHardwareTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(remoteDefaults: defaults)
+        XCTAssertNil(model.makeRemoteHeartbeat(ready: true).watchSnapshot)
+        defaults.set(true, forKey: "CloudCodex.hardwareSharing.v1.")
+        XCTAssertNotNil(model.makeRemoteHeartbeat(ready: true).watchSnapshot)
+        XCTAssertFalse(model.watchSharingEnabled)
+    }
+
     func testWatchBindingQRCodeRoundTrip() throws {
         let fixture = WatchConnectionCode(version: 2, server: "https://relay.example.invalid/prefix", deviceId: "fixture-mac", token: String(repeating: "x", count: 43), expiresAt: 2000000000, controlToken: String(repeating: "c", count: 43))
         let payload = "CCA1." + (try JSONEncoder().encode(fixture)).base64EncodedString()

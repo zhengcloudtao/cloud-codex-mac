@@ -90,6 +90,8 @@ final class AppModel: ObservableObject {
     @Published var folderCatalog: [WorkspaceFolder] = []
     @Published var selectedFolder: String?
     @Published var selectedThreadID: String?
+    @Published private(set) var selectedThreadTurnCount: Int?
+    private var turnCountTask: Task<Void, Never>?
     @Published var messages: [ChatMessage] = []
     @Published var composerText = ""
     @Published private(set) var composerPredictions: [ComposerPredictionSource: ComposerPredictionState] = [:]
@@ -566,6 +568,7 @@ final class AppModel: ObservableObject {
             try await checkCreditUsageBeforeSubmission()
             if !edit.historyWasReverted {
                 try await client.revertThread(edit.threadID, beforeTurnID: edit.turnID)
+                refreshSelectedTurnCount()
                 edit.historyWasReverted = true
                 interruptedMessageEdit = edit
                 storeMessages(
@@ -937,6 +940,8 @@ final class AppModel: ObservableObject {
         }
         turnProgressHintTask?.cancel()
         selectedThreadMetadataTask?.cancel()
+        turnCountTask?.cancel()
+        selectedThreadTurnCount = nil
         selectionGeneration += 1
     }
     /// Local app-server turns must be tracked by thread. A single global
@@ -2279,6 +2284,23 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func refreshSelectedTurnCount() {
+        turnCountTask?.cancel()
+        guard let id = selectedThreadID else { selectedThreadTurnCount = nil; return }
+        let generation = selectionGeneration
+        turnCountTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let count = try await client.countThreadTurns(id)
+                guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }
+                selectedThreadTurnCount = count
+            } catch {
+                guard !Task.isCancelled, generation == selectionGeneration, selectedThreadID == id else { return }
+                selectedThreadTurnCount = nil
+            }
+        }
+    }
+
     func selectThread(_ id: String?) {
         guard !isSwitchingModelProvider else { return }
         if let id { markConversationRead(id) }
@@ -2299,6 +2321,8 @@ final class AppModel: ObservableObject {
         threadOwnershipNotice = nil
         threadInputAvailability = id == nil ? .available : .checking
         selectedThreadID = id
+        selectedThreadTurnCount = nil
+        refreshSelectedTurnCount()
         messages = id.flatMap { messagesByThread[$0] } ?? []
         // Publish loading together with the new selection so an uncached
         // conversation never renders the empty "开始对话" state for one frame.
@@ -2656,6 +2680,7 @@ final class AppModel: ObservableObject {
         do {
             let thread = try await client.readThreadState(threadID)
             guard selectedThreadID == threadID else { return }
+            if client.shouldRefreshActivity(thread) { refreshSelectedTurnCount() }
             let snapshot: ThreadActivitySnapshot
             if thread.status == "active" || isSending || isExternalThreadProcessing || client.shouldRefreshActivity(thread) {
                 snapshot = try await client.readLatestThreadActivity(
@@ -3432,6 +3457,7 @@ final class AppModel: ObservableObject {
             threadSummaries[thread.id] = thread
             selectedFolder = folder
             selectedThreadID = thread.id
+            selectedThreadTurnCount = 0
             messages = []
             showingNewThread = false
             newThreadPrompt = ""
@@ -3968,7 +3994,7 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshRemoteUsageIfNeeded() {
-        guard (remoteControlPaired || watchSharingEnabled), remoteUsageTask == nil,
+        guard (remoteControlPaired || watchSharingEnabled || hardwareSharingEnabled), remoteUsageTask == nil,
               remoteUsageLastAttempt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true else { return }
         remoteUsageLastAttempt = Date()
         // Independent request: slow quota reads must not block device heartbeats
@@ -4034,6 +4060,36 @@ final class AppModel: ObservableObject {
         let code = WatchConnectionCode(version: 2, server: server, deviceId: link.deviceId, token: link.token, expiresAt: link.expiresAt, controlToken: controlToken)
         return "CCA1." + (try JSONEncoder().encode(code)).base64EncodedString()
     }
+    private var hardwareSharingKey: String {
+        "CloudCodex.hardwareSharing.v1." + ((try? remoteServerConfiguration.validatedURL()).map(RemoteServerConfiguration.scope) ?? "invalid")
+    }
+    var hardwareSharingEnabled: Bool { remoteDefaults.bool(forKey: hardwareSharingKey) }
+
+    func createHardwareConnectionCode() async throws -> String {
+        guard remoteControlEnabled, let api = remoteControlAPI else {
+            throw RemoteControlError.server("请先开启远程连接并等待设备注册。")
+        }
+        let server = try remoteServerConfiguration.validatedURL().absoluteString
+        let sharingKey = hardwareSharingKey
+        let link = try await api.createHardwareLink()
+        let code = WatchConnectionCode(version: 1, server: server, deviceId: link.deviceId,
+                                       token: link.token, expiresAt: link.expiresAt)
+        let result = "CCW1." + (try JSONEncoder().encode(code)).base64EncodedString()
+        remoteDefaults.set(true, forKey: sharingKey)
+        objectWillChange.send()
+        if remoteControlAPI === api, remoteControlEnabled {
+            refreshRemoteUsageIfNeeded()
+            _ = try? await api.heartbeat(makeRemoteHeartbeat(ready: true))
+        }
+        return result
+    }
+    func revokeHardwareConnection() async throws {
+        guard let api = remoteControlAPI else { throw RemoteControlError.server("请先连接远程服务。") }
+        let sharingKey = hardwareSharingKey
+        try await api.revokeHardwareLink()
+        remoteDefaults.set(false, forKey: sharingKey)
+        objectWillChange.send()
+    }
     func revokeWatchConnection() async throws {
         guard let api = remoteControlAPI else { throw RemoteControlError.server("请先连接远程服务。") }
         let sharingKey = watchSharingKey
@@ -4042,7 +4098,7 @@ final class AppModel: ObservableObject {
         objectWillChange.send()
     }
     private func makeWatchSnapshot(_ snapshots: [RemoteThreadSnapshot]) -> CloudCodexWatchSnapshot? {
-        guard watchSharingEnabled else { return nil }
+        guard watchSharingEnabled || hardwareSharingEnabled else { return nil }
         let usage = remoteUsageSnapshot
         let bucket = usage?.buckets.first(where: { $0.id == "codex" }) ?? usage?.buckets.first
         let five = bucket?.windows.first(where: { $0.windowDurationMins == 300 })
@@ -4943,6 +4999,7 @@ final class AppModel: ObservableObject {
     func handleEvent(_ method: String, _ params: [String: Any]) {
         if ["turn/started", "turn/completed"].contains(method), let thread = params["threadId"] as? String {
             outcomeEventRevisions[thread, default: 0] += 1
+            if thread == selectedThreadID { refreshSelectedTurnCount() }
         }
         if method == "thread/tokenUsage/updated" {
             var updated = turnTokenUsage

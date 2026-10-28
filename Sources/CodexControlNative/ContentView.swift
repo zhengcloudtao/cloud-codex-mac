@@ -1194,7 +1194,7 @@ struct ContentView: View {
                 NewThreadWorkspace()
             } else if let thread = model.selectedThread {
                 VStack(spacing: 0) {
-                    ConversationHeader(thread: thread)
+                    ConversationHeader(thread: thread, turnCount: model.selectedThreadTurnCount)
                         .zIndex(2)
                     Divider()
                         .zIndex(2)
@@ -2406,6 +2406,7 @@ private struct ThreadStatusLight: View {
 
 private struct ConversationHeader: View {
     let thread: CodexThread
+    let turnCount: Int?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -2427,6 +2428,13 @@ private struct ConversationHeader: View {
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
+            if let turnCount {
+                Text("\(turnCount) 轮")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .help("会话中已开始的对话轮数，包含进行中和中断的轮次")
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)

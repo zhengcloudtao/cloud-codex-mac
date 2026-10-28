@@ -554,6 +554,24 @@ final class AppServerClient {
         return (thread, messages)
     }
 
+    /// Count persisted conversation turns independently of the bounded timeline.
+    func countThreadTurns(_ id: String) async throws -> Int {
+        var cursor: String?
+        var seen: Set<String> = []
+        var count = 0
+        while true {
+            try Task.checkCancellation()
+            var params: JSON = ["threadId": id, "limit": 100, "itemsView": "summary", "sortDirection": "desc"]
+            if let cursor { params["cursor"] = cursor }
+            let page = try await request("thread/turns/list", params: params)
+            guard let turns = page["data"] as? [JSON] else { throw CodexClientError.invalidResponse }
+            count += turns.count
+            guard let next = page["nextCursor"] as? String, !next.isEmpty else { return count }
+            guard seen.insert(next).inserted else { throw CodexClientError.invalidResponse }
+            cursor = next
+        }
+    }
+
     /// Read-only reconciliation of exact persisted turns, never resume/start/interrupt.
     func readRemoteRecovery(_ tasks: [RemoteRecoveryTask]) async throws -> [String: RemoteTaskStatusBody] {
         guard let first = tasks.first else { return [:] }

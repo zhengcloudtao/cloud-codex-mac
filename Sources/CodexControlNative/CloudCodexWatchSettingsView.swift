@@ -14,7 +14,13 @@ struct CloudCodexWatchSettingsView: View {
     @State private var busy = false
     @State private var message: String?
     @State private var connectionCode: String?
+    @State private var hardwareCode: String?
+    @State private var hardwareMessage: String?
+    @State private var hardwareBusy = false
+    @State private var confirmHardwareRotation = false
+    @State private var confirmHardwareRevoke = false
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
         GroupBox("App 与手表 · 扫码绑定") {
             VStack(alignment: .leading, spacing: 10) {
                 Text("扫码后授权 iPhone 查看会话、提交任务及操作本电脑，Apple Watch 仅可查看状态。电脑需保持运行并开启远程连接。")
@@ -59,5 +65,61 @@ struct CloudCodexWatchSettingsView: View {
         }
         .onDisappear { connectionCode = nil }
         .onChange(of: model.watchSharingEnabled) { _, enabled in if !enabled { connectionCode = nil } }
+        GroupBox("硬件状态屏 · 独立只读绑定") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("用于硬件显示套餐、额度和任务状态，不提供任务控制权限；与 App 和手表绑定相互独立。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button(model.hardwareSharingEnabled ? "重新生成硬件连接码" : "生成硬件连接码") {
+                        if model.hardwareSharingEnabled { confirmHardwareRotation = true }
+                        else { generateHardwareCode() }
+                    }.disabled(hardwareBusy || !model.remoteControlEnabled)
+                    if model.hardwareSharingEnabled {
+                        Button("撤销硬件绑定", role: .destructive) { confirmHardwareRevoke = true }
+                            .disabled(hardwareBusy || !model.remoteControlEnabled)
+                    }
+                    if hardwareBusy { ProgressView().controlSize(.small) }
+                }
+                if let hardwareCode {
+                    Button("复制硬件连接码") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(hardwareCode, forType: .string)
+                        hardwareMessage = "已复制。在硬件配网页面粘贴连接码。"
+                    }
+                }
+                if let hardwareMessage { Text(hardwareMessage).font(.caption).textSelection(.enabled) }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        }
+        .alert("重新生成硬件连接码？", isPresented: $confirmHardwareRotation) {
+            Button("重新生成", role: .destructive) { generateHardwareCode() }
+            Button("取消", role: .cancel) { }
+        } message: { Text("已有硬件连接码将失效，需要重新配网绑定；App 和手表绑定不受影响。") }
+        .alert("撤销硬件绑定？", isPresented: $confirmHardwareRevoke) {
+            Button("撤销绑定", role: .destructive) { revokeHardwareCode() }
+            Button("取消", role: .cancel) { }
+        } message: { Text("硬件将无法继续读取状态；App 和手表绑定不受影响。") }
+        }
+        .onDisappear { hardwareCode = nil }
+    }
+    private func generateHardwareCode() {
+        hardwareBusy = true
+        Task {
+            defer { hardwareBusy = false }
+            do {
+                hardwareCode = try await model.createHardwareConnectionCode()
+                hardwareMessage = "硬件连接码已生成，有效期 90 天。复制到硬件配网页面；App 和手表绑定不受影响。"
+            } catch { hardwareMessage = error.localizedDescription }
+        }
+    }
+    private func revokeHardwareCode() {
+        hardwareBusy = true
+        Task {
+            defer { hardwareBusy = false }
+            do {
+                try await model.revokeHardwareConnection()
+                hardwareCode = nil
+                hardwareMessage = "已撤销硬件绑定，App 和手表不受影响。"
+            } catch { hardwareMessage = error.localizedDescription }
+        }
     }
 }

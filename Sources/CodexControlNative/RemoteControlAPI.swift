@@ -417,6 +417,14 @@ extension RemoteControlAPI {
     func createWatchLink() async throws -> CloudCodexWatchLink {
         try await request(path: "/api/cloud-codex/agent/app-link", method: "POST", bodyData: nil)
     }
+    func createHardwareLink() async throws -> CloudCodexWatchLink {
+        try await request(path: "/api/cloud-codex/agent/hardware-link", method: "POST", bodyData: nil)
+    }
+    func revokeHardwareLink() async throws {
+        let data = try await perform(path: "/api/cloud-codex/agent/hardware-link", method: "DELETE", bodyData: nil)
+        let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
+    }
     func revokeWatchLink() async throws {
         let data = try await perform(path: "/api/cloud-codex/agent/watch-link", method: "DELETE", bodyData: nil)
         let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
