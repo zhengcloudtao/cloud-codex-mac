@@ -10,17 +10,17 @@ final class RemoteVoiceTranscriber {
 
     func transcribe(_ audio: Data) async throws -> String {
         guard Self.isSupportedRecording(audio) else {
-            throw RemoteControlError.server("录音格式或大小无效")
+            throw RemoteControlError.server("[VOICE_FORMAT] 录音格式或大小无效")
         }
         let authorization = await withCheckedContinuation { callback in
             SFSpeechRecognizer.requestAuthorization { callback.resume(returning: $0) }
         }
         try Task.checkCancellation()
         guard authorization == .authorized else {
-            throw RemoteControlError.server("请在电脑允许 CloudCodex 使用语音识别")
+            throw RemoteControlError.server("[VOICE_PERMISSION] 请在电脑允许 CloudCodex 使用语音识别")
         }
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")), recognizer.isAvailable else {
-            throw RemoteControlError.server("电脑语音识别暂不可用，请稍后重新录音")
+            throw RemoteControlError.server("[VOICE_UNAVAILABLE] 电脑语音识别暂不可用，请稍后重新录音")
         }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -41,20 +41,31 @@ final class RemoteVoiceTranscriber {
                     Task { @MainActor in
                         if let result, result.isFinal {
                             let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
-                            self?.finish(text.isEmpty ? .failure(RemoteControlError.server("未识别到内容，请重新录音")) : .success(text))
-                        } else if error != nil {
-                            self?.finish(.failure(RemoteControlError.server("语音识别失败，请重新录音")))
+                            self?.finish(text.isEmpty ? .failure(RemoteControlError.server("[VOICE_EMPTY] 未识别到内容，请重新录音")) : .success(text))
+                        } else if let error {
+                            self?.finish(.failure(RemoteControlError.server(Self.failureMessage(error))))
                         }
                     }
                 }
                 timeout = Task { [weak self] in
                     do { try await Task.sleep(nanoseconds: 45_000_000_000) } catch { return }
-                    self?.finish(.failure(RemoteControlError.server("语音识别超时，请重新录音")))
+                    self?.finish(.failure(RemoteControlError.server("[VOICE_TIMEOUT] 识别超过45秒，请检查电脑网络后重录")))
                 }
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.finish(.failure(CancellationError())) }
         }
+    }
+    /// Keep the diagnostic code and human-readable cause, without forwarding userInfo or recording paths.
+    nonisolated static func failureMessage(_ error: Error) -> String {
+        let failure = error as NSError
+        let domain = String(failure.domain.filter { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }.prefix(80))
+        var reason = failure.localizedFailureReason ?? failure.localizedDescription
+        for pattern in [#"https?://[^\s]+"#, #"(?:file://)?/(?:Users|private|var|tmp)/[^\s]+"#] {
+            reason = reason.replacingOccurrences(of: pattern, with: "[已隐藏地址]", options: .regularExpression)
+        }
+        reason = String(reason.replacingOccurrences(of: "\n", with: " ").prefix(300))
+        return "[\(domain):\(failure.code)]\n\(reason)\n请检查电脑语音识别与网络后重新录音。"
     }
     nonisolated static func isSupportedRecording(_ data: Data) -> Bool {
         guard data.count >= 3244, data.count <= 960044, data.count % 2 == 0 else { return false }

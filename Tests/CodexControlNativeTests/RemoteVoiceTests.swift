@@ -21,6 +21,15 @@ final class RemoteVoiceTests: XCTestCase {
         XCTAssertFalse(RemoteVoiceTranscriber.isSupportedRecording(valid.dropLast()))
         XCTAssertFalse(RemoteVoiceTranscriber.isSupportedRecording(Data(repeating: 0, count: 960045)))
     }
+    func testRecognitionFailurePreservesCodeAndReasonWithoutPrivatePath() {
+        let error = NSError(domain: "SpeechTest", code: 42, userInfo: [NSLocalizedDescriptionKey: "无法读取 /Users/test/recording.wav，请重录"])
+        let message = RemoteVoiceTranscriber.failureMessage(error)
+        XCTAssertTrue(message.contains("[SpeechTest:42]"))
+        XCTAssertTrue(message.contains("无法读取"))
+        XCTAssertFalse(message.contains("/Users/test"))
+        let detail = NSError(domain: "SpeechTest", code: 43, userInfo: [NSLocalizedFailureReasonErrorKey: "服务暂不可用"])
+        XCTAssertTrue(RemoteVoiceTranscriber.failureMessage(detail).contains("服务暂不可用"))
+    }
     func testHardwareControlCodeCarriesSeparateTokens() throws {
         let code = WatchConnectionCode(version: 2, server: "https://relay.example.invalid", deviceId: "fixture", token: String(repeating: "r", count: 43), expiresAt: 2_000_000_000, controlToken: String(repeating: "c",count:43))
         let decoded = try JSONDecoder().decode(WatchConnectionCode.self, from: JSONEncoder().encode(code))
