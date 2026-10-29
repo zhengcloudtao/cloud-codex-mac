@@ -969,6 +969,7 @@ final class AppModel: ObservableObject {
     }
     private var remoteControlLoopTask: Task<Void, Never>?
     private var remoteHistoryTask: Task<Void, Never>?
+    private var remoteVoiceTask: Task<Void, Never>?
     private var remoteUsageTask: Task<Void, Never>?
     private var remoteRecoveryTask: Task<Void, Never>?
     private var remoteRecoveryLastAttempt: Date?
@@ -3620,6 +3621,7 @@ final class AppModel: ObservableObject {
             startRemoteControlIfNeeded()
         } else {
             remoteControlLoopTask?.cancel()
+            remoteVoiceTask?.cancel()
             remoteControlLoopTask = nil
             remoteUsageTask?.cancel()
             remoteUsageTask = nil
@@ -3801,6 +3803,27 @@ final class AppModel: ObservableObject {
             // Disabling remote control can happen while heartbeat is in flight.
             // Do not dispatch a new unstructured claim worker after that await.
             guard !Task.isCancelled, remoteControlEnabled else { break }
+            if remoteControlPaired, remoteVoiceTask == nil {
+                remoteVoiceTask = Task { [weak self] in
+                    guard let self else { return }
+                    defer { self.remoteVoiceTask = nil }
+                    do {
+                        guard let draft = try await api.nextVoiceDraft() else { return }
+                        guard self.remoteControlEnabled, self.remoteControlAPI === api, !Task.isCancelled else { return }
+                        var transcript = "", message = ""
+                        do {
+                            guard self.makeRemoteHeartbeat(ready: true).workspaces.contains(where: { $0.path == draft.workspace }) else {
+                                throw RemoteControlError.server("工作区授权已撤销，请重新选择")
+                            }
+                            let audio = try await api.voiceAudio(draft.id)
+                            transcript = try await RemoteVoiceTranscriber().transcribe(audio)
+                        } catch is CancellationError { return }
+                        catch { message = error.localizedDescription }
+                        guard self.remoteControlEnabled, self.remoteControlAPI === api, !Task.isCancelled else { return }
+                        try await api.finishVoice(draft.id, transcript: transcript, error: message)
+                    } catch { /* Old relays have no voice surface; do not interrupt normal tasks. */ }
+                }
+            }
             if remoteControlPaired, remoteHistoryTask == nil {
                 remoteHistoryTask = Task { [weak self] in
                 guard let self else { return }
@@ -4072,9 +4095,12 @@ final class AppModel: ObservableObject {
         let server = try remoteServerConfiguration.validatedURL().absoluteString
         let sharingKey = hardwareSharingKey
         let link = try await api.createHardwareLink()
-        let code = WatchConnectionCode(version: 1, server: server, deviceId: link.deviceId,
-                                       token: link.token, expiresAt: link.expiresAt)
-        let result = "CCW1." + (try JSONEncoder().encode(code)).base64EncodedString()
+        guard let controlToken = link.controlToken, controlToken.count == 43, controlToken != link.token else {
+            throw RemoteControlError.server("请先升级远程服务以支持硬件任务控制")
+        }
+        let code = WatchConnectionCode(version: 2, server: server, deviceId: link.deviceId,
+                                       token: link.token, expiresAt: link.expiresAt, controlToken: controlToken)
+        let result = "CCH2." + (try JSONEncoder().encode(code)).base64EncodedString()
         remoteDefaults.set(true, forKey: sharingKey)
         objectWillChange.send()
         if remoteControlAPI === api, remoteControlEnabled {

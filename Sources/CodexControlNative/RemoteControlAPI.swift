@@ -43,6 +43,7 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     var watchSnapshot: CloudCodexWatchSnapshot? = nil
     var supportsFavorites: Bool = true
     var supportsFiles: Bool = true
+    var supportsVoice: Bool = true
 }
 
 struct RemoteTask: Codable, Equatable {
@@ -418,7 +419,7 @@ extension RemoteControlAPI {
         try await request(path: "/api/cloud-codex/agent/app-link", method: "POST", bodyData: nil)
     }
     func createHardwareLink() async throws -> CloudCodexWatchLink {
-        try await request(path: "/api/cloud-codex/agent/hardware-link", method: "POST", bodyData: nil)
+        try await request(path: "/api/cloud-codex/agent/hardware-control-link", method: "POST", bodyData: nil)
     }
     func revokeHardwareLink() async throws {
         let data = try await perform(path: "/api/cloud-codex/agent/hardware-link", method: "DELETE", bodyData: nil)
@@ -429,5 +430,29 @@ extension RemoteControlAPI {
         let data = try await perform(path: "/api/cloud-codex/agent/watch-link", method: "DELETE", bodyData: nil)
         let envelope = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
         guard envelope.status == 0 else { throw RemoteControlError.server(envelope.msg) }
+    }
+}
+
+struct RemoteVoiceDraft: Decodable {
+    let id: String
+    let workspace: String
+    let threadId: String
+}
+extension RemoteControlAPI {
+    func nextVoiceDraft() async throws -> RemoteVoiceDraft? {
+        try await request(path: "/api/cloud-codex/agent/voice/next", method: "GET", bodyData: nil)
+    }
+    func voiceAudio(_ id: String) async throws -> Data {
+        guard UUID(uuidString: id) != nil else { throw RemoteControlError.invalidServerResponse }
+        let audio = try await perform(path: "/api/cloud-codex/agent/voice/\(id)/audio", method: "GET", bodyData: nil)
+        guard audio.count <= 960044 else { throw RemoteControlError.invalidServerResponse }
+        return audio
+    }
+    func finishVoice(_ id: String, transcript: String, error: String) async throws {
+        guard UUID(uuidString: id) != nil else { throw RemoteControlError.invalidServerResponse }
+        let data = try await perform(path: "/api/cloud-codex/agent/voice/\(id)", method: "POST",
+            bodyData: JSONSerialization.data(withJSONObject: ["transcript": transcript, "error": error]))
+        let response = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard response.status == 0 else { throw RemoteControlError.server(response.msg) }
     }
 }

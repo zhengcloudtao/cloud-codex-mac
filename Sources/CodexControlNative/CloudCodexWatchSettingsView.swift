@@ -65,9 +65,9 @@ struct CloudCodexWatchSettingsView: View {
         }
         .onDisappear { connectionCode = nil }
         .onChange(of: model.watchSharingEnabled) { _, enabled in if !enabled { connectionCode = nil } }
-        GroupBox("硬件状态屏 · 独立只读绑定") {
+        GroupBox("硬件双屏 · 独立控制绑定") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("用于硬件显示套餐、额度和任务状态，不提供任务控制权限；与 App 和手表绑定相互独立。")
+                Text("允许硬件查看工作区、会话及任务，录音交由本电脑识别，硬件确认文字后才提交任务。与 App 和手表绑定相互独立。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(model.hardwareSharingEnabled ? "重新生成硬件连接码" : "生成硬件连接码") {
@@ -97,7 +97,7 @@ struct CloudCodexWatchSettingsView: View {
         .alert("撤销硬件绑定？", isPresented: $confirmHardwareRevoke) {
             Button("撤销绑定", role: .destructive) { revokeHardwareCode() }
             Button("取消", role: .cancel) { }
-        } message: { Text("硬件将无法继续读取状态；App 和手表绑定不受影响。") }
+        } message: { Text("硬件将无法读取状态或提交任务；App 和手表绑定不受影响。") }
         }
         .onDisappear { hardwareCode = nil }
     }
