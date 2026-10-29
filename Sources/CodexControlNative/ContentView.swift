@@ -364,6 +364,7 @@ struct ContentView: View {
     @State private var commandInactivityTimeoutInputError: String?
     @FocusState private var isCommandInactivityTimeoutFocused: Bool
     @AppStorage(AppearancePreference.storageKey) private var appearancePreference: AppearancePreference = .system
+    @AppStorage(StartupConversationPage.storageKey) private var startupConversationPage: StartupConversationPage = .recent
     @AppStorage(BackgroundPreference.imagePathKey) private var backgroundImagePath = ""
     @AppStorage(BackgroundScope.storageKey) private var backgroundScope: BackgroundScope = .conversation
     @AppStorage(BackgroundPreference.opacityKey) private var backgroundOpacity = BackgroundPreference.defaultOpacity
@@ -394,6 +395,9 @@ struct ContentView: View {
     ) {
         _columnVisibility = State(initialValue: initialColumnVisibility)
         _updateController = ObservedObject(wrappedValue: updateController)
+        let startupPage = StartupConversationPage.load()
+        _showingFavoriteThreads = State(initialValue: startupPage == .favorites)
+        _showingUnreadThreads = State(initialValue: startupPage == .unread)
     }
 
     var body: some View {
@@ -1176,6 +1180,13 @@ struct ContentView: View {
         .task(id: showingUnreadThreads) {
             if showingUnreadThreads { await model.refreshUnreadThreads() }
         }
+        .onChange(of: model.isLoading) { _, isLoading in
+            // The initial unread-page task can run before the server connects.
+            // Retry after the startup thread list has finished loading.
+            if showingUnreadThreads, !isLoading {
+                Task { await model.refreshUnreadThreads() }
+            }
+        }
         .onChange(of: model.unreadCompletions.unread) { oldValue, newValue in
             if showingUnreadThreads, !newValue.subtracting(oldValue).isEmpty {
                 Task { await model.refreshUnreadThreads() }
@@ -1479,6 +1490,21 @@ struct ContentView: View {
 
     private var conversationDisplaySettingsSection: some View {
         VStack(alignment: .leading, spacing: 18) {
+            GroupBox("启动页面") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("启动时默认显示", selection: $startupConversationPage) {
+                        ForEach(StartupConversationPage.allCases) { page in
+                            Text(page.title).tag(page)
+                        }
+                    }
+                    Text("设置自动保存，下次启动时生效。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+            }
+
             GroupBox("会话列表") {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("显示会话摘要", isOn: $showConversationPreview)
