@@ -3,7 +3,22 @@ import Foundation
 /// Snapshots are not a replacement for the live event journal: summary reads
 /// may omit output and can lag the events already received by this client.
 enum ConversationHistory {
-    static func merge(snapshot: [ChatMessage], cached: [ChatMessage]) -> [ChatMessage] {
+    static func merge(
+        snapshot: [ChatMessage], cached: [ChatMessage], preservingEditedMessage: ChatMessage? = nil
+    ) -> [ChatMessage] {
+        // Confirming a local question changes its server ID. Keep the row's
+        // identity while its native editor owns focus, selection and IME state.
+        // The next refresh after editing ends can adopt the confirmed item.
+        let snapshot = snapshot.map { incoming in
+            if let edited = preservingEditedMessage,
+               edited.id.hasPrefix("local-"), !edited.id.hasPrefix("local-steer-"),
+               edited.turnID != nil, incoming.role == .user,
+               incoming.turnID == edited.turnID, incoming.text == edited.text,
+               incoming.attachments == edited.attachments {
+                return edited
+            }
+            return incoming
+        }
         // A local user bubble becomes the server item, not a second question.
         let confirmedUsers = snapshot.filter { $0.role == .user && $0.turnID != nil }
         var matchedSteerIDs: Set<String> = []

@@ -54,6 +54,56 @@ final class ClipboardAttachmentTests: XCTestCase {
         XCTAssertEqual(model.attachments.map(\.url), [imageURL])
     }
 
+    func testExcelFileTakesPriorityOverClipboardPreviewAndKeepsOriginalPath() throws {
+        let model = AppModel()
+        let pasteboard = NSPasteboard(name: .init("CloudCodexTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let fileURL = URL(fileURLWithPath: "/tmp/测试报表 2026.xlsx")
+        let item = NSPasteboardItem()
+        XCTAssertTrue(item.setString(fileURL.absoluteString, forType: .fileURL))
+        let bitmap = try XCTUnwrap(makeImage().tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)))
+        let pngData = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        XCTAssertTrue(item.setData(pngData, forType: .png))
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects([item]))
+
+        XCTAssertTrue(model.pasteImages(from: pasteboard))
+        XCTAssertTrue(model.pasteImages(from: pasteboard))
+        XCTAssertEqual(model.attachments.map(\.url), [fileURL])
+        let attachment = try XCTUnwrap(model.attachments.first)
+        XCTAssertFalse(attachment.isImage)
+        XCTAssertEqual(attachment.userInput["type"] as? String, "mention")
+        XCTAssertEqual(attachment.userInput["name"] as? String, fileURL.lastPathComponent)
+        XCTAssertEqual(attachment.userInput["path"] as? String, fileURL.path)
+    }
+
+    func testMixedCopiedFilesKeepAllOriginalURLs() {
+        let model = AppModel()
+        let pasteboard = NSPasteboard(name: .init("CloudCodexTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let urls = ["/tmp/report.xls", "/tmp/document.pdf", "/tmp/photo.png"].map { URL(fileURLWithPath: $0) }
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects(urls.map { $0 as NSURL }))
+
+        XCTAssertTrue(model.pasteImages(from: pasteboard))
+        XCTAssertEqual(model.attachments.map(\.url), urls)
+    }
+
+    func testNewThreadPasteAcceptsExcelFile() {
+        let model = AppModel()
+        model.newThreadFolder = "/tmp/cloudcodex-new-thread"
+        let pasteboard = NSPasteboard(name: .init("CloudCodexTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let fileURL = URL(fileURLWithPath: "/tmp/report.xlsx")
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects([fileURL as NSURL]))
+
+        XCTAssertTrue(model.pasteNewThreadImages(from: pasteboard))
+        XCTAssertEqual(model.newThreadAttachments.map(\.url), [fileURL])
+        XCTAssertTrue(model.attachments.isEmpty)
+        XCTAssertTrue(model.canCreateThread)
+    }
+
     func testTextClipboardContentIsLeftForTextEditor() {
         let model = AppModel()
         let pasteboard = NSPasteboard(name: .init("CloudCodexTests.\(UUID().uuidString)"))

@@ -494,6 +494,12 @@ final class AppModel: ObservableObject {
     @Published var interruptedMessageEditText = ""
     @Published private(set) var interruptedMessageEditFocusRequest = UUID()
 
+    private func editedMessageToPreserve(in threadID: String) -> ChatMessage? {
+        guard let edit = interruptedMessageEdit, edit.threadID == threadID,
+              !edit.historyWasReverted else { return nil }
+        return edit.originalMessage
+    }
+
     var canSubmitInterruptedMessageEdit: Bool {
         guard let edit = interruptedMessageEdit, !edit.isSubmitting else { return false }
         return !interruptedMessageEditText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -897,7 +903,7 @@ final class AppModel: ObservableObject {
     private var forceStoppingThreadID: String?
     private var activePermissionByThreadID: [String: String] = [:]
     private var turnLaunchSettingsByThreadID: [String: TurnLaunchSettings] = [:]
-    private var capacityRetryStates: [String: CapacityRetryState] = [:]
+    @Published private var capacityRetryStates: [String: CapacityRetryState] = [:]
     private var capacityRetryTasks: [String: Task<Void, Never>] = [:]
     private var messagesByThread: [String: [ChatMessage]] = [:]
     var selectedCollaborationTasks: [CollaborationChildTask] {
@@ -947,7 +953,7 @@ final class AppModel: ObservableObject {
     /// Local app-server turns must be tracked by thread. A single global
     /// `isSending` flag leaks into whichever conversation the user selects
     /// next and makes an idle task look as if it were still thinking.
-    private var locallyRunningThreadIDs: Set<String> = []
+    @Published private var locallyRunningThreadIDs: Set<String> = []
     private var activeTurnIDsByThread: [String: String] = [:]
     private var localTurnStartedAtByThread: [String: Date] = [:]
     static let localTurnReconciliationGrace: TimeInterval = 30
@@ -2418,7 +2424,10 @@ final class AppModel: ObservableObject {
             }
             if selectedThreadID == id {
                 flushPendingDeltas()
-                storeMessages(ConversationHistory.merge(snapshot: loadedMessages, cached: messages), for: id)
+                storeMessages(ConversationHistory.merge(
+                    snapshot: loadedMessages, cached: messages,
+                    preservingEditedMessage: editedMessageToPreserve(in: id)
+                ), for: id)
                 scheduleTurnModelMetadataLoad(
                     for: updated,
                     messages: loadedMessages,
@@ -2634,8 +2643,36 @@ final class AppModel: ObservableObject {
 
     static let occupiedThreadMessage = "请先在另一个应用中关闭此会话，才能在这里继续。"
 
+    struct MenuBarTask: Identifiable, Equatable {
+        let id: String
+        let title: String
+    }
+
+    var menuBarTasks: [MenuBarTask] {
+        let ids = Set(threads.filter { $0.status == "active" }.map(\.id))
+            .union(locallyRunningThreadIDs)
+            .union(capacityRetryStates.keys)
+        return ids.map { id in
+            let thread = threads.first { $0.id == id } ?? threadSummaries[id]
+            return MenuBarTask(id: id, title: thread?.displayName ?? "会话 \(id.prefix(8))")
+        }.sorted { $0.id < $1.id }
+    }
+
+    @Published private(set) var menuBarStoppingThreadIDs: Set<String> = []
+
+    func stopMenuBarTask(_ threadID: String) async {
+        guard menuBarTasks.contains(where: { $0.id == threadID }),
+              menuBarStoppingThreadIDs.insert(threadID).inserted else { return }
+        defer { menuBarStoppingThreadIDs.remove(threadID) }
+        await cancelTurn(threadID: threadID, restartOnTimeout: false)
+    }
+
     func cancelTurn() async {
         guard let threadID = selectedThreadID else { return }
+        await cancelTurn(threadID: threadID)
+    }
+
+    private func cancelTurn(threadID: String, restartOnTimeout: Bool = true) async {
         let cancelledCapacityRetry = cancelCapacityRetry(threadID: threadID)
         if let cancelledCapacityRetry {
             updateCapacityRetryActivity(
@@ -2647,17 +2684,33 @@ final class AppModel: ObservableObject {
                 isStreaming: false
             )
         }
-        guard let turnID = activeTurnID else {
+        var turnID = activeTurnIDsByThread[threadID]
+            ?? (selectedThreadID == threadID ? activeTurnID : nil)
+        if turnID == nil, cancelledCapacityRetry == nil {
+            do {
+                // Resolve externally started tasks without changing selection.
+                let turn = try await client.readLatestTurnState(threadID)
+                if turn?.isActive == true { turnID = turn?.id }
+            } catch {
+                errorMessage = "无法读取待停止的任务：\(error.localizedDescription)"
+                return
+            }
+        }
+        guard let turnID else {
             guard cancelledCapacityRetry != nil else { return }
             clearLocalTurn(threadID)
             setThreadRunning(threadID, running: false)
             threadOutcomes[threadID] = .interrupted
-            finishTurnProgress(status: "已停止")
+            markLocalTurnInterrupted(threadID: threadID, message: "已停止自动重试。", title: "任务已停止", status: "已停止")
             return
         }
         do {
             try await client.interruptTurn(threadID: threadID, turnID: turnID)
         } catch {
+            if !restartOnTimeout, Self.isInterruptTimeout(error) {
+                errorMessage = "停止任务超时，请打开该会话检查状态后重试。"
+                return
+            }
             guard Self.isInterruptTimeout(error) else {
                 errorMessage = error.localizedDescription
                 return
@@ -2769,7 +2822,8 @@ final class AppModel: ObservableObject {
         let wasStartedAt = messages.first(where: { $0.id == "turn-progress" })?.startedAt
         var merged = ConversationHistory.merge(
             snapshot: snapshot.messages,
-            cached: messages.filter { $0.id != "turn-progress" }
+            cached: messages.filter { $0.id != "turn-progress" },
+            preservingEditedMessage: editedMessageToPreserve(in: threadID)
         )
 
         if isActive {
@@ -2845,13 +2899,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Imports image files or bitmap data from a pasteboard into the existing
+    /// Imports files or bitmap data from a pasteboard into the existing
     /// attachment flow. Bitmap-only clipboard content (for example a macOS
     /// screenshot) is converted to PNG so the app-server receives a stable
     /// localImage path rather than transient pasteboard data.
     @discardableResult
     func pasteImages(from pasteboard: NSPasteboard = .general) -> Bool {
-        let result = pastedImageAttachments(
+        let result = pastedAttachments(
             from: pasteboard,
             excluding: Set(attachments.map(\.url))
         )
@@ -2861,7 +2915,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func pasteNewThreadImages(from pasteboard: NSPasteboard = .general) -> Bool {
-        let result = pastedImageAttachments(
+        let result = pastedAttachments(
             from: pasteboard,
             excluding: Set(newThreadAttachments.map(\.url))
         )
@@ -2869,18 +2923,21 @@ final class AppModel: ObservableObject {
         return result.handled
     }
 
-    private func pastedImageAttachments(
+    private func pastedAttachments(
         from pasteboard: NSPasteboard,
         excluding existingURLs: Set<URL>
     ) -> (handled: Bool, items: [ComposerAttachment]) {
         let pastedFileURLs = (pasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
-        ) as? [URL] ?? []).filter { ComposerAttachment(url: $0).isImage }
+        ) as? [URL] ?? [])
 
+        // Finder can provide both the original document URL and an image of
+        // its icon/preview. Preserve the document before considering bitmaps.
         if !pastedFileURLs.isEmpty {
+            var seenURLs = existingURLs
             let newItems = pastedFileURLs
-                .filter { !existingURLs.contains($0) }
+                .filter { seenURLs.insert($0).inserted }
                 .map { ComposerAttachment(url: $0) }
             return (true, newItems)
         }

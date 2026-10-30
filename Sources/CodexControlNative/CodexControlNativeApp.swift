@@ -9,11 +9,12 @@ struct CloudCodexApp: App {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup("CloudCodex") {
+        WindowGroup("CloudCodex", id: "cloudcodex-main") {
             StartupAnimationHost(session: startupSession) {
                 ContentView(updateController: updateController)
                     .environmentObject(model)
             }
+                .background(CloudCodexMainWindowRegistration())
                 // CloudCodex is a three-column application.  Keeping enough
                 // room for every column prevents a selected long conversation
                 // from forcing the workspace column into a compressed layout.
@@ -47,6 +48,13 @@ struct CloudCodexApp: App {
                     .keyboardShortcut("r")
             }
         }
+        MenuBarExtra {
+            CloudCodexMenuBarContent(model: model)
+        } label: {
+            CloudCodexMenuBarIcon(isRunning: !model.menuBarTasks.isEmpty)
+        }
+        .menuBarExtraStyle(.menu)
+
         Window("关于 CloudCodex", id: "about-cloudcodex") {
             AboutCloudCodexView()
         }

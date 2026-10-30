@@ -4928,7 +4928,7 @@ private struct Composer: View {
                             .font(.system(size: 17, weight: .medium))
                     }
                     .buttonStyle(.plain)
-                    .help("添加图片或文件；也可按 ⌘V 直接粘贴图片")
+                    .help("添加图片或文件；也可按 ⌘V 直接粘贴图片或文件")
 
                     if mode == .newThread {
                         Button(action: model.chooseNewThreadFolder) {
@@ -5783,22 +5783,31 @@ private struct AttachmentPreview: View {
                             .resizable()
                             .scaledToFill()
                     } else {
-                        VStack(spacing: 5) {
+                        HStack(spacing: 8) {
                             Image(systemName: "doc.fill").font(.title2)
-                            Text(attachment.url.lastPathComponent)
-                                .font(.caption2)
-                                .lineLimit(2)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(attachment.url.lastPathComponent)
+                                    .font(.caption.weight(.medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(attachment.url.path)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .padding(7)
+                        .padding(10)
                     }
                 }
-                .frame(width: 72, height: 72)
+                .frame(width: attachment.isImage ? 72 : 260, height: 72)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
             }
             .buttonStyle(.plain)
-            .help("在 CloudCodex 中预览 \(attachment.url.lastPathComponent)")
+            .help("在 CloudCodex 中预览 \(attachment.url.lastPathComponent)\n\(attachment.url.path)")
 
             Button(action: remove) {
                 Image(systemName: "xmark")

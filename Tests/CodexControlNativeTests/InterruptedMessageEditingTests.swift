@@ -54,4 +54,41 @@ final class InterruptedMessageEditingTests: XCTestCase {
         XCTAssertEqual(parameters["beforeTurnId"] as? String, "turn-stopped")
         XCTAssertEqual(parameters.count, 2)
     }
+
+    func testBackgroundConfirmationKeepsEditorAndDraftUntilCancelled() throws {
+        let model = AppModel()
+        let local = ChatMessage(id: "local-question", role: .user, text: "原始问题", turnID: "stopped")
+        let confirmed = ChatMessage(id: "server-question", role: .user, text: "原始问题", turnID: "stopped")
+        let thread = try XCTUnwrap(CodexThread(json: ["id": "thread", "cwd": "/tmp", "status": "idle"]))
+        let snapshot = ThreadActivitySnapshot(
+            thread: thread,
+            turn: TurnRuntimeState(id: "stopped", status: "interrupted", startedAt: nil, completedAt: nil),
+            messages: [confirmed]
+        )
+        model.selectedThreadID = thread.id
+        model.messages = [local]
+        model.handleEvent("turn/completed", [
+            "threadId": thread.id, "turn": ["id": "stopped", "status": "interrupted"]
+        ])
+        model.beginEditingInterruptedMessage(local)
+        model.interruptedMessageEditText = "正在修改的草稿"
+        let focusRequest = model.interruptedMessageEditFocusRequest
+
+        for _ in 0..<3 {
+            model.applyExternalActivitySnapshot(snapshot, threadID: thread.id)
+            let displayed = try XCTUnwrap(model.messages.first(where: { $0.role == .user }))
+            XCTAssertEqual(displayed.id, local.id)
+            XCTAssertTrue(model.isEditingInterruptedMessage(displayed.id))
+            XCTAssertEqual(model.interruptedMessageEditText, "正在修改的草稿")
+            XCTAssertEqual(model.interruptedMessageEditFocusRequest, focusRequest)
+            XCTAssertEqual(model.messages.filter { $0.role == .user }.count, 1)
+        }
+
+        model.cancelInterruptedMessageEdit()
+        model.applyExternalActivitySnapshot(snapshot, threadID: thread.id)
+        XCTAssertEqual(model.messages.filter { $0.role == .user }.map(\.id), [confirmed.id])
+        XCTAssertTrue(model.canEditInterruptedMessage(confirmed))
+        model.beginEditingInterruptedMessage(confirmed)
+        XCTAssertTrue(model.isEditingInterruptedMessage(confirmed.id))
+    }
 }
