@@ -5,6 +5,40 @@ import XCTest
 /// creates, sends to, stops or changes a task, and never logs task contents.
 @MainActor
 final class ReadOnlyHistorySmokeTests: XCTestCase {
+    func testExistingGeneratedImagesExportForExactTurn() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let threadID = env["CLOUDCODEX_IMAGE_SMOKE_THREAD"],
+              let turnID = env["CLOUDCODEX_IMAGE_SMOKE_TURN"] else {
+            throw XCTSkip("Set CLOUDCODEX_IMAGE_SMOKE_THREAD and CLOUDCODEX_IMAGE_SMOKE_TURN for read-only image verification")
+        }
+        let client = AppServerClient()
+        try await client.start()
+        let thread = try await client.readThreadState(threadID)
+        var cursor = ""
+        for _ in 0..<20 {
+            let page = try await client.readRemoteHistory(.init(id: "read-only-smoke", threadId: threadID, workspace: thread.cwd, cursor: cursor))
+            let messages = page.messages.filter { $0.turnId == turnID && $0.role != "user" }
+            if !messages.isEmpty {
+                let images = messages.compactMap(\.images).flatMap { $0 }
+                XCTAssertFalse(images.isEmpty, "The selected generated-image turn must export an image")
+                for image in images {
+                    let data = try XCTUnwrap(Data(base64Encoded: image.data))
+                    XCTAssertLessThanOrEqual(data.count, RemoteHistoryImageEncoder.maxImageBytes)
+                }
+                if let output = env["CLOUDCODEX_IMAGE_SMOKE_OUTPUT"] {
+                    // Explicit local diagnostic artifact, no credentials or other turns.
+                    let selected = RemoteHistoryPage(messages: messages, nextCursor: nil)
+                    try JSONEncoder().encode(selected).write(to: URL(fileURLWithPath: output), options: .atomic)
+                }
+                print("Read-only image history: exact turn exported \(images.count) image(s)")
+                return
+            }
+            guard let next = page.nextCursor, !next.isEmpty, next != cursor else { break }
+            cursor = next
+        }
+        XCTFail("Selected image turn was not found within the bounded history scan")
+    }
+
     func testExistingTaskRestoresActivityPagesWithoutBlockingMainActor() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let cwd = env["CLOUDCODEX_SMOKE_CWD"], let title = env["CLOUDCODEX_SMOKE_TITLE"] else {
