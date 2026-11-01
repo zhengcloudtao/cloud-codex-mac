@@ -4245,6 +4245,7 @@ final class AppModel: ObservableObject {
             usage: remoteControlPaired ? remoteUsageSnapshot : nil,
             defaultModel: selectedModelCapabilities?.model,
             defaultEffort: selectedEffort,
+            defaultSpeed: isFastModeEnabled ? "fast" : "standard",
             systemMetrics: remoteControlPaired && systemMetrics.snapshot.hasValues ? systemMetrics.snapshot : nil,
             connectionHealth: remoteControlPaired ? connectionHealth.remoteSnapshot : nil,
             watchSnapshot: makeWatchSnapshot(snapshots)

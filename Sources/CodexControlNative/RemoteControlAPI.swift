@@ -38,6 +38,7 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     var usage: RemoteUsageSnapshot? = nil
     var defaultModel: String? = nil
     var defaultEffort: String? = nil
+    var defaultSpeed: String? = nil
     var systemMetrics: SystemMetricsSnapshot? = nil
     var connectionHealth: RemoteConnectionHealthSnapshot? = nil
     var watchSnapshot: CloudCodexWatchSnapshot? = nil
