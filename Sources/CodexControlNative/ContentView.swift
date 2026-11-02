@@ -3686,11 +3686,13 @@ private struct InterruptedMessageEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !message.attachments.isEmpty {
+            if let attachments = model.interruptedMessageEdit?.attachments, !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 9) {
-                        ForEach(Array(message.attachments.enumerated()), id: \.offset) { _, attachment in
-                            MessageAttachmentCard(attachment: attachment)
+                        ForEach(attachments) { attachment in
+                            AttachmentPreview(attachment: attachment) {
+                                model.removeInterruptedMessageAttachment(attachment.id)
+                            }
                         }
                     }
                 }
@@ -3698,7 +3700,7 @@ private struct InterruptedMessageEditor: View {
 
             ComposerTextEditor(
                 text: $model.interruptedMessageEditText,
-                pasteImages: { false },
+                pasteImages: { model.pasteInterruptedMessageImages() },
                 submit: { Task { await model.submitInterruptedMessageEdit() } },
                 focusRequest: model.interruptedMessageEditFocusRequest
             )
@@ -4893,11 +4895,29 @@ private struct Composer: View {
                                 .padding(4)
                         }
                     }
-                    .task(id: mode == .conversation ? model.composerPredictionSource : nil) {
+                    .task(id: ComposerPredictionTaskID(
+                        source: mode == .conversation ? model.composerPredictionSource : nil,
+                        connection: model.connectionText
+                    )) {
                         if mode == .conversation, let source = model.composerPredictionSource {
                             await model.requestComposerPrediction(source)
                         }
                     }
+
+                if mode == .conversation {
+                    if model.composerPredictionState == .pending {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text("正在生成下一步建议…").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    } else if model.composerPredictionState == .unavailable {
+                        HStack(spacing: 8) {
+                            Text("暂无下一步建议").font(.caption2).foregroundStyle(.secondary)
+                            Button("重试") { Task { await model.retryComposerPrediction() } }
+                                .font(.caption2).buttonStyle(.plain)
+                        }
+                    }
+                }
 
                 if mode == .conversation, model.isExternalThreadProcessing {
                     Label("Codex 中处理中", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")

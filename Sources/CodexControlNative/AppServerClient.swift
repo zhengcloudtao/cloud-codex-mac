@@ -865,7 +865,9 @@ final class AppServerClient {
             // thread/prediction/request endpoint is currently only a stub.
             let fork = try await request("thread/fork", params: [
                 "threadId": threadID, "experimentalPredictionMode": true,
-                "ephemeral": true, "excludeTurns": true, "deferGoalContinuation": true,
+                "experimentalDisablePredictionMcp": true,
+                // Ephemeral prediction forks cannot defer a persisted goal.
+                "ephemeral": true, "excludeTurns": true,
                 "threadSource": "composer_predictions"
             ], timeoutSeconds: 12)
             guard let id = (fork["thread"] as? JSON)?["id"] as? String else { throw CodexClientError.invalidResponse }
@@ -877,7 +879,7 @@ final class AppServerClient {
             return try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     let timeout = Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: 30_000_000_000)
+                        try? await Task.sleep(nanoseconds: 60_000_000_000)
                         guard !Task.isCancelled else { return }
                         self?.finishPrediction(id, result: .failure(CodexClientError.timeout("续问建议")))
                     }
@@ -887,6 +889,7 @@ final class AppServerClient {
                         do {
                             let turn = try await self.request("turn/start", params: [
                                 "threadId": id, "permissions": ":read-only", "approvalPolicy": "never",
+                                "effort": "low",
                                 "runtimeWorkspaceRoots": [],
                                 "input": [["type": "text", "text": ComposerPredictionSource.prompt]],
                                 "outputSchema": ["type": "object", "properties": [

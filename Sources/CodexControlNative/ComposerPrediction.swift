@@ -1,5 +1,10 @@
 import Foundation
 
+struct ComposerPredictionTaskID: Hashable {
+    let source: ComposerPredictionSource?
+    let connection: String
+}
+
 struct ComposerPredictionSource: Hashable {
     let threadID: String
     let turnID: String

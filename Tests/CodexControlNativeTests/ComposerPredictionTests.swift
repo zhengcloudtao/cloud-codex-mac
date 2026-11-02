@@ -28,6 +28,9 @@ final class ComposerPredictionTests: XCTestCase {
             if request["method"] == "initialize":
                 emit({"id": request["id"], "result": {"platformOs": "macos"}})
             elif request["method"] == "thread/fork":
+                if request["params"].get("ephemeral") and request["params"].get("deferGoalContinuation"):
+                    emit({"id": request["id"], "error": {"code": -32602, "message": "deferGoalContinuation cannot be combined with ephemeral"}})
+                    continue
                 fork_count += 1
                 thread = {"id": "prediction-" + str(fork_count), "ephemeral": True}
                 emit({"method": "thread/started", "params": {"thread": thread}})
@@ -89,10 +92,13 @@ final class ComposerPredictionTests: XCTestCase {
             let params = try XCTUnwrap(predictions.first?["params"] as? [String: Any])
             XCTAssertEqual(params["threadId"] as? String, "thread-1")
             XCTAssertEqual(params["experimentalPredictionMode"] as? Bool, true)
+            XCTAssertEqual(params["experimentalDisablePredictionMcp"] as? Bool, true)
             XCTAssertEqual(params["ephemeral"] as? Bool, true)
+            XCTAssertNil(params["deferGoalContinuation"])
             let turn = try XCTUnwrap(rows.first { $0["method"] as? String == "turn/start" }?["params"] as? [String: Any])
             XCTAssertEqual(turn["threadId"] as? String, "prediction-1")
             XCTAssertEqual(turn["permissions"] as? String, ":read-only")
+            XCTAssertEqual(turn["effort"] as? String, "low")
             XCTAssertEqual(turn["responsesapiClientMetadata"] as? [String: String],
                            ["prediction_source_thread_id": "thread-1", "prediction_source_turn_id": "turn-1"])
             XCTAssertTrue(model.conversationMessages(for: "prediction-1").isEmpty)
@@ -135,6 +141,36 @@ final class ComposerPredictionTests: XCTestCase {
             await task.value
             XCTAssertNil(model.composerSuggestion)
             XCTAssertTrue(model.composerPredictions.isEmpty)
+        }
+    }
+
+    func testCancelledPredictionCanBeRequestedAgain() async throws {
+        try await withFixture { model, root in
+            setReply(model, turnID: "delayed")
+            let source = try XCTUnwrap(model.composerPredictionSource)
+            let task = Task { await model.requestComposerPrediction(source) }
+            let deadline = Date().addingTimeInterval(2)
+            while !(try requests(root)).contains(where: { $0["method"] as? String == "turn/start" }), Date() < deadline {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            task.cancel()
+            await task.value
+            XCTAssertNil(model.composerPredictions[source])
+            await model.requestComposerPrediction(source)
+            XCTAssertEqual(model.composerSuggestion, suggestion)
+        }
+    }
+
+    func testUnavailablePredictionCanBeRetried() async throws {
+        try await withFixture { model, root in
+            setReply(model, turnID: "empty")
+            try await request(model)
+            XCTAssertEqual(model.composerPredictionState, .unavailable)
+            await model.retryComposerPrediction()
+            let forks = try requests(root).filter { $0["method"] as? String == "thread/fork" }
+            XCTAssertEqual(forks.count, 2)
+            XCTAssertEqual(model.composerPredictionState, .unavailable)
+            XCTAssertTrue(model.composerText.isEmpty)
         }
     }
 

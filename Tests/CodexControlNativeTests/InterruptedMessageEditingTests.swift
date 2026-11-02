@@ -1,8 +1,46 @@
+import AppKit
 import XCTest
 @testable import CloudCodex
 
 @MainActor
 final class InterruptedMessageEditingTests: XCTestCase {
+    func testPastedImageBelongsToEditAndCanBeRemoved() throws {
+        let model = AppModel()
+        let message = ChatMessage(id: "user", role: .user, text: "任务", turnID: "stopped")
+        model.selectedThreadID = "thread"
+        model.messages = [message]
+        model.handleEvent("turn/completed", [
+            "threadId": "thread", "turn": ["id": "stopped", "status": "interrupted"]
+        ])
+        model.beginEditingInterruptedMessage(message)
+        model.interruptedMessageEditText = ""
+        let pasteboard = NSPasteboard(name: .init("CloudCodexTests.\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        pasteboard.setData(png, forType: .png)
+        XCTAssertTrue(model.pasteInterruptedMessageImages(from: pasteboard))
+        let attachment = try XCTUnwrap(model.interruptedMessageEdit?.attachments.first)
+        defer { try? FileManager.default.removeItem(at: attachment.url) }
+        XCTAssertEqual(try Data(contentsOf: attachment.url), png)
+        XCTAssertEqual(attachment.userInput["type"] as? String, "localImage")
+        XCTAssertTrue(model.attachments.isEmpty)
+        XCTAssertTrue(model.newThreadAttachments.isEmpty)
+        XCTAssertTrue(model.canSubmitInterruptedMessageEdit)
+        XCTAssertTrue(model.messages[0].attachments.isEmpty)
+        model.removeInterruptedMessageAttachment(attachment.id)
+        XCTAssertFalse(model.canSubmitInterruptedMessageEdit)
+        pasteboard.clearContents()
+        pasteboard.setString("普通文字", forType: .string)
+        XCTAssertFalse(model.pasteInterruptedMessageImages(from: pasteboard))
+        model.cancelInterruptedMessageEdit()
+        XCTAssertFalse(model.pasteInterruptedMessageImages(from: pasteboard))
+    }
+
     func testOnlyLatestUserMessageOfStoppedTurnCanBeEdited() {
         let model = AppModel()
         let older = ChatMessage(id: "older", role: .user, text: "较早任务", turnID: "turn-old")

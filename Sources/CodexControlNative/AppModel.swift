@@ -301,7 +301,7 @@ final class AppModel: ObservableObject {
               threadInputAvailability == .available, !isSelectedThreadProcessing,
               !isSwitchingModelProvider, creditUsagePauseReason == nil,
               composerText.isEmpty, attachments.isEmpty, !isRecording,
-              editingWaitingMessageID == nil, selectedWaitingMessages.isEmpty,
+              editingWaitingMessageID == nil, interruptedMessageEdit == nil, selectedWaitingMessages.isEmpty,
               selectedUserInputRequests.isEmpty, selectedComputerUseApprovalRequests.isEmpty,
               assistantReplyChoices.isEmpty,
               let last = messages.last(where: { $0.role != .activity }),
@@ -316,6 +316,18 @@ final class AppModel: ObservableObject {
         return text
     }
 
+    var composerPredictionState: ComposerPredictionState? {
+        guard let source = composerPredictionSource else { return nil }
+        return composerPredictions[source]
+    }
+
+    func retryComposerPrediction() async {
+        guard let source = composerPredictionSource,
+              composerPredictions[source] == .unavailable else { return }
+        composerPredictions.removeValue(forKey: source)
+        await requestComposerPrediction(source)
+    }
+
     func requestComposerPrediction(_ source: ComposerPredictionSource) async {
         guard !Task.isCancelled, client.connected, composerPredictionSource == source,
               composerPredictions[source] == nil else { return }
@@ -324,12 +336,19 @@ final class AppModel: ObservableObject {
         do {
             let text = (try await client.requestComposerPrediction(threadID: source.threadID, sourceTurnID: source.turnID))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            try Task.checkCancellation()
             guard composerPredictions[source] == .pending else { return }
             composerPredictions[source] = !text.isEmpty && text.count <= 500 ? .ready(text) : .unavailable
         } catch {
             // Predictions are optional; a failed/unsupported service must not
             // disturb normal input or surface as a conversation failure.
-            if composerPredictions[source] == .pending { composerPredictions[source] = .unavailable }
+            if composerPredictions[source] == .pending {
+                if Task.isCancelled || error is CancellationError {
+                    composerPredictions.removeValue(forKey: source)
+                } else {
+                    composerPredictions[source] = .unavailable
+                }
+            }
         }
     }
 
@@ -483,7 +502,7 @@ final class AppModel: ObservableObject {
         let messageID: String
         let turnID: String
         let originalMessage: ChatMessage
-        let attachments: [ComposerAttachment]
+        var attachments: [ComposerAttachment]
         let model: String?
         let effort: String?
         var historyWasReverted = false
@@ -554,6 +573,22 @@ final class AppModel: ObservableObject {
         guard interruptedMessageEdit?.isSubmitting != true else { return }
         interruptedMessageEdit = nil
         interruptedMessageEditText = ""
+    }
+
+    @discardableResult
+    func pasteInterruptedMessageImages(from pasteboard: NSPasteboard = .general) -> Bool {
+        guard var edit = interruptedMessageEdit, !edit.isSubmitting,
+              edit.threadID == selectedThreadID else { return false }
+        let result = pastedAttachments(from: pasteboard, excluding: Set(edit.attachments.map(\.url)))
+        edit.attachments.append(contentsOf: result.items)
+        interruptedMessageEdit = edit
+        return result.handled
+    }
+
+    func removeInterruptedMessageAttachment(_ id: UUID) {
+        guard var edit = interruptedMessageEdit, !edit.isSubmitting else { return }
+        edit.attachments.removeAll { $0.id == id }
+        interruptedMessageEdit = edit
     }
 
     func submitInterruptedMessageEdit() async {
