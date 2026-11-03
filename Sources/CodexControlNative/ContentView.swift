@@ -1437,7 +1437,10 @@ struct ContentView: View {
                 preferencesPage { ModelProviderSettings(library: model.providerLibrary) }
                     .tabItem { Label("模型服务商", systemImage: "cpu") }.tag(2)
 
-                preferencesPage { executionProtectionSettingsSection }
+                preferencesPage {
+                    computerUsePrivacySettingsSection
+                    executionProtectionSettingsSection
+                }
                     .tabItem { Label("执行保护", systemImage: "shield") }.tag(3)
             }
         }
@@ -1573,6 +1576,24 @@ struct ContentView: View {
                 }
                 .padding(.vertical, 6)
             }
+        }
+    }
+
+    private var computerUsePrivacySettingsSection: some View {
+        GroupBox("电脑控制") {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Computer Use 操作时遮盖软件内容", isOn: Binding(
+                    get: { model.hidesComputerUseApplicationContent },
+                    set: { model.setHidesComputerUseApplicationContent($0) }
+                ))
+                .toggleStyle(.checkbox)
+                Text("默认关闭，选择自动保存。开启后，从本轮首次电脑控制开始遮盖前台其他软件的窗口，直到本轮任务结束；回到 CloudCodex 可查看任务和调整设置。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("遮盖层透传鼠标和键盘。点击菜单栏的遮盖图标，或取消勾选，可立即恢复显示。整屏截图可能包含遮盖层，使用这类截图的任务可关闭此选项。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
         }
     }
 

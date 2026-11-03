@@ -104,6 +104,23 @@ final class AppModel: ObservableObject {
     private var userInputTimeoutTasks: [String: Task<Void, Never>] = [:]
     @Published private(set) var computerUseApprovalRequests: [ComputerUseApprovalRequest] = []
     private var computerUseApprovalTimeoutTasks: [String: Task<Void, Never>] = [:]
+    @Published private(set) var hidesComputerUseApplicationContent: Bool
+    @Published private(set) var computerUsePrivacyState = ComputerUsePrivacyState()
+    private let computerUsePrivacyController = ComputerUsePrivacyController()
+
+    func setHidesComputerUseApplicationContent(_ hidden: Bool) {
+        hidesComputerUseApplicationContent = hidden
+        remoteDefaults.set(hidden, forKey: ComputerUsePrivacyState.defaultsKey)
+        syncComputerUsePrivacy()
+    }
+
+    private func syncComputerUsePrivacy() {
+        computerUsePrivacyController.revealContent = { [weak self] in
+            self?.setHidesComputerUseApplicationContent(false)
+        }
+        computerUsePrivacyController.setActive(hidesComputerUseApplicationContent && computerUsePrivacyState.isActive)
+    }
+
     private let userInputTimeoutSeconds: TimeInterval
     private var computerControlTimeoutTasks: [PendingItemKey: Task<Void, Never>] = [:]
     private let computerControlTimeoutSeconds: TimeInterval
@@ -1109,6 +1126,7 @@ final class AppModel: ObservableObject {
             $0.id == library.defaultProviderID
         }?.options ?? []
         self.remoteDefaults = remoteDefaults
+        self.hidesComputerUseApplicationContent = remoteDefaults.bool(forKey: ComputerUsePrivacyState.defaultsKey)
         let accountRefreshInterval = AccountRefreshInterval.load(from: remoteDefaults)
         self.accountRefreshInterval = accountRefreshInterval
         self.connectionHealth = ConnectionHealth(refreshInterval: accountRefreshInterval)
@@ -1651,6 +1669,8 @@ final class AppModel: ObservableObject {
         }
         client.onDisconnect = { [weak self] message in
             guard let self else { return }
+            self.computerUsePrivacyState.reset()
+            self.syncComputerUsePrivacy()
             guard !self.isSwitchingModelProvider else { return }
             if let threadID = self.forceStoppingThreadID {
                 self.forceStoppingThreadID = nil
@@ -2145,6 +2165,8 @@ final class AppModel: ObservableObject {
     }
 
     private func clearLocalTurn(_ threadID: String) {
+        computerUsePrivacyState.end(threadID: threadID)
+        syncComputerUsePrivacy()
         cancelComputerControlTimeouts(threadID: threadID)
         cancelCommandInactivityTimeouts(threadID: threadID)
         locallyRunningThreadIDs.remove(threadID)
@@ -2158,6 +2180,8 @@ final class AppModel: ObservableObject {
     /// every optimistic local run so the UI does not remain "thinking"
     /// forever, while keeping the conversation and a durable inline reason.
     func handleClientDisconnect(_ message: String) {
+        computerUsePrivacyState.reset()
+        syncComputerUsePrivacy()
         composerPredictions.removeAll()
         connectionText = "未连接"
         errorMessage = message
@@ -5116,6 +5140,28 @@ final class AppModel: ObservableObject {
     }
 
     func handleEvent(_ method: String, _ params: [String: Any]) {
+        // Handle all subscribed chats before the selected-chat routing below.
+        let errorText = (params["error"] as? [String: Any])?["message"] as? String ?? ""
+        let isTerminalPrivacyError = method == "error" && params["willRetry"] as? Bool != true
+            && !Self.isOptionalActivityCapabilityError(errorText)
+        if let threadID = params["threadId"] as? String {
+            let turnID = params["turnId"] as? String ?? (params["turn"] as? [String: Any])?["id"] as? String
+            if method == "item/started", let item = params["item"] as? [String: Any],
+               Self.isComputerControlItem(item) {
+                computerUsePrivacyState.begin(threadID: threadID, turnID: turnID)
+                syncComputerUsePrivacy()
+            } else if method == "turn/completed" || isTerminalPrivacyError {
+                // An old completion must not reach clearLocalTurn below and
+                // remove the curtain belonging to a newer Computer Use turn.
+                if let turnID, let current = computerUsePrivacyState.turns[threadID],
+                   !current.isEmpty, current != turnID { return }
+                computerUsePrivacyState.end(threadID: threadID, turnID: turnID)
+                syncComputerUsePrivacy()
+            }
+        } else if isTerminalPrivacyError {
+            computerUsePrivacyState.reset()
+            syncComputerUsePrivacy()
+        }
         if ["turn/started", "turn/completed"].contains(method), let thread = params["threadId"] as? String {
             outcomeEventRevisions[thread, default: 0] += 1
             if thread == selectedThreadID { refreshSelectedTurnCount() }
