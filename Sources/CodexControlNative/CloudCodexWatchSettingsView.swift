@@ -21,12 +21,12 @@ struct CloudCodexWatchSettingsView: View {
     @State private var confirmHardwareRevoke = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-        GroupBox("App 与手表 · 扫码绑定") {
+        GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                Text("扫码后授权 iPhone 查看会话、提交任务及操作本电脑，Apple Watch 仅可查看状态。电脑需保持运行并开启远程连接。")
+                Text("iPhone 可查看会话、提交任务及操作电脑；Apple Watch 仅查看状态。使用 iPhone App 扫描下方二维码添加电脑。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button(model.watchSharingEnabled ? "重新生成控制绑定二维码" : "生成控制绑定二维码") {
+                    Button(model.watchSharingEnabled ? "重新生成 App 二维码" : "生成 App 二维码") {
                         busy = true
                         Task {
                             defer { busy = false }
@@ -39,7 +39,7 @@ struct CloudCodexWatchSettingsView: View {
                     }
                     .disabled(busy || !model.remoteControlEnabled)
                     if model.watchSharingEnabled {
-                        Button("撤销 App 与手表绑定", role: .destructive) {
+                        Button("撤销 App／手表授权", role: .destructive) {
                             busy = true
                             Task {
                                 defer { busy = false }
@@ -62,12 +62,14 @@ struct CloudCodexWatchSettingsView: View {
                 }
                 if let message { Text(message).font(.caption).textSelection(.enabled) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        } label: {
+            authorizationHeader("App 与手表", icon: "iphone", enabled: model.watchSharingEnabled)
         }
         .onDisappear { connectionCode = nil }
         .onChange(of: model.watchSharingEnabled) { _, enabled in if !enabled { connectionCode = nil } }
-        GroupBox("硬件双屏 · 独立控制绑定") {
+        GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                Text("允许硬件查看工作区、会话及任务，录音交由本电脑识别，硬件确认文字后才提交任务。与 App 和手表绑定相互独立。")
+                Text("查看工作区、会话及任务；录音由 Mac 识别，确认文字后提交。将连接码粘贴到硬件配网页面，授权与 App／手表相互独立。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(model.hardwareSharingEnabled ? "重新生成硬件连接码" : "生成硬件连接码") {
@@ -75,7 +77,7 @@ struct CloudCodexWatchSettingsView: View {
                         else { generateHardwareCode() }
                     }.disabled(hardwareBusy || !model.remoteControlEnabled)
                     if model.hardwareSharingEnabled {
-                        Button("撤销硬件绑定", role: .destructive) { confirmHardwareRevoke = true }
+                        Button("撤销硬件授权", role: .destructive) { confirmHardwareRevoke = true }
                             .disabled(hardwareBusy || !model.remoteControlEnabled)
                     }
                     if hardwareBusy { ProgressView().controlSize(.small) }
@@ -89,6 +91,8 @@ struct CloudCodexWatchSettingsView: View {
                 }
                 if let hardwareMessage { Text(hardwareMessage).font(.caption).textSelection(.enabled) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        } label: {
+            authorizationHeader("硬件双屏", icon: "display.2", enabled: model.hardwareSharingEnabled)
         }
         .alert("重新生成硬件连接码？", isPresented: $confirmHardwareRotation) {
             Button("重新生成", role: .destructive) { generateHardwareCode() }
@@ -101,6 +105,17 @@ struct CloudCodexWatchSettingsView: View {
         }
         .onDisappear { hardwareCode = nil }
     }
+    private func authorizationHeader(_ title: String, icon: String, enabled: Bool) -> some View {
+        HStack(spacing: 8) {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+            Spacer()
+            Text(enabled ? "已生成授权" : "未生成授权")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private func generateHardwareCode() {
         hardwareBusy = true
         Task {

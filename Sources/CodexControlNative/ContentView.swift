@@ -2017,7 +2017,6 @@ private struct RemoteControlSheet: View {
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
 
                     RemoteServerSettingsView()
-                    CloudCodexWatchSettingsView()
 
                     HStack(spacing: 10) {
                         Circle()
@@ -2029,145 +2028,169 @@ private struct RemoteControlSheet: View {
                         Spacer()
                     }
 
-                    if model.remoteControlEnabled, model.remoteCredentialIssue != nil {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("远程连接已暂停", systemImage: "lock.shield")
-                                .font(.subheadline.weight(.semibold))
-                            Text("启动和刷新不会反复弹出系统授权。需要远程控制时，点击下方按钮授权；取消后将继续保持暂停。本地会话不受影响。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Button("授权钥匙串并连接") { model.authorizeRemoteControl() }
-                        }
-                        .padding(16)
-                        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                    } else if model.remoteControlEnabled && model.isLoadingRemoteCredential {
-                        HStack(spacing: 10) {
-                            ProgressView().controlSize(.small)
-                            Text("正在准备安全连接，可继续使用本地会话。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } else if model.remoteControlEnabled && !model.remoteControlPaired && model.remoteServerConfiguration.mode == .custom {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("在自己的小程序中配对").font(.headline)
-                            Text("打开已接入当前后端的小程序，扫描下方设备二维码；也可以输入配对码。")
-                                .font(.caption).foregroundStyle(.secondary)
-                            if let payload = model.remotePairingQRCodePayload,
-                               let image = RemotePairingQRCode.image(payload: payload) {
-                                Image(nsImage: image).interpolation(.none).resizable()
-                                    .frame(width: 190, height: 190).padding(15)
-                                    .background(.white, in: RoundedRectangle(cornerRadius: 12))
-                                    .accessibilityLabel("自定义服务设备配对二维码")
-                                Text("配对码：\(model.remotePairingCode)").monospacedDigit().textSelection(.enabled)
-                            } else {
-                                Text("连接自定义后端后显示配对二维码。")
-                                    .font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("远程访问授权")
+                            .font(.headline)
+                        Text("按使用的客户端选择入口，无需依次绑定。Mac 需保持运行并开启远程连接。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("App／手表与硬件分别授权；下方账号绑定状态仅代表服务账号，不代表所有客户端的连接状态。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        CloudCodexWatchSettingsView()
+
+                        GroupBox {
+                            VStack(alignment: .leading, spacing: 10) {
+                                if !model.remoteControlEnabled {
+                                    Text("开启远程连接后，可查看或管理服务账号绑定。")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if model.remoteControlEnabled, model.remoteCredentialIssue != nil {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Label("远程连接已暂停", systemImage: "lock.shield")
+                                            .font(.subheadline.weight(.semibold))
+                                        Text("启动和刷新不会反复弹出系统授权。需要远程控制时，点击下方按钮授权；取消后将继续保持暂停。本地会话不受影响。")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Button("授权钥匙串并连接") { model.authorizeRemoteControl() }
+                                    }
+                                } else if model.remoteControlEnabled && model.isLoadingRemoteCredential {
+                                    HStack(spacing: 10) {
+                                        ProgressView().controlSize(.small)
+                                        Text("正在准备安全连接，可继续使用本地会话。")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                } else if model.remoteControlEnabled && !model.remoteControlPaired && model.remoteServerConfiguration.mode == .custom {
+                                    VStack(alignment: .leading, spacing: 12) {
+                                        Text("在自己的小程序中配对").font(.headline)
+                                        Text("打开已接入当前后端的小程序，扫描下方设备二维码；也可以输入配对码。")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                        if let payload = model.remotePairingQRCodePayload,
+                                           let image = RemotePairingQRCode.image(payload: payload) {
+                                            Image(nsImage: image).interpolation(.none).resizable()
+                                                .frame(width: 190, height: 190).padding(15)
+                                                .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                                                .accessibilityLabel("自定义服务设备配对二维码")
+                                            Text("配对码：\(model.remotePairingCode)").monospacedDigit().textSelection(.enabled)
+                                        } else {
+                                            Text("连接自定义后端后显示配对二维码。")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        HStack {
+                                            Text("二维码临近过期时会自动更新").font(.caption2).foregroundStyle(.secondary)
+                                            Spacer()
+                                            Button("刷新二维码") { model.resetRemotePairingCode() }.buttonStyle(.link)
+                                        }
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                } else if model.remoteControlEnabled && !model.remoteControlPaired {
+                                    VStack(alignment: .leading, spacing: 16) {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("绑定小程序账号")
+                                                .font(.system(size: 15, weight: .semibold))
+                                            Text("需要先进入 CloudCodex 小程序，再使用小程序内的扫一扫完成设备配对。")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        HStack(alignment: .top, spacing: 16) {
+                                            pairingStepCard(
+                                                number: 1,
+                                                title: "微信扫描小程序码",
+                                                detail: "先用微信扫描下方小程序码，打开 CloudCodex 小程序。"
+                                            ) {
+                                                if let image = Self.miniProgramCodeImage {
+                                                    Image(nsImage: image)
+                                                        .interpolation(.high)
+                                                        .resizable()
+                                                        .scaledToFit()
+                                                        .frame(width: 220, height: 220)
+                                                        .background(.white)
+                                                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                                        .overlay {
+                                                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                                                .stroke(.secondary.opacity(0.16))
+                                                        }
+                                                        .accessibilityLabel("CloudCodex 小程序码")
+                                                } else {
+                                                    Label("小程序码资源不可用", systemImage: "exclamationmark.triangle")
+                                                        .font(.caption)
+                                                        .foregroundStyle(.orange)
+                                                        .frame(width: 220, height: 220)
+                                                }
+                                            }
+
+                                            Image(systemName: "arrow.right")
+                                                .font(.system(size: 18, weight: .semibold))
+                                                .foregroundStyle(.secondary)
+                                                .frame(width: 24, height: 220)
+                                                .accessibilityHidden(true)
+
+                                            pairingStepCard(
+                                                number: 2,
+                                                title: "在小程序中扫码配对",
+                                                detail: "进入「设备管理」，点击「扫一扫配对」，再扫描下方二维码。"
+                                            ) {
+                                                if let payload = model.remotePairingQRCodePayload,
+                                                   let image = RemotePairingQRCode.image(payload: payload) {
+                                                    Image(nsImage: image)
+                                                        .interpolation(.none)
+                                                        .resizable()
+                                                        .frame(width: 190, height: 190)
+                                                        .padding(15)
+                                                        .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                                                        .accessibilityLabel("CloudCodex 设备配对二维码")
+                                                } else {
+                                                    ProgressView("正在生成配对二维码…")
+                                                        .controlSize(.small)
+                                                        .frame(width: 220, height: 220)
+                                                }
+                                            }
+                                        }
+
+                                        HStack {
+                                            Text("二维码临近过期时会自动更新")
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                            Spacer()
+                                            Button("刷新二维码") { model.resetRemotePairingCode() }
+                                                .buttonStyle(.link)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity)
+
+                                } else if model.remoteControlEnabled && model.remoteControlPaired {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Text("当前服务账号可通过小程序访问这台 Mac。解绑后，该账号将失去控制权限，并生成新的账号配对二维码，可由原账号或其他账号扫码绑定。")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        HStack {
+                                            Button("解绑账号并生成新二维码", role: .destructive) {
+                                                confirmingRemoteUnpair = true
+                                            }
+                                            .disabled(model.isRemoteUnpairing)
+                                        }
+                                    }
+                                }
                             }
-                            HStack {
-                                Text("二维码临近过期时会自动更新").font(.caption2).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Label("服务账号 / 小程序", systemImage: "person.crop.circle")
+                                    .font(.subheadline.weight(.semibold))
                                 Spacer()
-                                Button("刷新二维码") { model.resetRemotePairingCode() }.buttonStyle(.link)
-                            }
-                        }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                    } else if model.remoteControlEnabled && !model.remoteControlPaired {
-                        VStack(alignment: .leading, spacing: 16) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("首次配对指引")
-                                    .font(.system(size: 15, weight: .semibold))
-                                Text("需要先进入 CloudCodex 小程序，再使用小程序内的扫一扫完成设备配对。")
+                                Text(model.remoteControlEnabled ? (model.remoteControlPaired ? "已绑定账号" : "未绑定账号") : "远程连接已关闭")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-
-                            HStack(alignment: .top, spacing: 16) {
-                                pairingStepCard(
-                                    number: 1,
-                                    title: "微信扫描小程序码",
-                                    detail: "先用微信扫描下方小程序码，打开 CloudCodex 小程序。"
-                                ) {
-                                    if let image = Self.miniProgramCodeImage {
-                                        Image(nsImage: image)
-                                            .interpolation(.high)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(width: 220, height: 220)
-                                            .background(.white)
-                                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                                            .overlay {
-                                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                                    .stroke(.secondary.opacity(0.16))
-                                            }
-                                            .accessibilityLabel("CloudCodex 小程序码")
-                                    } else {
-                                        Label("小程序码资源不可用", systemImage: "exclamationmark.triangle")
-                                            .font(.caption)
-                                            .foregroundStyle(.orange)
-                                            .frame(width: 220, height: 220)
-                                    }
-                                }
-
-                                Image(systemName: "arrow.right")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 24, height: 220)
-                                    .accessibilityHidden(true)
-
-                                pairingStepCard(
-                                    number: 2,
-                                    title: "在小程序中扫码配对",
-                                    detail: "进入「设备管理」，点击「扫一扫配对」，再扫描下方二维码。"
-                                ) {
-                                    if let payload = model.remotePairingQRCodePayload,
-                                       let image = RemotePairingQRCode.image(payload: payload) {
-                                        Image(nsImage: image)
-                                            .interpolation(.none)
-                                            .resizable()
-                                            .frame(width: 190, height: 190)
-                                            .padding(15)
-                                            .background(.white, in: RoundedRectangle(cornerRadius: 12))
-                                            .accessibilityLabel("CloudCodex 设备配对二维码")
-                                    } else {
-                                        ProgressView("正在生成配对二维码…")
-                                            .controlSize(.small)
-                                            .frame(width: 220, height: 220)
-                                    }
-                                }
-                            }
-
-                            HStack {
-                                Text("二维码临近过期时会自动更新")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                Spacer()
-                                Button("刷新二维码") { model.resetRemotePairingCode() }
-                                    .buttonStyle(.link)
-                            }
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(18)
-                        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.blue.opacity(0.22)))
-                    } else if model.remoteControlEnabled && model.remoteControlPaired {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("这台 Mac 已完成配对", systemImage: "checkmark.circle.fill")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.green)
-                            Text("解除后，当前服务绑定的账号将不能再控制这台 Mac。CloudCodex 会立即生成新的二维码，供原账号或其他账号重新绑定。")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            HStack {
-                                Spacer()
-                                Button("解绑并重新绑定", role: .destructive) {
-                                    confirmingRemoteUnpair = true
-                                }
-                                .disabled(model.isRemoteUnpairing)
-                            }
-                        }
-                        .padding(16)
-                        .background(.green.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
-                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.green.opacity(0.18)))
                     }
 
                     VStack(alignment: .leading, spacing: 11) {
@@ -2194,11 +2217,11 @@ private struct RemoteControlSheet: View {
         }
         .frame(width: 760, height: 680)
         .confirmationDialog(
-            "解除这台 Mac 的远程控制配对？",
+            "解除服务账号与这台 Mac 的绑定？",
             isPresented: $confirmingRemoteUnpair,
             titleVisibility: .visible
         ) {
-            Button("解绑并生成新二维码", role: .destructive) {
+            Button("解绑账号并生成新二维码", role: .destructive) {
                 model.unpairAndPrepareRemoteRebinding()
             }
             Button("取消", role: .cancel) {}
