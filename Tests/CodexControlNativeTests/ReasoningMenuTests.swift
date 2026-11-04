@@ -56,28 +56,28 @@ final class ReasoningMenuTests: XCTestCase {
         ])!
     }
 
-    func testActualComposerMenuHidesMaxWithoutRemovingAPISupport() {
+    func testActualComposerMenuIncludesMaxWhenSupported() {
         let model = AppModel()
         let item = option(["low", "medium", "high", "xhigh", "max", "ultra"])
         model.modelOptions = [item]
         model.selectModel(item.id)
-        XCTAssertEqual(model.availableEfforts.map(ReasoningEffortLabel.name), ["轻度", "中", "高", "极高", "Ultra"])
-        XCTAssertFalse(model.availableEfforts.contains("max"))
+        XCTAssertEqual(model.availableEfforts.map(ReasoningEffortLabel.name), ["轻度", "中", "高", "极高", "最高", "Ultra"])
+        XCTAssertTrue(model.availableEfforts.contains("max"))
         XCTAssertTrue(item.supportedEfforts.contains("max"))
     }
 
     func testMenuDoesNotInventUltraForModelsWithoutSupport() {
         let item = option(["low", "medium", "high", "xhigh", "max"])
-        XCTAssertEqual(item.composerEfforts, ["low", "medium", "high", "xhigh"])
+        XCTAssertEqual(item.composerEfforts, ["low", "medium", "high", "xhigh", "max"])
     }
 
-    func testHiddenDefaultOrPriorSelectionCannotLeakIntoComposer() {
+    func testMaxDefaultAndPriorSelectionRemainSelectable() {
         let model = AppModel()
         let item = option(["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "max")
         model.modelOptions = [item]
         model.selectedEffort = "max"
         model.selectModel(item.id, preferredEffort: "max")
-        XCTAssertEqual(model.selectedEffort, "medium")
+        XCTAssertEqual(model.selectedEffort, "max")
         XCTAssertNotEqual(model.selectedEffort, "ultra")
     }
 
@@ -98,8 +98,9 @@ final class ReasoningMenuTests: XCTestCase {
     }
 
     func testFallbackIsAlwaysVisibleOrNil() {
-        XCTAssertEqual(option(["high", "xhigh", "max"], defaultEffort: "max").defaultComposerEffort, "high")
-        XCTAssertNil(option(["max"], defaultEffort: "max").defaultComposerEffort)
+        XCTAssertEqual(option(["high", "xhigh", "max"], defaultEffort: "max").defaultComposerEffort, "max")
+        XCTAssertEqual(option(["max"], defaultEffort: "max").defaultComposerEffort, "max")
+        XCTAssertNil(option(["none", "minimal"], defaultEffort: "none").defaultComposerEffort)
         XCTAssertEqual(option(["none", "minimal", "medium", "persistent"]).composerEfforts, ["medium", "persistent"])
     }
 

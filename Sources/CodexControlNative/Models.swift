@@ -301,7 +301,7 @@ struct CodexModelOption: Identifiable, Hashable {
     /// Keep supportedEfforts intact for protocol validation and historical turns.
     var composerEfforts: [String] {
         if id.hasPrefix("provider:") { return supportedEfforts }
-        let visible: Set<String> = ["low", "medium", "high", "xhigh", "ultra", "persistent"]
+        let visible: Set<String> = ["low", "medium", "high", "xhigh", "max", "ultra", "persistent"]
         return supportedEfforts.filter { visible.contains($0) }
     }
 

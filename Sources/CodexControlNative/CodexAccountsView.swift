@@ -114,6 +114,25 @@ struct CodexAccountsSheet: View {
         }
     }
 
+    @ViewBuilder
+    private func accountQuota(_ overview: AccountOverview, minutes: Int, title: String, now: Date) -> some View {
+        if let window = overview.primaryBucket?.windows.first(where: { $0.windowDurationMins == minutes }) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(title)剩余 \(AccountOverview.remaining(window))")
+                if let timestamp = window.resetsAt, timestamp.isFinite {
+                    Text("恢复时间：\(Date(timeIntervalSince1970: timestamp).formatted(date: .numeric, time: .shortened))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let countdown = AccountOverview.quotaResetCountdown(resetsAt: timestamp, now: now) {
+                        Text(countdown).font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("恢复时间：未提供").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func card(_ account: CodexSavedAccount) -> some View {
         let current = account.id == store.library.activeID
         let busy = store.busyID != nil || model.isSwitchingModelProvider || pendingSwitchID != nil
@@ -132,12 +151,14 @@ struct CodexAccountsSheet: View {
                 if store.busyID == account.id { ProgressView().controlSize(.small) }
             }
             if let overview = store.overviews[account.id] {
-                HStack(spacing: 20) {
-                    if let remaining = overview.compactRemaining(minutes: 300) { Text("5小时剩余 \(remaining)") }
-                    if let remaining = overview.compactRemaining(minutes: 10_080) { Text("每周剩余 \(remaining)") }
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    HStack(alignment: .top, spacing: 20) {
+                        accountQuota(overview, minutes: 300, title: "5小时", now: context.date)
+                        accountQuota(overview, minutes: 10_080, title: "每周", now: context.date)
+                    }
+                    .font(.callout).monospacedDigit()
                 }
-                .font(.callout).monospacedDigit()
-                Text("更新于 \(Date(timeIntervalSince1970: overview.usage.capturedAt).formatted(date: .abbreviated, time: .shortened))")
+                Text("更新于 \(Date(timeIntervalSince1970: overview.usage.capturedAt).formatted(date: .abbreviated, time: .shortened)) · 时间按本机时区显示")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let issue = store.issues[account.id] { Text(issue).font(.callout).foregroundStyle(.orange) }
