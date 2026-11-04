@@ -132,6 +132,17 @@ final class AppServerClient {
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = executable
+        var sharedToolArguments: [String] = []
+        if usesManagedAccount, let accountHome = codexHomeOverride {
+            let sourceHome = sharedConversationHome ?? CodexUsageTierStore.home()
+            if sourceHome.resolvingSymlinksInPath() != accountHome.resolvingSymlinksInPath() {
+                // Let Codex parse TOML; never copy config files or login credentials.
+                let sourceConfig = try await readToolConfiguration(home: sourceHome, executable: executable)
+                let accountConfig = try await readToolConfiguration(home: accountHome, executable: executable)
+                sharedToolArguments = try CodexSharedTools.arguments(source: sourceConfig, account: accountConfig)
+                try CodexSharedTools.prepareResources(source: sourceHome, account: accountHome)
+            }
+        }
         let provider = try customModelProvider.validated()
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: ModelProviderConfiguration.environmentKey)
@@ -151,7 +162,7 @@ final class AppServerClient {
             environment.removeValue(forKey: "CODEX_API_KEY")
         }
         process.environment = environment
-        process.arguments = ["app-server", "--stdio"] + (try provider.launchArguments(models: customModelOptions.map(\.model), options: customModelOptions))
+        process.arguments = ["app-server", "--stdio"] + sharedToolArguments + (try provider.launchArguments(models: customModelOptions.map(\.model), options: customModelOptions))
         // Default mode otherwise cannot call request_user_input, leaving only
         // ordinary text choices after the turn ends. Route mid-turn questions
         // through the existing bidirectional request/answer panel instead.
@@ -235,6 +246,15 @@ final class AppServerClient {
                     "chatgptAccountId": access.chatgptAccountId, "chatgptPlanType": access.chatgptPlanType])
             } catch { shutdown(); throw error }
         }
+    }
+
+    private func readToolConfiguration(home: URL, executable: URL) async throws -> JSON {
+        // No managed-account flag here: this parser connection must not inherit recursively.
+        let reader = AppServerClient(codexHomeOverride: home, executableOverride: executable)
+        defer { reader.shutdown() }
+        try await reader.start()
+        let response = try await reader.request("config/read", params: ["includeLayers": false])
+        return response["config"] as? JSON ?? [:]
     }
 
     /// Stop only this client's subprocess and complete its pending reads.
@@ -340,14 +360,14 @@ final class AppServerClient {
     }
 
     func readRemoteUsage() async throws -> RemoteUsageSnapshot {
-        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader(environment: accountEnvironment).read()
+        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader(environment: accountEnvironment, usesKeychain: usesManagedAccount).read()
         return RemoteUsageSnapshot.parse(
             try await request("account/rateLimits/read", params: [:]),
             subscriptionPeriodEnd: subscriptionPeriodEnd
         )
     }
     func readAccountOverview(timeoutSeconds: UInt64 = 12) async throws -> AccountOverview {
-        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader(environment: accountEnvironment).read()
+        let subscriptionPeriodEnd = CodexSubscriptionPeriodReader(environment: accountEnvironment, usesKeychain: usesManagedAccount).read()
         return AccountOverview.parse(
             try await request("account/rateLimits/read", params: [:], timeoutSeconds: timeoutSeconds),
             subscriptionPeriodEnd: subscriptionPeriodEnd
@@ -507,10 +527,15 @@ final class AppServerClient {
                 "forceReload": forceReload
             ]
         )
-        return CodexPersonalSkill.parseListResponse(result, personalSkillRoots: [
+        var roots = [
             CodexUsageTierStore.home(codexHomeOverride).appendingPathComponent("skills").path,
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".agents/skills").path
-        ])
+        ]
+        if usesManagedAccount {
+            // Codex resolves linked skills to their source paths in skills/list.
+            roots.append((sharedConversationHome ?? CodexUsageTierStore.home()).appendingPathComponent("skills").path)
+        }
+        return CodexPersonalSkill.parseListResponse(result, personalSkillRoots: roots)
     }
 
     func listPermissionProfiles(cwd: String?) async throws -> [PermissionProfileOption] {

@@ -1,4 +1,7 @@
 import Foundation
+import CryptoKit
+import Security
+import LocalAuthentication
 
 /// Reads only the subscription-period claim from the local Codex OAuth token.
 /// The token and the rest of the auth payload never leave this process.
@@ -9,18 +12,31 @@ struct CodexSubscriptionPeriodReader {
     let environment: [String: String]
     let homeDirectory: URL
     let loadData: (URL) -> Data?
+    let usesKeychain: Bool
+    let loadKeychain: (URL) -> Data?
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-        loadData: @escaping (URL) -> Data? = { try? Data(contentsOf: $0) }
+        loadData: @escaping (URL) -> Data? = { try? Data(contentsOf: $0) },
+        usesKeychain: Bool = false,
+        loadKeychain: @escaping (URL) -> Data? = Self.keychainData
     ) {
         self.environment = environment
         self.homeDirectory = homeDirectory
         self.loadData = loadData
+        self.usesKeychain = usesKeychain
+        self.loadKeychain = loadKeychain
     }
 
     func read() -> Date? {
+        if usesKeychain {
+            // Managed accounts explicitly use keyring storage. Never fall back to
+            // another account or an obsolete auth.json when keyring data is absent.
+            guard let path = authPaths().first,
+                  let data = loadKeychain(path.deletingLastPathComponent()) else { return nil }
+            return Self.subscriptionPeriodEnd(authData: data)
+        }
         for path in authPaths() {
             guard let data = loadData(path), let date = Self.subscriptionPeriodEnd(authData: data) else {
                 continue
@@ -39,6 +55,21 @@ struct CodexSubscriptionPeriodReader {
             homeDirectory.appendingPathComponent(".config/codex/auth.json"),
             homeDirectory.appendingPathComponent(".codex/auth.json")
         ]
+    }
+
+    static func keychainData(home: URL) -> Data? {
+        let canonical = home.resolvingSymlinksInPath().path
+        let hash = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword, kSecAttrService: "Codex Auth",
+            kSecAttrAccount: "cli|\(hash.prefix(16))", kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne, kSecUseAuthenticationContext: context
+        ]
+        var value: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &value) == errSecSuccess else { return nil }
+        return value as? Data
     }
 
     static func subscriptionPeriodEnd(authData: Data) -> Date? {

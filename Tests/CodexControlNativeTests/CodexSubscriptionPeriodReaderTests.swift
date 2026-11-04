@@ -39,6 +39,30 @@ final class CodexSubscriptionPeriodReaderTests: XCTestCase {
         XCTAssertEqual(reader.authPaths().map(\.path), ["/tmp/cloudcodex-test-home/auth.json"])
     }
 
+    func testManagedAccountReadsOnlyItsKeychain() throws {
+        let token = makeJWT(claimValue: 1_900_000_000)
+        let data = try JSONSerialization.data(withJSONObject: ["tokens": ["id_token": token]])
+        let reader = CodexSubscriptionPeriodReader(
+            environment: ["CODEX_HOME": "/tmp/current-account"],
+            loadData: { _ in XCTFail("Must not read file credentials"); return nil },
+            usesKeychain: true,
+            loadKeychain: { home in
+                XCTAssertEqual(home.path, "/tmp/current-account")
+                return data
+            }
+        )
+        XCTAssertEqual(reader.read()?.timeIntervalSince1970, 1_900_000_000)
+    }
+
+    func testUnavailableKeychainDoesNotFallBackToStaleFile() {
+        let reader = CodexSubscriptionPeriodReader(
+            environment: ["CODEX_HOME": "/tmp/current-account"],
+            loadData: { _ in XCTFail("Must not use stale file credentials"); return nil },
+            usesKeychain: true, loadKeychain: { _ in nil }
+        )
+        XCTAssertNil(reader.read())
+    }
+
     private func makeJWT(claimValue: Any) -> String {
         makeJWT(payload: [
             "https://api.openai.com/auth": [

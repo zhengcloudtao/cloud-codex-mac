@@ -83,6 +83,16 @@ final class CodexPersonalSkillsTests: XCTestCase {
         )
     }
 
+    func testPersonalRootIsRetainedWhenCodexReportsRepoScope() {
+        let root = "/Users/test/.codex/skills"
+        let response: [String: Any] = ["data": [["skills": [
+            skill(name: "personal", description: "Personal", path: root + "/personal/SKILL.md", scope: "repo"),
+            skill(name: "project", description: "Project", path: "/tmp/project/.codex/skills/project/SKILL.md", scope: "repo"),
+            skill(name: "system", description: "System", path: root + "/.system/system/SKILL.md", scope: "repo")
+        ]]]]
+        XCTAssertEqual(CodexPersonalSkill.parseListResponse(response, personalSkillRoots: [root]).map(\.name), ["personal"])
+    }
+
     private func skill(
         name: String,
         description: String,

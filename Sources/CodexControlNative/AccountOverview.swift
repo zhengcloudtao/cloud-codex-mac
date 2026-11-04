@@ -373,7 +373,15 @@ struct AccountOverviewView: View {
                 if let account = model.accountOverview {
                     TimelineView(.periodic(from: .now, by: 60)) { context in
                         VStack(alignment: .leading, spacing: 12) {
-                                Text("订阅套餐：\(account.planDisplayName)").fontWeight(.semibold)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("订阅套餐：\(account.planDisplayName)").fontWeight(.semibold)
+                                    Text("套餐到期时间：\(dateLabel(account.subscriptionPeriodEnd?.timeIntervalSince1970))")
+                                        .foregroundStyle(.secondary)
+                                    if account.subscriptionPeriodEnd == nil {
+                                        Text("当前账号未提供套餐到期时间")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
                                 Divider()
                                 if let credits = account.creditBalance {
                                     VStack(alignment: .leading, spacing: 4) {

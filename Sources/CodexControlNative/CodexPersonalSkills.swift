@@ -28,7 +28,10 @@ struct CodexPersonalSkill: Identifiable, Equatable {
     }
 
     init?(json: [String: Any], personalSkillRoots: [String] = Self.defaultPersonalSkillRoots) {
-        guard json["scope"] as? String == "user",
+        // Codex may classify home/.codex/skills as repo-scoped when the
+        // discovery cwd is the home directory. Verified personal roots, not
+        // that discovery label, determine whether a skill belongs in this UI.
+        guard ["user", "repo"].contains(json["scope"] as? String ?? ""),
               let name = json["name"] as? String,
               let description = json["description"] as? String,
               let path = json["path"] as? String,
