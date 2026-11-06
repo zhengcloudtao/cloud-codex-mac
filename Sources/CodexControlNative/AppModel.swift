@@ -3931,8 +3931,14 @@ final class AppModel: ObservableObject {
                             guard self.makeRemoteHeartbeat(ready: true).workspaces.contains(where: { $0.path == draft.workspace }) else {
                                 throw RemoteControlError.server("工作区授权已撤销，请重新选择")
                             }
+                            if draft.purpose == "speech" {
+                                let audio = try await RemoteVoiceSpeaker().synthesize(draft.transcript ?? "", voiceID: draft.voiceId)
+                                guard self.remoteControlEnabled, self.remoteControlAPI === api, !Task.isCancelled else { return }
+                                try await api.finishSpeech(draft.id, audio: audio)
+                                return
+                            }
                             let audio = try await api.voiceAudio(draft.id)
-                            transcript = try await RemoteVoiceTranscriber().transcribe(audio)
+                            transcript = try await RemoteVoiceTranscriber().transcribe(audio, wakeWord: draft.wakeWord)
                         } catch is CancellationError { return }
                         catch { message = error.localizedDescription }
                         guard self.remoteControlEnabled, self.remoteControlAPI === api, !Task.isCancelled else { return }
@@ -4307,7 +4313,8 @@ final class AppModel: ObservableObject {
             defaultSpeed: isFastModeEnabled ? "fast" : "standard",
             systemMetrics: remoteControlPaired && systemMetrics.snapshot.hasValues ? systemMetrics.snapshot : nil,
             connectionHealth: remoteControlPaired ? connectionHealth.remoteSnapshot : nil,
-            watchSnapshot: makeWatchSnapshot(snapshots)
+            watchSnapshot: makeWatchSnapshot(snapshots),
+            speechVoices: RemoteSpeechVoiceCatalog.available()
         )
     }
 

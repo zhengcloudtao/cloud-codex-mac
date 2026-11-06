@@ -355,7 +355,7 @@ struct ContentView: View {
     @ObservedObject private var updateController: CloudCodexUpdateController
     @Environment(\.openWindow) private var openWindow
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    @State private var filePreview: LocalFilePreviewTarget?
+    @State private var filePreview: LocalFilePreviewWindowController?
     @State private var detailLayoutRevision = 0
     @State private var showingFavoriteThreads = false
     @State private var showingUnreadThreads = false
@@ -492,10 +492,10 @@ struct ContentView: View {
             guard let target = LocalFilePreviewTarget.resolve(url, cwd: model.selectedThread?.cwd ?? model.selectedFolder) else {
                 return .systemAction
             }
-            filePreview = target
+            if filePreview == nil { filePreview = LocalFilePreviewWindowController() }
+            filePreview?.show(target)
             return .handled
         })
-        .sheet(item: $filePreview) { LocalFilePreviewSheet(target: $0) }
         .sheet(isPresented: $model.showingAppearanceSettings) { appearanceSettingsSheet }
         .sheet(isPresented: $model.showingCategoryManager) { categoryManagerSheet }
         .sheet(isPresented: $model.showingThreadNameEditor) { threadNameEditorSheet }

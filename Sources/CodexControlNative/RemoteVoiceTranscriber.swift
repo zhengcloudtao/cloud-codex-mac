@@ -8,7 +8,7 @@ final class RemoteVoiceTranscriber {
     private var timeout: Task<Void, Never>?
     private var continuation: CheckedContinuation<String, Error>?
 
-    func transcribe(_ audio: Data) async throws -> String {
+    func transcribe(_ audio: Data, wakeWord: String? = nil) async throws -> String {
         guard Self.isSupportedRecording(audio) else {
             throw RemoteControlError.server("[VOICE_FORMAT] 录音格式或大小无效")
         }
@@ -32,7 +32,7 @@ final class RemoteVoiceTranscriber {
         request.shouldReportPartialResults = false
         request.addsPunctuation = true
         request.taskHint = .dictation
-        request.contextualStrings = ["CloudCodex", "工作区", "会话", "小程序", "Git", "ESP"]
+        request.contextualStrings = (wakeWord.map { [$0] } ?? []) + ["CloudCodex", "工作区", "会话", "小程序", "Git", "ESP"]
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { callback in

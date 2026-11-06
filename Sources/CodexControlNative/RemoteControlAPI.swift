@@ -45,6 +45,8 @@ struct RemoteHeartbeatBody: Codable, Equatable {
     var supportsFavorites: Bool = true
     var supportsFiles: Bool = true
     var supportsVoice: Bool = true
+    var supportsCodexBot: Bool = true
+    var speechVoices: [RemoteSpeechVoice] = []
 }
 
 struct RemoteTask: Codable, Equatable {
@@ -435,6 +437,10 @@ extension RemoteControlAPI {
 }
 
 struct RemoteVoiceDraft: Decodable {
+    let voiceId: String?
+    let purpose: String?
+    let wakeWord: String?
+    let transcript: String?
     let id: String
     let workspace: String
     let threadId: String
@@ -455,5 +461,14 @@ extension RemoteControlAPI {
             bodyData: JSONSerialization.data(withJSONObject: ["transcript": transcript, "error": error]))
         let response = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
         guard response.status == 0 else { throw RemoteControlError.server(response.msg) }
+    }
+}
+
+extension RemoteControlAPI {
+    func finishSpeech(_ id: String, audio: Data) async throws {
+        guard UUID(uuidString: id) != nil, RemoteVoiceTranscriber.isSupportedRecording(audio) else { throw RemoteControlError.invalidServerResponse }
+        let data = try await perform(path: "/api/cloud-codex/agent/voice/\(id)/audio", method: "POST", bodyData: audio, contentType: "audio/wav")
+        let result = try JSONDecoder().decode(RemoteStatusEnvelope.self, from: data)
+        guard result.status == 0 else { throw RemoteControlError.server(result.msg) }
     }
 }
